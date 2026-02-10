@@ -5,22 +5,21 @@
 /**
  * Generate a URL to view a market on its platform
  */
-export function getMarketUrl(platform: string, ticker: string): string {
+export function getMarketUrl(platform: string, ticker: string, eventSlug?: string): string {
   const platformLower = platform.toLowerCase()
 
   if (platformLower === 'kalshi') {
     // Kalshi ticker format: KXHIGHNYC-26FEB10-T45
-    // URL format: https://kalshi.com/markets/kxhighnyc
-    const baseTickerMatch = ticker.match(/^([A-Z]+)/i)
-    if (baseTickerMatch) {
-      const baseTicker = baseTickerMatch[1].toLowerCase()
-      return `https://kalshi.com/markets/${baseTicker}`
-    }
+    // Use full ticker, lowercased for URL
     return `https://kalshi.com/markets/${ticker.toLowerCase()}`
   }
 
   if (platformLower === 'polymarket') {
-    // Polymarket uses event slugs
+    // Polymarket uses event slugs - prefer slug over market ID
+    if (eventSlug) {
+      return `https://polymarket.com/event/${eventSlug}`
+    }
+    // Fallback to ticker (market ID) if no slug available
     return `https://polymarket.com/event/${ticker}`
   }
 
@@ -66,6 +65,42 @@ export const platformStyles = {
     name: 'Polymarket'
   }
 } as const
+
+/**
+ * Market category types
+ */
+export type MarketCategory = 'weather' | 'crypto' | 'politics' | 'economics' | 'other'
+
+/**
+ * Get category-specific styling
+ */
+export const categoryStyles: Record<MarketCategory, { badge: string; icon: string; name: string }> = {
+  weather: {
+    badge: 'bg-sky-500/10 text-sky-400 border-sky-500/20',
+    icon: '🌡️',
+    name: 'Weather'
+  },
+  crypto: {
+    badge: 'bg-orange-500/10 text-orange-400 border-orange-500/20',
+    icon: '₿',
+    name: 'Crypto'
+  },
+  politics: {
+    badge: 'bg-red-500/10 text-red-400 border-red-500/20',
+    icon: '🗳️',
+    name: 'Politics'
+  },
+  economics: {
+    badge: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20',
+    icon: '📊',
+    name: 'Economics'
+  },
+  other: {
+    badge: 'bg-neutral-500/10 text-neutral-400 border-neutral-500/20',
+    icon: '?',
+    name: 'Other'
+  }
+}
 
 /**
  * Get confidence-based color

@@ -1,6 +1,7 @@
 """Market data fetchers for Kalshi and Polymarket."""
 import httpx
 import re
+import json
 from datetime import datetime
 from typing import Optional, List, Dict
 from dataclasses import dataclass
@@ -24,6 +25,9 @@ class MarketData:
     # Parsed from title
     threshold: Optional[float] = None
     direction: Optional[str] = None  # "above" or "below"
+
+    # For Polymarket URL generation
+    event_slug: Optional[str] = None
 
 
 def parse_weather_market(title: str) -> Dict:
@@ -103,6 +107,7 @@ async def fetch_polymarket_weather_markets() -> List[MarketData]:
             for event in events:
                 title = event.get("title", "")
                 title_lower = title.lower()
+                event_slug = event.get("slug", "")  # Capture event slug for URLs
 
                 # Check if it's a weather/temperature market
                 is_weather = any(kw in title_lower for kw in [
@@ -118,16 +123,17 @@ async def fetch_polymarket_weather_markets() -> List[MarketData]:
                 for market in event_markets:
                     parsed = parse_weather_market(market.get("question", title))
 
-                    # Parse prices
+                    # Parse prices safely (no eval!)
                     outcome_prices = market.get("outcomePrices", "")
                     yes_price = 0.5
                     if outcome_prices:
                         try:
-                            prices = eval(outcome_prices) if isinstance(outcome_prices, str) else outcome_prices
+                            # Use json.loads instead of dangerous eval()
+                            prices = json.loads(outcome_prices) if isinstance(outcome_prices, str) else outcome_prices
                             if isinstance(prices, list) and len(prices) >= 1:
                                 yes_price = float(prices[0])
-                        except:
-                            pass
+                        except (json.JSONDecodeError, ValueError, TypeError) as e:
+                            print(f"Price parse error for {market.get('id', 'unknown')}: {e}")
 
                     markets.append(MarketData(
                         platform="polymarket",
@@ -140,7 +146,8 @@ async def fetch_polymarket_weather_markets() -> List[MarketData]:
                         volume=float(market.get("volume", 0) or 0),
                         settlement_time=None,  # Parse from endDate if available
                         threshold=parsed.get("threshold"),
-                        direction=parsed.get("direction")
+                        direction=parsed.get("direction"),
+                        event_slug=event_slug  # For URL generation
                     ))
 
         except Exception as e:
