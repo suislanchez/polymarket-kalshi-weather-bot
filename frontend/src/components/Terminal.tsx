@@ -20,10 +20,10 @@ interface Props {
   onScan?: () => void
 }
 
-const API_URL = 'http://localhost:8000'
-const WS_URL = 'ws://localhost:8000/ws/events'
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+const WS_URL = API_URL.replace(/^http/, 'ws') + '/ws/events'
 
-export function Terminal({ isRunning, lastRun, stats, onStart, onStop, onScan }: Props) {
+export function Terminal({ isRunning, lastRun, onStart, onStop, onScan }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const [logs, setLogs] = useState<LogEntry[]>([])
   const [cursorVisible, setCursorVisible] = useState(true)

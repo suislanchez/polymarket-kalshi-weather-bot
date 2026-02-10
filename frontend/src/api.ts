@@ -1,8 +1,10 @@
 import axios from 'axios'
 import type { DashboardData, Signal, CityWeather, Trade, BotStats } from './types'
 
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+
 const api = axios.create({
-  baseURL: 'http://localhost:8000/api',
+  baseURL: `${API_BASE}/api`,
 })
 
 export async function fetchDashboard(): Promise<DashboardData> {

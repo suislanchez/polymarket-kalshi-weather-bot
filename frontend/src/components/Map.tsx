@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { MapContainer, TileLayer, CircleMarker, Popup, useMap } from 'react-leaflet'
 import type { CityWeather } from '../types'
 import 'leaflet/dist/leaflet.css'
@@ -21,7 +21,7 @@ function MapController({ cities }: { cities: CityWeather[] }) {
 }
 
 export function Map({ cities }: Props) {
-  const [selectedCity, setSelectedCity] = useState<CityWeather | null>(null)
+  const [, setSelectedCity] = useState<CityWeather | null>(null)
 
   const getMarkerColor = (confidence: number): string => {
     if (confidence >= 0.7) return '#22c55e'
