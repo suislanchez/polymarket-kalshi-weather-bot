@@ -294,3 +294,57 @@ input:focus {
   background: linear-gradient(90deg, transparent, rgba(34, 197, 94, 0.5), transparent);
   animation: scan 2s linear infinite;
 }
+
+/* Globe city markers */
+.city-marker {
+  position: relative;
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.marker-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  animation: marker-pulse 2s ease-in-out infinite;
+}
+
+@keyframes marker-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.2); opacity: 0.7; }
+}
+
+.marker-label {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  background: rgba(0, 0, 0, 0.85);
+  padding: 4px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  white-space: nowrap;
+}
+
+.marker-name {
+  font-size: 10px;
+  font-weight: 500;
+  color: #a1a1aa;
+  text-transform: capitalize;
+}
+
+.marker-temp {
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Select dropdown styles */
+select {
+  cursor: pointer;
+}
+
+select option {
+  background: #0a0a0a;
+  color: #e5e5e5;
+}
