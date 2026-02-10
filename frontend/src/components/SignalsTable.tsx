@@ -1,4 +1,7 @@
+import { ExternalLink, ArrowUpDown, ArrowUp, ArrowDown } from 'lucide-react'
+import { useState, useMemo } from 'react'
 import type { Signal } from '../types'
+import { getMarketUrl, platformStyles } from '../utils'
 
 interface Props {
   signals: Signal[]
@@ -6,11 +9,65 @@ interface Props {
   isSimulating: boolean
 }
 
+type SortKey = 'edge' | 'model_probability' | 'suggested_size' | 'platform'
+type SortDir = 'asc' | 'desc'
+
 export function SignalsTable({ signals, onSimulateTrade, isSimulating }: Props) {
+  const [sortKey, setSortKey] = useState<SortKey>('edge')
+  const [sortDir, setSortDir] = useState<SortDir>('desc')
+
+  const handleSort = (key: SortKey) => {
+    if (sortKey === key) {
+      setSortDir(sortDir === 'asc' ? 'desc' : 'asc')
+    } else {
+      setSortKey(key)
+      setSortDir('desc')
+    }
+  }
+
+  const sortedSignals = useMemo(() => {
+    return [...signals].sort((a, b) => {
+      let aVal: number | string, bVal: number | string
+      switch (sortKey) {
+        case 'edge':
+          aVal = Math.abs(a.edge)
+          bVal = Math.abs(b.edge)
+          break
+        case 'model_probability':
+          aVal = a.model_probability
+          bVal = b.model_probability
+          break
+        case 'suggested_size':
+          aVal = a.suggested_size
+          bVal = b.suggested_size
+          break
+        case 'platform':
+          aVal = a.platform
+          bVal = b.platform
+          break
+        default:
+          return 0
+      }
+      if (typeof aVal === 'string') {
+        return sortDir === 'asc'
+          ? aVal.localeCompare(bVal as string)
+          : (bVal as string).localeCompare(aVal)
+      }
+      return sortDir === 'asc' ? aVal - (bVal as number) : (bVal as number) - aVal
+    })
+  }, [signals, sortKey, sortDir])
+
+  const SortIcon = ({ column }: { column: SortKey }) => {
+    if (sortKey !== column) return <ArrowUpDown className="w-3 h-3 text-neutral-600" />
+    return sortDir === 'asc'
+      ? <ArrowUp className="w-3 h-3 text-green-500" />
+      : <ArrowDown className="w-3 h-3 text-green-500" />
+  }
+
   if (signals.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center py-12 text-neutral-600">
-        <div className="text-4xl mb-4 opacity-30">⚡</div>
+        <div className="text-4xl mb-4 opacity-30">---</div>
         <p className="text-sm">No actionable signals</p>
         <p className="text-xs mt-1">Signals appear when edge exceeds 8%</p>
       </div>
@@ -22,38 +79,78 @@ export function SignalsTable({ signals, onSimulateTrade, isSimulating }: Props) 
       <table className="w-full">
         <thead>
           <tr className="text-neutral-600 text-left text-xs border-b border-neutral-800">
-            <th className="py-3 px-2 font-medium">Market</th>
+            <th
+              className="py-3 px-2 font-medium cursor-pointer hover:text-neutral-400 transition-colors"
+              onClick={() => handleSort('platform')}
+            >
+              <div className="flex items-center gap-1">
+                Market <SortIcon column="platform" />
+              </div>
+            </th>
             <th className="py-3 px-2 font-medium text-center">Direction</th>
-            <th className="py-3 px-2 font-medium text-right">Edge</th>
-            <th className="py-3 px-2 font-medium text-right">Model</th>
+            <th
+              className="py-3 px-2 font-medium text-right cursor-pointer hover:text-neutral-400 transition-colors"
+              onClick={() => handleSort('edge')}
+            >
+              <div className="flex items-center justify-end gap-1">
+                Edge <SortIcon column="edge" />
+              </div>
+            </th>
+            <th
+              className="py-3 px-2 font-medium text-right cursor-pointer hover:text-neutral-400 transition-colors"
+              onClick={() => handleSort('model_probability')}
+            >
+              <div className="flex items-center justify-end gap-1">
+                Model <SortIcon column="model_probability" />
+              </div>
+            </th>
             <th className="py-3 px-2 font-medium text-right">Market</th>
-            <th className="py-3 px-2 font-medium text-right">Size</th>
+            <th
+              className="py-3 px-2 font-medium text-right cursor-pointer hover:text-neutral-400 transition-colors"
+              onClick={() => handleSort('suggested_size')}
+            >
+              <div className="flex items-center justify-end gap-1">
+                Size <SortIcon column="suggested_size" />
+              </div>
+            </th>
             <th className="py-3 px-2 font-medium text-right">Action</th>
           </tr>
         </thead>
         <tbody>
-          {signals.map((signal) => {
+          {sortedSignals.map((signal) => {
             const edgePercent = Math.abs(signal.edge * 100)
+            const platformKey = signal.platform.toLowerCase() as keyof typeof platformStyles
+            const style = platformStyles[platformKey] || platformStyles.kalshi
+            const marketUrl = getMarketUrl(signal.platform, signal.market_ticker)
+
             return (
               <tr
                 key={signal.market_ticker}
                 className="border-b border-neutral-800 hover:bg-neutral-900/50 transition-colors"
               >
                 <td className="py-3 px-2">
-                  <div className="max-w-[200px]">
+                  <div className="max-w-[220px]">
                     <div className="flex items-center gap-2 mb-1">
-                      <span className="px-1.5 py-0.5 text-[10px] font-medium uppercase bg-blue-500/10 text-blue-400 border border-blue-500/20">
-                        {signal.platform}
+                      <span className={`px-1.5 py-0.5 text-[10px] font-medium uppercase border ${style.badge}`}>
+                        {style.icon} {style.name}
                       </span>
                       {signal.city && (
-                        <span className="px-1.5 py-0.5 text-[10px] font-medium capitalize bg-purple-500/10 text-purple-400 border border-purple-500/20">
+                        <span className="px-1.5 py-0.5 text-[10px] font-medium capitalize bg-neutral-800 text-neutral-400 border border-neutral-700">
                           {signal.city.replace('_', ' ')}
                         </span>
                       )}
                     </div>
-                    <div className="text-xs text-neutral-400 truncate" title={signal.market_title}>
-                      {signal.market_title}
-                    </div>
+                    <a
+                      href={marketUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="group flex items-center gap-1 text-xs text-neutral-400 hover:text-neutral-200 transition-colors"
+                    >
+                      <span className="truncate" title={signal.market_title}>
+                        {signal.market_title}
+                      </span>
+                      <ExternalLink className="w-3 h-3 opacity-0 group-hover:opacity-100 shrink-0" />
+                    </a>
                   </div>
                 </td>
                 <td className="py-3 px-2 text-center">

@@ -41,3 +41,18 @@ export async function simulateTrade(ticker: string): Promise<{ trade_id: number;
   })
   return data
 }
+
+export async function startBot(): Promise<{ status: string; is_running: boolean }> {
+  const { data } = await api.post('/bot/start')
+  return data
+}
+
+export async function stopBot(): Promise<{ status: string; is_running: boolean }> {
+  const { data } = await api.post('/bot/stop')
+  return data
+}
+
+export async function settleTradesApi(): Promise<{ settled_count: number }> {
+  const { data } = await api.post('/settle-trades')
+  return data
+}

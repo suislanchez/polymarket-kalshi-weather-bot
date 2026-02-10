@@ -1,10 +1,11 @@
 """FastAPI backend for the trading bot dashboard."""
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
 from typing import List, Optional
 import asyncio
+import json
 
 from backend.config import settings
 from backend.models.database import (
@@ -20,7 +21,7 @@ from pydantic import BaseModel
 app = FastAPI(
     title="Prediction Market Trading Bot",
     description="Weather-based prediction market trading bot with simulation mode",
-    version="1.0.0"
+    version="2.0.0"
 )
 
 # CORS for React frontend
@@ -31,6 +32,30 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# WebSocket connection manager
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: dict):
+        for connection in self.active_connections:
+            try:
+                await connection.send_json(message)
+            except:
+                pass
+
+
+ws_manager = ConnectionManager()
 
 
 # Pydantic models for API responses
@@ -106,7 +131,14 @@ class DashboardData(BaseModel):
     equity_curve: List[dict]
 
 
-# Initialize database on startup
+class EventResponse(BaseModel):
+    timestamp: str
+    type: str
+    message: str
+    data: dict = {}
+
+
+# Initialize database and scheduler on startup
 @app.on_event("startup")
 async def startup():
     init_db()
@@ -119,17 +151,38 @@ async def startup():
                 bankroll=settings.INITIAL_BANKROLL,
                 total_trades=0,
                 winning_trades=0,
-                total_pnl=0.0
+                total_pnl=0.0,
+                is_running=True  # Start running by default
             )
             db.add(state)
+            db.commit()
+        else:
+            # Set running on startup
+            state.is_running = True
             db.commit()
     finally:
         db.close()
 
+    # Start the autonomous trading scheduler
+    from backend.core.scheduler import start_scheduler, log_event
+    start_scheduler()
+    log_event("success", "Trading bot initialized and running")
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    from backend.core.scheduler import stop_scheduler
+    stop_scheduler()
+
 
 @app.get("/")
 async def root():
-    return {"status": "ok", "message": "Trading Bot API", "simulation_mode": settings.SIMULATION_MODE}
+    return {"status": "ok", "message": "Trading Bot API v2.0", "simulation_mode": settings.SIMULATION_MODE}
+
+
+@app.get("/api/health")
+async def health():
+    return {"status": "healthy"}
 
 
 @app.get("/api/stats", response_model=BotStats)
@@ -250,10 +303,19 @@ async def get_actionable_signals():
 @app.get("/api/trades", response_model=List[TradeResponse])
 async def get_trades(
     limit: int = 50,
+    status: Optional[str] = None,
+    platform: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
-    """Get recent trades."""
-    trades = db.query(Trade).order_by(Trade.timestamp.desc()).limit(limit).all()
+    """Get recent trades with optional filtering."""
+    query = db.query(Trade)
+
+    if status:
+        query = query.filter(Trade.result == status)
+    if platform:
+        query = query.filter(Trade.platform == platform)
+
+    trades = query.order_by(Trade.timestamp.desc()).limit(limit).all()
 
     return [
         TradeResponse(
@@ -303,6 +365,8 @@ async def simulate_trade(
     Simulate executing a trade based on a signal.
     Records the trade for tracking.
     """
+    from backend.core.scheduler import log_event
+
     signals = await scan_for_signals()
     signal = next((s for s in signals if s.market.ticker == signal_ticker), None)
 
@@ -327,7 +391,13 @@ async def simulate_trade(
     )
 
     db.add(trade)
+    state.total_trades += 1
     db.commit()
+
+    log_event("trade", f"Manual trade: {signal.direction.upper()} {signal.market.ticker}", {
+        "ticker": signal.market.ticker,
+        "size": trade.size
+    })
 
     return {"status": "ok", "trade_id": trade.id, "size": trade.size}
 
@@ -335,10 +405,15 @@ async def simulate_trade(
 @app.post("/api/run-scan")
 async def run_scan(db: Session = Depends(get_db)):
     """Manually trigger a market scan."""
+    from backend.core.scheduler import run_manual_scan, log_event
+
     state = db.query(BotState).first()
     if state:
         state.last_run = datetime.utcnow()
         db.commit()
+
+    log_event("info", "Manual scan triggered")
+    await run_manual_scan()
 
     signals = await scan_for_signals()
     actionable = [s for s in signals if s.passes_threshold]
@@ -349,6 +424,116 @@ async def run_scan(db: Session = Depends(get_db)):
         "actionable_signals": len(actionable),
         "timestamp": datetime.utcnow().isoformat()
     }
+
+
+@app.post("/api/settle-trades")
+async def settle_trades_endpoint(db: Session = Depends(get_db)):
+    """Manually trigger trade settlement check."""
+    from backend.core.settlement import settle_pending_trades, update_bot_state_with_settlements
+    from backend.core.scheduler import log_event
+
+    log_event("info", "Manual settlement triggered")
+
+    settled = await settle_pending_trades(db)
+    await update_bot_state_with_settlements(db, settled)
+
+    return {
+        "status": "ok",
+        "settled_count": len(settled),
+        "trades": [{"id": t.id, "result": t.result, "pnl": t.pnl} for t in settled]
+    }
+
+
+@app.get("/api/events", response_model=List[EventResponse])
+async def get_events(limit: int = 50):
+    """Get recent bot events for terminal display."""
+    from backend.core.scheduler import get_recent_events
+
+    events = get_recent_events(limit)
+    return [
+        EventResponse(
+            timestamp=e["timestamp"],
+            type=e["type"],
+            message=e["message"],
+            data=e.get("data", {})
+        )
+        for e in events
+    ]
+
+
+@app.post("/api/bot/start")
+async def start_bot(db: Session = Depends(get_db)):
+    """Start autonomous trading."""
+    from backend.core.scheduler import start_scheduler, log_event, is_scheduler_running
+
+    state = db.query(BotState).first()
+    if state:
+        state.is_running = True
+        db.commit()
+
+    if not is_scheduler_running():
+        start_scheduler()
+
+    log_event("success", "Trading bot started")
+    return {"status": "started", "is_running": True}
+
+
+@app.post("/api/bot/stop")
+async def stop_bot(db: Session = Depends(get_db)):
+    """Stop autonomous trading (pauses new trades, doesn't stop settlement)."""
+    from backend.core.scheduler import log_event
+
+    state = db.query(BotState).first()
+    if state:
+        state.is_running = False
+        db.commit()
+
+    log_event("info", "Trading bot paused")
+    return {"status": "stopped", "is_running": False}
+
+
+@app.websocket("/ws/events")
+async def websocket_events(websocket: WebSocket):
+    """WebSocket endpoint for real-time event streaming."""
+    await ws_manager.connect(websocket)
+
+    try:
+        # Send initial connection message
+        await websocket.send_json({
+            "timestamp": datetime.utcnow().isoformat(),
+            "type": "success",
+            "message": "Connected to trading bot"
+        })
+
+        # Send recent events
+        from backend.core.scheduler import get_recent_events
+        for event in get_recent_events(20):
+            await websocket.send_json(event)
+
+        # Keep connection alive and broadcast new events
+        last_event_count = len(get_recent_events(200))
+        while True:
+            await asyncio.sleep(2)
+
+            # Check for new events
+            current_events = get_recent_events(200)
+            if len(current_events) > last_event_count:
+                # Send new events
+                new_events = current_events[last_event_count - len(current_events):]
+                for event in new_events:
+                    await websocket.send_json(event)
+                last_event_count = len(current_events)
+
+            # Send heartbeat
+            await websocket.send_json({
+                "type": "heartbeat",
+                "timestamp": datetime.utcnow().isoformat()
+            })
+
+    except WebSocketDisconnect:
+        ws_manager.disconnect(websocket)
+    except Exception:
+        ws_manager.disconnect(websocket)
 
 
 @app.get("/api/dashboard", response_model=DashboardData)
