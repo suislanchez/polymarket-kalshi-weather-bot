@@ -1,167 +1,128 @@
-import { useRef, useEffect, useMemo, useState } from 'react'
+import { useEffect, useRef, useState, useMemo } from 'react'
 import GlobeGL from 'react-globe.gl'
 import type { CityWeather } from '../types'
 
 interface Props {
   cities: CityWeather[]
-  onCitySelect?: (city: CityWeather | null) => void
 }
 
-export function Globe({ cities, onCitySelect }: Props) {
-  const globeRef = useRef<any>(null)
-  const [selectedCity, setSelectedCity] = useState<CityWeather | null>(null)
+export function Globe({ cities }: Props) {
+  const globeEl = useRef<any>(null)
+  const [dimensions, setDimensions] = useState({ width: 400, height: 350 })
+  const containerRef = useRef<HTMLDivElement>(null)
 
-  // Format city data for globe
+  useEffect(() => {
+    if (containerRef.current) {
+      const updateDimensions = () => {
+        if (containerRef.current) {
+          setDimensions({
+            width: containerRef.current.offsetWidth,
+            height: containerRef.current.offsetHeight
+          })
+        }
+      }
+      updateDimensions()
+      window.addEventListener('resize', updateDimensions)
+      return () => window.removeEventListener('resize', updateDimensions)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (globeEl.current) {
+      globeEl.current.controls().autoRotate = true
+      globeEl.current.controls().autoRotateSpeed = 0.3
+      globeEl.current.pointOfView({ lat: 39.8, lng: -98.5, altitude: 2.2 })
+    }
+  }, [])
+
   const pointsData = useMemo(() => {
     return cities.map(city => ({
       lat: city.lat,
       lng: city.lon,
-      city: city.city,
-      temp: city.high_temp,
+      size: 0.15 + city.confidence * 0.2,
+      color: city.confidence >= 0.7 ? '#22c55e' : city.confidence >= 0.4 ? '#d97706' : '#dc2626',
+      city: city.city.replace('_', ' '),
       confidence: city.confidence,
-      color: city.confidence >= 0.7 ? '#00ff88' : city.confidence >= 0.4 ? '#ffaa00' : '#ff4466',
-      size: 0.5 + (city.confidence * 0.5),
-      data: city
+      high: city.high_temp,
+      low: city.low_temp
     }))
   }, [cities])
 
-  // Auto-rotate globe
-  useEffect(() => {
-    if (globeRef.current) {
-      globeRef.current.controls().autoRotate = true
-      globeRef.current.controls().autoRotateSpeed = 0.5
-      globeRef.current.pointOfView({ lat: 30, lng: -40, altitude: 2.5 }, 1000)
+  const arcsData = useMemo(() => {
+    if (cities.length < 2) return []
+    const arcs = []
+    for (let i = 0; i < Math.min(cities.length - 1, 8); i++) {
+      arcs.push({
+        startLat: cities[i].lat,
+        startLng: cities[i].lon,
+        endLat: cities[i + 1].lat,
+        endLng: cities[i + 1].lon,
+        color: ['rgba(34, 197, 94, 0.4)', 'rgba(34, 197, 94, 0.1)']
+      })
     }
-  }, [])
+    return arcs
+  }, [cities])
 
-  // Stop rotation on hover
-  const handlePointHover = (point: any) => {
-    if (globeRef.current) {
-      globeRef.current.controls().autoRotate = !point
-    }
-  }
-
-  const handlePointClick = (point: any) => {
-    if (point) {
-      setSelectedCity(point.data)
-      onCitySelect?.(point.data)
-      // Zoom to city
-      if (globeRef.current) {
-        globeRef.current.pointOfView({ lat: point.lat, lng: point.lng, altitude: 1.5 }, 1000)
-      }
-    }
-  }
+  const ringsData = useMemo(() => {
+    return cities.filter(c => c.confidence >= 0.7).map(city => ({
+      lat: city.lat,
+      lng: city.lon,
+      maxR: 3,
+      propagationSpeed: 2,
+      repeatPeriod: 1000
+    }))
+  }, [cities])
 
   return (
-    <div className="relative w-full h-[400px] rounded-xl overflow-hidden">
+    <div ref={containerRef} className="h-[350px] relative globe-container bg-black overflow-hidden">
       <GlobeGL
-        ref={globeRef}
+        ref={globeEl}
+        width={dimensions.width}
+        height={dimensions.height}
+        backgroundColor="rgba(0,0,0,0)"
         globeImageUrl="//unpkg.com/three-globe/example/img/earth-night.jpg"
         bumpImageUrl="//unpkg.com/three-globe/example/img/earth-topology.png"
-        backgroundImageUrl="//unpkg.com/three-globe/example/img/night-sky.png"
+        atmosphereColor="#22c55e"
+        atmosphereAltitude={0.1}
         pointsData={pointsData}
-        pointLat="lat"
-        pointLng="lng"
-        pointColor="color"
         pointAltitude={0.01}
+        pointColor="color"
         pointRadius="size"
-        pointLabel={(d: any) => `
-          <div class="glass-card p-3 text-sm">
-            <div class="font-bold capitalize mb-1">${d.city.replace('_', ' ')}</div>
-            <div class="text-gray-300">High: ${d.temp.toFixed(0)}°F</div>
-            <div class="text-gray-300">Confidence: ${(d.confidence * 100).toFixed(0)}%</div>
-          </div>
-        `}
-        onPointHover={handlePointHover}
-        onPointClick={handlePointClick}
-        atmosphereColor="#4488ff"
-        atmosphereAltitude={0.15}
-        width={undefined}
-        height={400}
+        pointsMerge={false}
+        arcsData={arcsData}
+        arcColor="color"
+        arcDashLength={0.4}
+        arcDashGap={0.2}
+        arcDashAnimateTime={2000}
+        arcStroke={0.3}
+        ringsData={ringsData}
+        ringColor={() => '#22c55e'}
+        ringMaxRadius="maxR"
+        ringPropagationSpeed="propagationSpeed"
+        ringRepeatPeriod="repeatPeriod"
       />
 
-      {/* City info overlay */}
-      {selectedCity && (
-        <div className="absolute bottom-4 left-4 glass-card p-4 max-w-xs animate-in fade-in slide-in-from-bottom-2">
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="font-bold text-lg capitalize">
-              {selectedCity.city.replace('_', ' ')}
-            </h3>
-            <button
-              onClick={() => {
-                setSelectedCity(null)
-                onCitySelect?.(null)
-                if (globeRef.current) {
-                  globeRef.current.pointOfView({ lat: 30, lng: -40, altitude: 2.5 }, 1000)
-                  globeRef.current.controls().autoRotate = true
-                }
-              }}
-              className="text-gray-400 hover:text-white"
-            >
-              ×
-            </button>
-          </div>
-
-          <div className="grid grid-cols-2 gap-3 text-sm">
-            <div>
-              <span className="text-gray-400 block">High</span>
-              <span className="text-xl font-bold text-emerald-400">
-                {selectedCity.high_temp.toFixed(0)}°F
-              </span>
-            </div>
-            <div>
-              <span className="text-gray-400 block">Low</span>
-              <span className="text-xl font-bold text-blue-400">
-                {selectedCity.low_temp.toFixed(0)}°F
-              </span>
-            </div>
-            <div>
-              <span className="text-gray-400 block">Ensemble</span>
-              <span className="font-medium">{selectedCity.ensemble_count} members</span>
-            </div>
-            <div>
-              <span className="text-gray-400 block">Confidence</span>
-              <span className="font-medium">{(selectedCity.confidence * 100).toFixed(0)}%</span>
-            </div>
-          </div>
-
-          <div className="mt-3 pt-3 border-t border-gray-700">
-            <div className="text-xs text-gray-400 mb-2">Probabilities</div>
-            <div className="space-y-1 text-sm">
-              <div className="flex justify-between">
-                <span>Above 50°F</span>
-                <span className={selectedCity.prob_above_50 > 0.5 ? 'text-emerald-400' : 'text-gray-400'}>
-                  {(selectedCity.prob_above_50 * 100).toFixed(0)}%
-                </span>
-              </div>
-              <div className="flex justify-between">
-                <span>Above 60°F</span>
-                <span className={selectedCity.prob_above_60 > 0.5 ? 'text-emerald-400' : 'text-gray-400'}>
-                  {(selectedCity.prob_above_60 * 100).toFixed(0)}%
-                </span>
-              </div>
-            </div>
-          </div>
+      {/* Overlay stats */}
+      <div className="absolute top-3 left-3 bg-black/90 border border-neutral-800 p-3">
+        <div className="text-[10px] text-neutral-500 uppercase tracking-wider mb-2">Global Data Feed</div>
+        <div className="flex items-center gap-2 mb-1">
+          <div className="live-dot" />
+          <span className="text-xs text-green-500 mono">{cities.length} markets</span>
         </div>
-      )}
-
-      {/* Legend */}
-      <div className="absolute top-4 right-4 glass-card p-3 text-xs">
-        <div className="text-gray-400 mb-2">Confidence</div>
-        <div className="space-y-1">
-          <div className="flex items-center gap-2">
-            <div className="w-3 h-3 rounded-full bg-emerald-400" />
-            <span>High (70%+)</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <div className="w-3 h-3 rounded-full bg-amber-400" />
-            <span>Medium (40-70%)</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <div className="w-3 h-3 rounded-full bg-red-400" />
-            <span>Low (&lt;40%)</span>
-          </div>
+        <div className="text-[10px] text-neutral-600 mono">
+          {pointsData.filter(p => p.color === '#22c55e').length} high confidence
         </div>
+      </div>
+
+      {/* Corner decorations */}
+      <div className="absolute top-0 left-0 w-8 h-8 border-t border-l border-neutral-800" />
+      <div className="absolute top-0 right-0 w-8 h-8 border-t border-r border-neutral-800" />
+      <div className="absolute bottom-0 left-0 w-8 h-8 border-b border-l border-neutral-800" />
+      <div className="absolute bottom-0 right-0 w-8 h-8 border-b border-r border-neutral-800" />
+
+      {/* Scan line effect */}
+      <div className="absolute inset-0 pointer-events-none overflow-hidden opacity-30">
+        <div className="scan-line" />
       </div>
     </div>
   )

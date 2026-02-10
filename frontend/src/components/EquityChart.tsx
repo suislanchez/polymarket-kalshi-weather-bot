@@ -1,4 +1,3 @@
-import { motion } from 'framer-motion'
 import {
   AreaChart,
   Area,
@@ -9,7 +8,6 @@ import {
   ResponsiveContainer,
   ReferenceLine
 } from 'recharts'
-import { TrendingUp, BarChart3 } from 'lucide-react'
 import type { EquityPoint } from '../types'
 
 interface Props {
@@ -24,9 +22,9 @@ const CustomTooltip = ({ active, payload, label }: any) => {
   const isPositive = value >= 0
 
   return (
-    <div className="glass-card p-3 border border-gray-700">
-      <p className="text-xs text-gray-400 mb-1">{label}</p>
-      <p className={`text-lg font-bold ${isPositive ? 'text-emerald-400' : 'text-red-400'}`}>
+    <div className="bg-neutral-900 border border-neutral-800 p-3">
+      <p className="text-xs text-neutral-500 mb-1">{label}</p>
+      <p className={`text-lg font-semibold tabular-nums ${isPositive ? 'text-green-500' : 'text-red-500'}`}>
         {isPositive ? '+' : ''}${value.toFixed(2)}
       </p>
     </div>
@@ -36,15 +34,11 @@ const CustomTooltip = ({ active, payload, label }: any) => {
 export function EquityChart({ data, initialBankroll }: Props) {
   if (data.length === 0) {
     return (
-      <motion.div
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        className="h-[300px] flex flex-col items-center justify-center text-gray-400"
-      >
-        <BarChart3 className="w-16 h-16 mb-4 opacity-20" />
-        <p className="text-lg">No trade history</p>
-        <p className="text-sm mt-1 opacity-60">Equity curve will appear after settled trades</p>
-      </motion.div>
+      <div className="h-[280px] flex flex-col items-center justify-center text-neutral-600">
+        <div className="text-4xl mb-4 opacity-30">📈</div>
+        <p className="text-sm">No trade history</p>
+        <p className="text-xs mt-1">Equity curve will appear after settled trades</p>
+      </div>
     )
   }
 
@@ -64,24 +58,19 @@ export function EquityChart({ data, initialBankroll }: Props) {
   const padding = Math.max(Math.abs(minPnl), Math.abs(maxPnl)) * 0.2
 
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 20 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.5 }}
-      className="h-[300px]"
-    >
+    <div className="h-[280px]">
       <ResponsiveContainer width="100%" height="100%">
         <AreaChart data={chartData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
           <defs>
             <linearGradient id="colorPnl" x1="0" y1="0" x2="0" y2="1">
               <stop
                 offset="5%"
-                stopColor={isPositive ? '#10b981' : '#ef4444'}
-                stopOpacity={0.3}
+                stopColor={isPositive ? '#22c55e' : '#ef4444'}
+                stopOpacity={0.2}
               />
               <stop
                 offset="95%"
-                stopColor={isPositive ? '#10b981' : '#ef4444'}
+                stopColor={isPositive ? '#22c55e' : '#ef4444'}
                 stopOpacity={0}
               />
             </linearGradient>
@@ -89,22 +78,22 @@ export function EquityChart({ data, initialBankroll }: Props) {
 
           <CartesianGrid
             strokeDasharray="3 3"
-            stroke="#1f2937"
+            stroke="#1a1a1a"
             vertical={false}
           />
 
           <XAxis
             dataKey="timestamp"
-            stroke="#4b5563"
-            fontSize={11}
+            stroke="#525252"
+            fontSize={10}
             tickLine={false}
             axisLine={false}
             dy={10}
           />
 
           <YAxis
-            stroke="#4b5563"
-            fontSize={11}
+            stroke="#525252"
+            fontSize={10}
             tickLine={false}
             axisLine={false}
             tickFormatter={(value) => `$${value}`}
@@ -116,20 +105,19 @@ export function EquityChart({ data, initialBankroll }: Props) {
 
           <ReferenceLine
             y={0}
-            stroke="#4b5563"
+            stroke="#262626"
             strokeDasharray="3 3"
           />
 
           <Area
             type="monotone"
             dataKey="pnl"
-            stroke={isPositive ? '#10b981' : '#ef4444'}
-            strokeWidth={2}
+            stroke={isPositive ? '#22c55e' : '#ef4444'}
+            strokeWidth={1.5}
             fill="url(#colorPnl)"
-            animationDuration={1000}
           />
         </AreaChart>
       </ResponsiveContainer>
-    </motion.div>
+    </div>
   )
 }

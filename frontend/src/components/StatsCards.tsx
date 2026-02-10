@@ -1,124 +1,85 @@
-import { motion } from 'framer-motion'
-import { TrendingUp, TrendingDown, Activity, DollarSign, Target, Percent } from 'lucide-react'
 import type { BotStats } from '../types'
 
 interface Props {
   stats: BotStats
 }
 
-const cardVariants = {
-  hidden: { opacity: 0, y: 20 },
-  visible: (i: number) => ({
-    opacity: 1,
-    y: 0,
-    transition: {
-      delay: i * 0.1,
-      duration: 0.5,
-      ease: 'easeOut'
-    }
-  })
+function formatNumber(n: number): string {
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M'
+  if (n >= 1e3) return (n / 1e3).toFixed(2) + 'K'
+  return n.toFixed(0)
 }
 
-function formatCurrency(value: number): string {
-  return new Intl.NumberFormat('en-US', {
-    style: 'currency',
-    currency: 'USD',
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 0
-  }).format(value)
-}
-
-function StatCard({
-  icon: Icon,
-  label,
-  value,
-  subValue,
-  trend,
-  index,
-  glowClass
-}: {
-  icon: any
-  label: string
-  value: string
-  subValue?: string
-  trend?: 'up' | 'down' | 'neutral'
-  index: number
-  glowClass?: string
-}) {
-  const trendColor = trend === 'up' ? 'text-emerald-400' : trend === 'down' ? 'text-red-400' : 'text-gray-400'
-  const trendBg = trend === 'up' ? 'bg-emerald-400/10' : trend === 'down' ? 'bg-red-400/10' : 'bg-gray-400/10'
-
+function ProgressBar({ value, max = 100, color = 'neutral' }: { value: number; max?: number; color?: string }) {
+  const percent = Math.min((value / max) * 100, 100)
+  const colors: Record<string, string> = {
+    neutral: 'bg-neutral-500',
+    red: 'bg-red-500',
+    green: 'bg-green-500',
+    yellow: 'bg-yellow-500',
+  }
   return (
-    <motion.div
-      custom={index}
-      variants={cardVariants}
-      initial="hidden"
-      animate="visible"
-      className={`glass-card p-5 card-hover ${glowClass || ''}`}
-    >
-      <div className="flex items-start justify-between mb-3">
-        <div className={`p-2 rounded-lg ${trendBg}`}>
-          <Icon className={`w-5 h-5 ${trendColor}`} />
-        </div>
-        {trend && trend !== 'neutral' && (
-          <div className={`flex items-center gap-1 text-sm ${trendColor}`}>
-            {trend === 'up' ? <TrendingUp className="w-4 h-4" /> : <TrendingDown className="w-4 h-4" />}
-          </div>
-        )}
-      </div>
-
-      <div className="space-y-1">
-        <p className="text-sm text-gray-400">{label}</p>
-        <p className={`text-2xl font-bold ${trendColor}`}>{value}</p>
-        {subValue && (
-          <p className="text-sm text-gray-500">{subValue}</p>
-        )}
-      </div>
-    </motion.div>
+    <div className="w-full h-1 bg-neutral-800 overflow-hidden mt-2">
+      <div
+        className={`h-full ${colors[color]} transition-all duration-300`}
+        style={{ width: `${percent}%` }}
+      />
+    </div>
   )
 }
 
 export function StatsCards({ stats }: Props) {
-  const pnlTrend = stats.total_pnl >= 0 ? 'up' : 'down'
   const winRate = stats.total_trades > 0 ? stats.winning_trades / stats.total_trades : 0
+  const winRatePercent = winRate * 100
+  const returnPercent = stats.bankroll - stats.total_pnl > 0
+    ? ((stats.total_pnl / (stats.bankroll - stats.total_pnl)) * 100)
+    : 0
 
   return (
-    <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-      <StatCard
-        icon={DollarSign}
-        label="Virtual Bankroll"
-        value={formatCurrency(stats.bankroll)}
-        trend="neutral"
-        index={0}
-      />
+    <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
+      <div className="bg-neutral-900 border border-neutral-800 p-4">
+        <div className="text-neutral-500 text-xs uppercase tracking-wider mb-2">Virtual Bankroll</div>
+        <div className="text-xl font-semibold tabular-nums text-neutral-100">
+          ${formatNumber(stats.bankroll)}
+        </div>
+        <div className="text-neutral-600 text-xs mt-1">Simulation mode</div>
+      </div>
 
-      <StatCard
-        icon={pnlTrend === 'up' ? TrendingUp : TrendingDown}
-        label="Total P&L"
-        value={`${stats.total_pnl >= 0 ? '+' : ''}${formatCurrency(stats.total_pnl)}`}
-        subValue={`${((stats.total_pnl / (stats.bankroll - stats.total_pnl)) * 100).toFixed(1)}% return`}
-        trend={pnlTrend}
-        index={1}
-        glowClass={stats.total_pnl >= 0 ? 'glow-green' : 'glow-red'}
-      />
+      <div className="bg-neutral-900 border border-neutral-800 p-4">
+        <div className="text-neutral-500 text-xs uppercase tracking-wider mb-2">Total P&L</div>
+        <div className={`text-xl font-semibold tabular-nums ${stats.total_pnl >= 0 ? 'text-green-500' : 'text-red-500'}`}>
+          {stats.total_pnl >= 0 ? '+' : ''}${formatNumber(Math.abs(stats.total_pnl))}
+        </div>
+        <div className="text-neutral-600 text-xs mt-1">
+          ROI: {returnPercent >= 0 ? '+' : ''}{returnPercent.toFixed(1)}%
+        </div>
+        <ProgressBar value={Math.abs(returnPercent)} max={50} color={stats.total_pnl >= 0 ? 'green' : 'red'} />
+      </div>
 
-      <StatCard
-        icon={Percent}
-        label="Win Rate"
-        value={`${(winRate * 100).toFixed(1)}%`}
-        subValue={`${stats.winning_trades} of ${stats.total_trades} trades`}
-        trend={winRate >= 0.55 ? 'up' : winRate >= 0.45 ? 'neutral' : 'down'}
-        index={2}
-      />
+      <div className="bg-neutral-900 border border-neutral-800 p-4">
+        <div className="text-neutral-500 text-xs uppercase tracking-wider mb-2">Win Rate</div>
+        <div className={`text-xl font-semibold tabular-nums ${winRatePercent >= 55 ? 'text-green-500' : winRatePercent >= 45 ? 'text-yellow-500' : 'text-red-500'}`}>
+          {winRatePercent.toFixed(1)}%
+        </div>
+        <div className="text-neutral-600 text-xs mt-1">
+          {stats.winning_trades}/{stats.total_trades} trades won
+        </div>
+        <ProgressBar
+          value={winRatePercent}
+          color={winRatePercent >= 55 ? 'green' : winRatePercent >= 45 ? 'yellow' : 'red'}
+        />
+      </div>
 
-      <StatCard
-        icon={Activity}
-        label="Total Trades"
-        value={stats.total_trades.toString()}
-        subValue={stats.is_running ? 'Bot active' : 'Bot idle'}
-        trend="neutral"
-        index={3}
-      />
+      <div className="bg-neutral-900 border border-neutral-800 p-4">
+        <div className="text-neutral-500 text-xs uppercase tracking-wider mb-2">Total Trades</div>
+        <div className={`text-xl font-semibold tabular-nums ${stats.is_running ? 'text-green-500' : 'text-neutral-100'}`}>
+          {stats.total_trades}
+        </div>
+        <div className="flex items-center gap-2 mt-1">
+          {stats.is_running && <div className="live-dot" />}
+          <span className="text-neutral-600 text-xs">{stats.is_running ? 'Active' : 'Idle'}</span>
+        </div>
+      </div>
     </div>
   )
 }

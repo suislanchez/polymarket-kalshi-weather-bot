@@ -1,5 +1,3 @@
-import { motion, AnimatePresence } from 'framer-motion'
-import { CheckCircle2, Clock, XCircle, ArrowUpRight, ArrowDownRight, History } from 'lucide-react'
 import { formatDistanceToNow } from 'date-fns'
 import type { Trade } from '../types'
 
@@ -10,84 +8,91 @@ interface Props {
 export function TradesTable({ trades }: Props) {
   if (trades.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center py-12 text-gray-400">
-        <History className="w-12 h-12 mb-4 opacity-20" />
-        <p className="text-lg">No trades yet</p>
-        <p className="text-sm mt-1 opacity-60">Simulated trades will appear here</p>
+      <div className="flex flex-col items-center justify-center py-12 text-neutral-600">
+        <div className="text-4xl mb-4 opacity-30">📋</div>
+        <p className="text-sm">No trades yet</p>
+        <p className="text-xs mt-1">Simulated trades will appear here</p>
       </div>
     )
   }
 
   return (
-    <div className="space-y-2 max-h-[400px] overflow-y-auto pr-2">
-      <AnimatePresence>
-        {trades.map((trade, index) => {
-          const isPending = trade.result === 'pending'
-          const isWin = trade.result === 'win'
+    <div className="overflow-x-auto">
+      <table className="w-full">
+        <thead>
+          <tr className="text-neutral-600 text-left text-xs border-b border-neutral-800">
+            <th className="py-3 px-2 font-medium">Status</th>
+            <th className="py-3 px-2 font-medium">Market</th>
+            <th className="py-3 px-2 font-medium text-center">Direction</th>
+            <th className="py-3 px-2 font-medium text-right">Size</th>
+            <th className="py-3 px-2 font-medium text-right">Entry</th>
+            <th className="py-3 px-2 font-medium text-right">P&L</th>
+            <th className="py-3 px-2 font-medium text-right">Time</th>
+          </tr>
+        </thead>
+        <tbody>
+          {trades.map((trade) => {
+            const isPending = trade.result === 'pending'
+            const isWin = trade.result === 'win'
 
-          const StatusIcon = isPending ? Clock : isWin ? CheckCircle2 : XCircle
-          const statusColor = isPending ? 'text-amber-400' : isWin ? 'text-emerald-400' : 'text-red-400'
-          const statusBg = isPending ? 'bg-amber-400/10' : isWin ? 'bg-emerald-400/10' : 'bg-red-400/10'
-
-          return (
-            <motion.div
-              key={trade.id}
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -10 }}
-              transition={{ delay: index * 0.03 }}
-              className="flex items-center gap-4 p-3 rounded-lg bg-gray-800/30 hover:bg-gray-800/50 transition-colors"
-            >
-              {/* Status Icon */}
-              <div className={`p-2 rounded-lg ${statusBg}`}>
-                <StatusIcon className={`w-4 h-4 ${statusColor}`} />
-              </div>
-
-              {/* Trade Info */}
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2 mb-1">
-                  <span className="text-[10px] uppercase tracking-wider text-gray-500 bg-gray-800 px-2 py-0.5 rounded">
-                    {trade.platform}
-                  </span>
-                  <span className={`flex items-center gap-0.5 text-[10px] uppercase tracking-wider ${
-                    trade.direction === 'yes' ? 'text-emerald-400' : 'text-red-400'
+            return (
+              <tr
+                key={trade.id}
+                className="border-b border-neutral-800 hover:bg-neutral-900/50 transition-colors"
+              >
+                <td className="py-3 px-2">
+                  <span className={`px-2 py-1 text-[10px] font-medium uppercase ${
+                    isPending
+                      ? 'bg-amber-500/10 text-amber-500 border border-amber-500/20'
+                      : isWin
+                        ? 'bg-green-500/10 text-green-500 border border-green-500/20'
+                        : 'bg-red-500/10 text-red-500 border border-red-500/20'
                   }`}>
-                    {trade.direction === 'yes' ? (
-                      <ArrowUpRight className="w-3 h-3" />
-                    ) : (
-                      <ArrowDownRight className="w-3 h-3" />
-                    )}
+                    {isPending ? 'Pending' : isWin ? 'Win' : 'Loss'}
+                  </span>
+                </td>
+                <td className="py-3 px-2">
+                  <div className="max-w-[200px]">
+                    <span className="px-1.5 py-0.5 text-[10px] font-medium uppercase bg-blue-500/10 text-blue-400 border border-blue-500/20 mr-2">
+                      {trade.platform}
+                    </span>
+                    <span className="text-xs text-neutral-400 truncate">{trade.market_ticker}</span>
+                  </div>
+                </td>
+                <td className="py-3 px-2 text-center">
+                  <span className={`px-2 py-1 text-[10px] font-semibold uppercase ${
+                    trade.direction === 'yes'
+                      ? 'bg-green-500/10 text-green-500 border border-green-500/20'
+                      : 'bg-red-500/10 text-red-500 border border-red-500/20'
+                  }`}>
                     {trade.direction}
                   </span>
-                </div>
-                <p className="text-sm text-gray-300 truncate">
-                  {trade.market_ticker}
-                </p>
-                <p className="text-xs text-gray-500 mt-0.5">
-                  {formatDistanceToNow(new Date(trade.timestamp), { addSuffix: true })}
-                </p>
-              </div>
-
-              {/* P&L */}
-              <div className="text-right">
-                <div className={`text-lg font-bold ${
-                  trade.pnl === null ? 'text-gray-400' :
-                  trade.pnl >= 0 ? 'text-emerald-400' : 'text-red-400'
-                }`}>
+                </td>
+                <td className="py-3 px-2 text-right text-sm text-neutral-300 tabular-nums">
+                  ${trade.size.toFixed(0)}
+                </td>
+                <td className="py-3 px-2 text-right text-sm text-neutral-500 tabular-nums">
+                  {(trade.entry_price * 100).toFixed(0)}¢
+                </td>
+                <td className="py-3 px-2 text-right">
                   {trade.pnl !== null ? (
-                    `${trade.pnl >= 0 ? '+' : ''}$${trade.pnl.toFixed(2)}`
+                    <span className={`text-sm font-semibold tabular-nums ${
+                      trade.pnl >= 0 ? 'text-green-500' : 'text-red-500'
+                    }`}>
+                      {trade.pnl >= 0 ? '+' : ''}${trade.pnl.toFixed(2)}
+                    </span>
                   ) : (
-                    <span className="text-sm">Pending</span>
+                    <span className="text-sm text-neutral-600">-</span>
                   )}
-                </div>
-                <div className="text-xs text-gray-500">
-                  ${trade.size.toFixed(0)} @ {(trade.entry_price * 100).toFixed(0)}¢
-                </div>
-              </div>
-            </motion.div>
-          )
-        })}
-      </AnimatePresence>
+                </td>
+                <td className="py-3 px-2 text-right text-xs text-neutral-600">
+                  {formatDistanceToNow(new Date(trade.timestamp), { addSuffix: true })}
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
     </div>
   )
 }

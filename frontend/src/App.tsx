@@ -1,12 +1,12 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { motion, AnimatePresence } from 'framer-motion'
 import { fetchDashboard, runScan, simulateTrade } from './api'
+import { Map } from './components/Map'
 import { Globe } from './components/Globe'
 import { StatsCards } from './components/StatsCards'
 import { SignalsTable } from './components/SignalsTable'
 import { TradesTable } from './components/TradesTable'
 import { EquityChart } from './components/EquityChart'
-import { RefreshCw, Zap, Activity, CloudSun, TrendingUp, History } from 'lucide-react'
+import { Terminal } from './components/Terminal'
 
 function App() {
   const queryClient = useQueryClient()
@@ -14,7 +14,7 @@ function App() {
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['dashboard'],
     queryFn: fetchDashboard,
-    refetchInterval: 30000, // Auto-refresh every 30 seconds
+    refetchInterval: 30000,
   })
 
   const scanMutation = useMutation({
@@ -33,205 +33,169 @@ function App() {
 
   if (isLoading) {
     return (
-      <div className="min-h-screen flex flex-col items-center justify-center gap-4">
-        <motion.div
-          initial={{ scale: 0.8, opacity: 0 }}
-          animate={{ scale: 1, opacity: 1 }}
-          transition={{ duration: 0.5 }}
-          className="relative"
-        >
-          <div className="w-16 h-16 border-4 border-blue-500/30 rounded-full" />
-          <div className="absolute inset-0 w-16 h-16 border-4 border-transparent border-t-blue-500 rounded-full animate-spin" />
-        </motion.div>
-        <motion.p
-          initial={{ opacity: 0, y: 10 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.2 }}
-          className="text-lg text-gray-400"
-        >
-          Loading dashboard...
-        </motion.p>
+      <div className="min-h-screen bg-black flex items-center justify-center">
+        <div className="text-center">
+          <div className="relative w-12 h-12 mx-auto mb-6">
+            <div className="absolute inset-0 border-2 border-neutral-800 rounded-full"></div>
+            <div className="absolute inset-0 border-2 border-transparent border-t-green-500 rounded-full animate-spin"></div>
+          </div>
+          <div className="text-sm font-medium text-neutral-300 uppercase tracking-wider mb-1">Loading</div>
+          <div className="text-xs text-neutral-600">Connecting to trading systems...</div>
+        </div>
       </div>
     )
   }
 
   if (error || !data) {
     return (
-      <div className="min-h-screen flex flex-col items-center justify-center gap-6">
-        <motion.div
-          initial={{ scale: 0.8, opacity: 0 }}
-          animate={{ scale: 1, opacity: 1 }}
-          className="text-center"
-        >
-          <div className="w-20 h-20 mx-auto mb-4 rounded-full bg-red-500/20 flex items-center justify-center">
-            <Activity className="w-10 h-10 text-red-400" />
+      <div className="min-h-screen bg-black flex items-center justify-center">
+        <div className="text-center max-w-md mx-auto p-8">
+          <div className="text-red-500 text-xs uppercase tracking-wider mb-2">Connection Error</div>
+          <div className="text-neutral-300 text-sm mb-6">
+            Unable to connect to backend. Ensure server is running on port 8000.
           </div>
-          <h2 className="text-xl font-bold text-red-400 mb-2">Connection Failed</h2>
-          <p className="text-gray-400 mb-6">Make sure the backend is running on port 8000</p>
           <button
             onClick={() => refetch()}
-            className="btn-primary"
+            className="px-4 py-2 bg-neutral-900 border border-neutral-700 hover:border-neutral-600 text-neutral-300 text-xs uppercase tracking-wider transition-colors"
           >
             Retry Connection
           </button>
-        </motion.div>
+        </div>
       </div>
     )
   }
 
   return (
-    <div className="min-h-screen p-4 lg:p-8">
-      {/* Header */}
-      <motion.header
-        initial={{ opacity: 0, y: -20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.5 }}
-        className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 mb-8"
-      >
-        <div className="flex items-center gap-4">
-          <div className="p-3 rounded-xl bg-gradient-to-br from-amber-500/20 to-yellow-500/20 border border-amber-500/30">
-            <Zap className="w-8 h-8 text-amber-400" />
+    <div className="min-h-screen bg-black text-neutral-200">
+      <div className="max-w-[1600px] mx-auto px-4 sm:px-6 py-6">
+        {/* Header */}
+        <header className="mb-6">
+          <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4">
+            <div>
+              <div className="flex items-center gap-3 mb-1">
+                <h1 className="text-lg font-semibold text-neutral-100 uppercase tracking-wider">
+                  Weather Prediction Markets
+                </h1>
+                <span className={`px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider ${
+                  data.stats.is_running
+                    ? 'bg-green-500/10 text-green-500 border border-green-500/20'
+                    : 'bg-neutral-800 text-neutral-500 border border-neutral-700'
+                }`}>
+                  {data.stats.is_running ? 'Live' : 'Idle'}
+                </span>
+              </div>
+              <p className="text-neutral-600 text-xs">
+                Ensemble weather forecasting for prediction market edge
+                {data.stats.last_run && (
+                  <span className="ml-2">| Last scan: {new Date(data.stats.last_run).toLocaleTimeString()}</span>
+                )}
+              </p>
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => scanMutation.mutate()}
+                disabled={scanMutation.isPending}
+                className="px-4 py-2 bg-neutral-800 border border-neutral-700 hover:border-neutral-600 text-neutral-300 text-xs uppercase tracking-wider transition-colors flex items-center gap-2 disabled:opacity-50"
+              >
+                {scanMutation.isPending && (
+                  <div className="w-3 h-3 border border-neutral-600 border-t-green-500 rounded-full animate-spin" />
+                )}
+                Scan Markets
+              </button>
+            </div>
           </div>
-          <div>
-            <h1 className="text-2xl lg:text-3xl font-bold bg-gradient-to-r from-white to-gray-400 bg-clip-text text-transparent">
-              Prediction Market Bot
-            </h1>
-            <p className="text-sm text-gray-500 mt-1 flex items-center gap-2">
-              <CloudSun className="w-4 h-4" />
-              Weather markets • Simulation mode
-            </p>
+        </header>
+
+        {/* Stats Grid */}
+        <section className="mb-4">
+          <StatsCards stats={data.stats} />
+        </section>
+
+        {/* Main Grid - Globe, Map, Terminal */}
+        <div className="grid lg:grid-cols-3 gap-2 mb-4">
+          {/* Globe */}
+          <div className="bg-neutral-900 border border-neutral-800 overflow-hidden">
+            <div className="px-4 py-3 border-b border-neutral-800 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-medium text-neutral-500 uppercase tracking-wider">3D Globe</span>
+                <div className="live-dot" />
+              </div>
+              <span className="text-[10px] text-neutral-600 tabular-nums">{data.cities.length} markets</span>
+            </div>
+            <Globe cities={data.cities} />
+          </div>
+
+          {/* Map */}
+          <div className="bg-neutral-900 border border-neutral-800 overflow-hidden">
+            <div className="px-4 py-3 border-b border-neutral-800 flex items-center justify-between">
+              <span className="text-xs font-medium text-neutral-500 uppercase tracking-wider">Market Coverage</span>
+              <span className="text-[10px] text-neutral-600">US Markets</span>
+            </div>
+            <Map cities={data.cities} />
+          </div>
+
+          {/* Terminal */}
+          <div className="bg-neutral-900 border border-neutral-800 overflow-hidden">
+            <Terminal
+              isRunning={data.stats.is_running}
+              lastRun={data.stats.last_run}
+              stats={{ total_trades: data.stats.total_trades, total_pnl: data.stats.total_pnl }}
+            />
           </div>
         </div>
 
-        <div className="flex items-center gap-3">
-          <div className={`flex items-center gap-2 px-4 py-2 rounded-full glass-card ${
-            data.stats.is_running ? 'border-emerald-500/50' : 'border-gray-700'
-          }`}>
-            <span className={`pulse-dot ${data.stats.is_running ? 'bg-emerald-400' : 'bg-gray-500'}`} />
-            <span className="text-sm font-medium">
-              {data.stats.is_running ? 'Live' : 'Idle'}
-            </span>
-          </div>
-
-          <motion.button
-            whileHover={{ scale: 1.02 }}
-            whileTap={{ scale: 0.98 }}
-            onClick={() => scanMutation.mutate()}
-            disabled={scanMutation.isPending}
-            className="btn-primary flex items-center gap-2"
-          >
-            <RefreshCw className={`w-4 h-4 ${scanMutation.isPending ? 'animate-spin' : ''}`} />
-            <span className="hidden sm:inline">Scan Markets</span>
-            <span className="sm:hidden">Scan</span>
-          </motion.button>
-        </div>
-      </motion.header>
-
-      {/* Stats Cards */}
-      <StatsCards stats={data.stats} />
-
-      {/* Main Grid - Globe and Equity */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6">
-        {/* Globe Map */}
-        <motion.div
-          initial={{ opacity: 0, x: -20 }}
-          animate={{ opacity: 1, x: 0 }}
-          transition={{ duration: 0.5, delay: 0.2 }}
-          className="glass-card p-6"
-        >
-          <div className="flex items-center gap-2 mb-4">
-            <CloudSun className="w-5 h-5 text-blue-400" />
-            <h2 className="text-lg font-semibold">Global Weather Data</h2>
-            <span className="badge badge-info ml-auto">
-              {data.cities.length} cities
-            </span>
-          </div>
-          <Globe cities={data.cities} />
-        </motion.div>
-
-        {/* Equity Curve */}
-        <motion.div
-          initial={{ opacity: 0, x: 20 }}
-          animate={{ opacity: 1, x: 0 }}
-          transition={{ duration: 0.5, delay: 0.3 }}
-          className="glass-card p-6"
-        >
-          <div className="flex items-center gap-2 mb-4">
-            <TrendingUp className="w-5 h-5 text-emerald-400" />
-            <h2 className="text-lg font-semibold">Equity Curve</h2>
-            {data.equity_curve.length > 0 && (
-              <span className={`badge ml-auto ${
-                data.stats.total_pnl >= 0 ? 'badge-success' : 'badge-danger'
-              }`}>
-                {data.stats.total_pnl >= 0 ? '+' : ''}{data.stats.total_pnl.toFixed(0)} P&L
+        {/* Charts Row */}
+        <div className="grid lg:grid-cols-2 gap-2 mb-4">
+          {/* Equity Chart */}
+          <div className="bg-neutral-900 border border-neutral-800 overflow-hidden">
+            <div className="px-4 py-3 border-b border-neutral-800 flex items-center justify-between">
+              <span className="text-xs font-medium text-neutral-500 uppercase tracking-wider">Portfolio Performance</span>
+              <span className={`text-xs tabular-nums ${data.stats.total_pnl >= 0 ? 'text-green-500' : 'text-red-500'}`}>
+                {data.stats.total_pnl >= 0 ? '+' : ''}${data.stats.total_pnl.toFixed(0)}
               </span>
-            )}
+            </div>
+            <div className="p-4">
+              <EquityChart
+                data={data.equity_curve}
+                initialBankroll={data.stats.bankroll - data.stats.total_pnl}
+              />
+            </div>
           </div>
-          <EquityChart
-            data={data.equity_curve}
-            initialBankroll={data.stats.bankroll - data.stats.total_pnl}
-          />
-        </motion.div>
+
+          {/* Signals */}
+          <div className="bg-neutral-900 border border-neutral-800 overflow-hidden">
+            <div className="px-4 py-3 border-b border-neutral-800 flex items-center justify-between">
+              <span className="text-xs font-medium text-neutral-500 uppercase tracking-wider">Active Signals</span>
+              <span className="px-2 py-0.5 text-[10px] font-medium bg-amber-500/10 text-amber-500 border border-amber-500/20">
+                {data.active_signals.length} signals
+              </span>
+            </div>
+            <div className="p-4 max-h-[340px] overflow-y-auto">
+              <SignalsTable
+                signals={data.active_signals}
+                onSimulateTrade={(ticker) => tradeMutation.mutate(ticker)}
+                isSimulating={tradeMutation.isPending}
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* Trades Table */}
+        <div className="bg-neutral-900 border border-neutral-800 overflow-hidden">
+          <div className="px-4 py-3 border-b border-neutral-800 flex items-center justify-between">
+            <span className="text-xs font-medium text-neutral-500 uppercase tracking-wider">Trade History</span>
+            <span className="text-[10px] text-neutral-600 tabular-nums">{data.recent_trades.length} trades</span>
+          </div>
+          <div className="p-4">
+            <TradesTable trades={data.recent_trades} />
+          </div>
+        </div>
+
+        {/* Footer */}
+        <footer className="mt-6 text-center text-neutral-700 text-xs">
+          <p>Data: NWS API, Open-Meteo Ensemble | Simulation mode - no real trades</p>
+        </footer>
       </div>
-
-      {/* Signals and Trades */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6">
-        {/* Active Signals */}
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.5, delay: 0.4 }}
-          className="glass-card p-6"
-        >
-          <div className="flex items-center gap-2 mb-4">
-            <Zap className="w-5 h-5 text-amber-400" />
-            <h2 className="text-lg font-semibold">Active Signals</h2>
-            <span className="badge badge-warning ml-auto">
-              {data.active_signals.length} opportunities
-            </span>
-          </div>
-          <SignalsTable
-            signals={data.active_signals}
-            onSimulateTrade={(ticker) => tradeMutation.mutate(ticker)}
-            isSimulating={tradeMutation.isPending}
-          />
-        </motion.div>
-
-        {/* Recent Trades */}
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.5, delay: 0.5 }}
-          className="glass-card p-6"
-        >
-          <div className="flex items-center gap-2 mb-4">
-            <History className="w-5 h-5 text-purple-400" />
-            <h2 className="text-lg font-semibold">Recent Trades</h2>
-            <span className="badge bg-purple-500/20 text-purple-400 border-purple-500/30 ml-auto">
-              {data.recent_trades.length} trades
-            </span>
-          </div>
-          <TradesTable trades={data.recent_trades} />
-        </motion.div>
-      </div>
-
-      {/* Footer */}
-      <motion.footer
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        transition={{ duration: 0.5, delay: 0.6 }}
-        className="mt-10 pt-6 border-t border-gray-800/50 text-center"
-      >
-        <p className="text-sm text-gray-500 mb-2">
-          Last updated: {data.stats.last_run
-            ? new Date(data.stats.last_run).toLocaleString()
-            : 'Never'
-          }
-        </p>
-        <p className="text-xs text-gray-600">
-          Data sources: NWS API • Open-Meteo Ensemble • Polymarket • Kalshi
-        </p>
-      </motion.footer>
     </div>
   )
 }
