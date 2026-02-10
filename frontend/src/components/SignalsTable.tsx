@@ -1,7 +1,7 @@
 import { ExternalLink, ArrowUpDown, ArrowUp, ArrowDown } from 'lucide-react'
 import { useState, useMemo } from 'react'
-import type { Signal } from '../types'
-import { getMarketUrl, platformStyles } from '../utils'
+import type { Signal, MarketCategory } from '../types'
+import { getMarketUrl, platformStyles, categoryStyles } from '../utils'
 
 interface Props {
   signals: Signal[]
@@ -121,7 +121,9 @@ export function SignalsTable({ signals, onSimulateTrade, isSimulating }: Props) 
             const edgePercent = Math.abs(signal.edge * 100)
             const platformKey = signal.platform.toLowerCase() as keyof typeof platformStyles
             const style = platformStyles[platformKey] || platformStyles.kalshi
-            const marketUrl = getMarketUrl(signal.platform, signal.market_ticker)
+            const marketUrl = getMarketUrl(signal.platform, signal.market_ticker, signal.event_slug)
+            const catKey = (signal.category || 'other') as MarketCategory
+            const catStyle = categoryStyles[catKey] || categoryStyles.other
 
             return (
               <tr
@@ -129,10 +131,13 @@ export function SignalsTable({ signals, onSimulateTrade, isSimulating }: Props) 
                 className="border-b border-neutral-800 hover:bg-neutral-900/50 transition-colors"
               >
                 <td className="py-3 px-2">
-                  <div className="max-w-[220px]">
-                    <div className="flex items-center gap-2 mb-1">
+                  <div className="max-w-[280px]">
+                    <div className="flex items-center gap-1.5 mb-1 flex-wrap">
                       <span className={`px-1.5 py-0.5 text-[10px] font-medium uppercase border ${style.badge}`}>
                         {style.icon} {style.name}
+                      </span>
+                      <span className={`px-1.5 py-0.5 text-[10px] font-medium uppercase border ${catStyle.badge}`}>
+                        {catStyle.icon} {catStyle.name}
                       </span>
                       {signal.city && (
                         <span className="px-1.5 py-0.5 text-[10px] font-medium capitalize bg-neutral-800 text-neutral-400 border border-neutral-700">

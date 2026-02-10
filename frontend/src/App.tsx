@@ -17,6 +17,7 @@ function App() {
   const [signalFilters, setSignalFilters] = useState<FilterState>({
     search: '',
     platform: 'all',
+    category: 'all',
     city: '',
     status: 'all'
   })
@@ -24,6 +25,7 @@ function App() {
   const [tradeFilters, setTradeFilters] = useState<FilterState>({
     search: '',
     platform: 'all',
+    category: 'all',
     city: '',
     status: 'all'
   })
@@ -85,6 +87,10 @@ function App() {
       }
       if (signalFilters.platform !== 'all' &&
           signal.platform.toLowerCase() !== signalFilters.platform) {
+        return false
+      }
+      if (signalFilters.category !== 'all' &&
+          (signal.category || 'other') !== signalFilters.category) {
         return false
       }
       if (signalFilters.city && signal.city !== signalFilters.city) {
@@ -158,7 +164,7 @@ function App() {
             <div>
               <div className="flex items-center gap-3 mb-1">
                 <h1 className="text-lg font-semibold text-neutral-100 uppercase tracking-wider">
-                  Weather Prediction Markets
+                  Prediction Market Trading Bot
                 </h1>
                 <span className={`px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider ${
                   data.stats.is_running
@@ -172,7 +178,7 @@ function App() {
                 </span>
               </div>
               <p className="text-neutral-600 text-xs">
-                Ensemble weather forecasting for prediction market edge | Kalshi + Polymarket
+                AI-enhanced trading across Weather, Crypto, Politics, Economics | Kalshi + Polymarket
                 {data.stats.last_run && (
                   <span className="ml-2">| Last scan: {new Date(data.stats.last_run).toLocaleTimeString()}</span>
                 )}
@@ -296,7 +302,7 @@ function App() {
 
         {/* Footer */}
         <footer className="mt-6 text-center text-neutral-700 text-xs">
-          <p>Data: NWS API, Open-Meteo Ensemble | Kalshi + Polymarket | Simulation mode - no real trades</p>
+          <p>Data: NWS, Open-Meteo, CoinGecko, FRED | AI: Claude + Groq | Platforms: Kalshi + Polymarket | Simulation mode</p>
         </footer>
       </div>
     </div>

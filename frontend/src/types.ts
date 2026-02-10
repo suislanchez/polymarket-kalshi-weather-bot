@@ -11,6 +11,8 @@ export interface CityWeather {
   prob_above_60: number
 }
 
+export type MarketCategory = 'weather' | 'crypto' | 'politics' | 'economics' | 'other'
+
 export interface Signal {
   market_ticker: string
   market_title: string
@@ -24,6 +26,12 @@ export interface Signal {
   suggested_size: number
   reasoning: string
   timestamp: string
+  // New fields
+  category: MarketCategory
+  subcategory?: string
+  event_slug?: string  // For Polymarket URL generation
+  ai_reasoning?: string
+  ai_confidence?: number
 }
 
 export interface Trade {

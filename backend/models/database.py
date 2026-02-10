@@ -167,6 +167,58 @@ class BotState(Base):
     is_running = Column(Boolean, default=False)
 
 
+class AILog(Base):
+    """Log of all AI API calls."""
+    __tablename__ = "ai_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    provider = Column(String, index=True)  # claude, groq
+    model = Column(String)
+
+    # Request/Response
+    prompt = Column(String)  # Truncated
+    response = Column(String)  # Truncated
+    call_type = Column(String, index=True)  # classification, analysis, anomaly
+
+    # Performance
+    latency_ms = Column(Float)
+    tokens_used = Column(Integer)
+    cost_usd = Column(Float)
+
+    # Context
+    related_market = Column(String, nullable=True)
+    success = Column(Boolean, default=True)
+    error = Column(String, nullable=True)
+
+
+class ScanLog(Base):
+    """Log of each market scan run."""
+    __tablename__ = "scan_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    run_id = Column(String, unique=True, index=True)  # UUID for tracing
+    started_at = Column(DateTime, default=datetime.utcnow)
+    completed_at = Column(DateTime, nullable=True)
+
+    # What was scanned
+    categories_scanned = Column(JSON)  # ["weather", "crypto", ...]
+    platforms_scanned = Column(JSON)   # ["kalshi", "polymarket"]
+
+    # Results
+    markets_found = Column(Integer, default=0)
+    signals_generated = Column(Integer, default=0)
+    trades_executed = Column(Integer, default=0)
+
+    # AI usage
+    ai_calls_made = Column(Integer, default=0)
+    ai_cost_usd = Column(Float, default=0.0)
+
+    # Status
+    success = Column(Boolean, default=True)
+    error = Column(String, nullable=True)
+
+
 def init_db():
     """Initialize database tables."""
     Base.metadata.create_all(bind=engine)

@@ -1,8 +1,10 @@
 import { Search, Filter, X } from 'lucide-react'
+import type { MarketCategory } from '../types'
 
 export interface FilterState {
   search: string
   platform: 'all' | 'kalshi' | 'polymarket'
+  category: 'all' | MarketCategory
   city: string
   status: 'all' | 'pending' | 'win' | 'loss'
 }
@@ -20,6 +22,15 @@ const PLATFORMS = [
   { value: 'polymarket', label: 'Polymarket' }
 ] as const
 
+const CATEGORIES = [
+  { value: 'all', label: 'All Categories' },
+  { value: 'weather', label: 'Weather' },
+  { value: 'crypto', label: 'Crypto' },
+  { value: 'politics', label: 'Politics' },
+  { value: 'economics', label: 'Economics' },
+  { value: 'other', label: 'Other' }
+] as const
+
 const STATUSES = [
   { value: 'all', label: 'All Status' },
   { value: 'pending', label: 'Pending' },
@@ -31,6 +42,7 @@ export function FilterBar({ filters, onFilterChange, cities, showStatus = false 
   const hasActiveFilters =
     filters.search !== '' ||
     filters.platform !== 'all' ||
+    filters.category !== 'all' ||
     filters.city !== '' ||
     filters.status !== 'all'
 
@@ -38,6 +50,7 @@ export function FilterBar({ filters, onFilterChange, cities, showStatus = false 
     onFilterChange({
       search: '',
       platform: 'all',
+      category: 'all',
       city: '',
       status: 'all'
     })
@@ -67,6 +80,24 @@ export function FilterBar({ filters, onFilterChange, cities, showStatus = false 
         >
           {PLATFORMS.map((p) => (
             <option key={p.value} value={p.value}>{p.label}</option>
+          ))}
+        </select>
+        <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none">
+          <svg className="w-4 h-4 text-neutral-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+          </svg>
+        </div>
+      </div>
+
+      {/* Category Filter */}
+      <div className="relative">
+        <select
+          value={filters.category}
+          onChange={(e) => onFilterChange({ ...filters, category: e.target.value as FilterState['category'] })}
+          className="pl-4 pr-8 py-2 bg-neutral-950 border border-neutral-800 text-sm text-neutral-300 focus:outline-none focus:border-neutral-600 appearance-none cursor-pointer"
+        >
+          {CATEGORIES.map((c) => (
+            <option key={c.value} value={c.value}>{c.label}</option>
           ))}
         </select>
         <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none">

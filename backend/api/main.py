@@ -10,11 +10,12 @@ import json
 from backend.config import settings
 from backend.models.database import (
     get_db, init_db, SessionLocal,
-    Market, Signal, Trade, WeatherForecast, BotState
+    Market, Signal, Trade, WeatherForecast, BotState, AILog, ScanLog
 )
 from backend.core.signals import scan_for_signals, TradingSignal
 from backend.data.weather import fetch_all_cities, WeatherPrediction
-from backend.data.markets import fetch_all_weather_markets
+from backend.data.markets import fetch_all_weather_markets, fetch_all_markets
+from backend.core.classifier import MarketCategory as MCEnum
 
 from pydantic import BaseModel
 
@@ -98,6 +99,12 @@ class SignalResponse(BaseModel):
     suggested_size: float
     reasoning: str
     timestamp: datetime
+    # New fields
+    category: str = "weather"
+    subcategory: Optional[str] = None
+    event_slug: Optional[str] = None
+    ai_reasoning: Optional[str] = None
+    ai_confidence: Optional[float] = None
 
 
 class TradeResponse(BaseModel):
@@ -269,7 +276,10 @@ async def get_signals():
             confidence=s.confidence,
             suggested_size=s.suggested_size,
             reasoning=s.reasoning,
-            timestamp=s.timestamp
+            timestamp=s.timestamp,
+            category=getattr(s.market, 'category', 'weather'),
+            subcategory=s.market.subcategory,
+            event_slug=getattr(s.market, 'event_slug', None)
         )
         for s in signals
     ]
@@ -294,7 +304,10 @@ async def get_actionable_signals():
             confidence=s.confidence,
             suggested_size=s.suggested_size,
             reasoning=s.reasoning,
-            timestamp=s.timestamp
+            timestamp=s.timestamp,
+            category=getattr(s.market, 'category', 'weather'),
+            subcategory=s.market.subcategory,
+            event_slug=getattr(s.market, 'event_slug', None)
         )
         for s in actionable
     ]
@@ -490,6 +503,138 @@ async def stop_bot(db: Session = Depends(get_db)):
 
     log_event("info", "Trading bot paused")
     return {"status": "stopped", "is_running": False}
+
+
+# ============ Category & AI Endpoints ============
+
+@app.get("/api/categories")
+async def get_categories():
+    """Get list of supported market categories."""
+    return {
+        "categories": [
+            {"id": "weather", "name": "Weather", "icon": "thermometer", "enabled": True},
+            {"id": "crypto", "name": "Crypto", "icon": "bitcoin", "enabled": True},
+            {"id": "politics", "name": "Politics", "icon": "vote", "enabled": True},
+            {"id": "economics", "name": "Economics", "icon": "chart", "enabled": True},
+            {"id": "sports", "name": "Sports", "icon": "trophy", "enabled": False},  # Always disabled
+            {"id": "other", "name": "Other", "icon": "question", "enabled": True},
+        ],
+        "excluded": ["sports"]
+    }
+
+
+@app.get("/api/markets/all")
+async def get_all_markets(
+    categories: Optional[str] = None,
+    exclude_sports: bool = True
+):
+    """
+    Get markets from all platforms across categories.
+
+    Args:
+        categories: Comma-separated list of categories (e.g., "weather,crypto")
+        exclude_sports: Whether to exclude sports markets (default True)
+    """
+    cat_set = None
+    if categories:
+        cat_set = set(categories.split(","))
+
+    markets = await fetch_all_markets(cat_set, exclude_sports)
+
+    return [
+        {
+            "platform": m.platform,
+            "ticker": m.ticker,
+            "title": m.title,
+            "category": m.category,
+            "subcategory": m.subcategory,
+            "yes_price": m.yes_price,
+            "volume": m.volume,
+            "threshold": m.threshold,
+            "event_slug": m.event_slug
+        }
+        for m in markets
+    ]
+
+
+class AILogResponse(BaseModel):
+    id: int
+    timestamp: datetime
+    provider: str
+    model: str
+    call_type: str
+    latency_ms: float
+    tokens_used: int
+    cost_usd: float
+    success: bool
+    related_market: Optional[str]
+
+
+@app.get("/api/ai/logs", response_model=List[AILogResponse])
+async def get_ai_logs(
+    limit: int = 50,
+    provider: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """Get recent AI API call logs."""
+    query = db.query(AILog)
+
+    if provider:
+        query = query.filter(AILog.provider == provider)
+
+    logs = query.order_by(AILog.timestamp.desc()).limit(limit).all()
+
+    return [
+        AILogResponse(
+            id=log.id,
+            timestamp=log.timestamp,
+            provider=log.provider,
+            model=log.model,
+            call_type=log.call_type,
+            latency_ms=log.latency_ms,
+            tokens_used=log.tokens_used,
+            cost_usd=log.cost_usd,
+            success=log.success,
+            related_market=log.related_market
+        )
+        for log in logs
+    ]
+
+
+@app.get("/api/ai/stats")
+async def get_ai_stats(db: Session = Depends(get_db)):
+    """Get AI usage statistics for today."""
+    from datetime import date
+
+    today_start = datetime.combine(date.today(), datetime.min.time())
+
+    logs = db.query(AILog).filter(AILog.timestamp >= today_start).all()
+
+    total_cost = sum(log.cost_usd for log in logs)
+    total_tokens = sum(log.tokens_used for log in logs)
+    avg_latency = sum(log.latency_ms for log in logs) / len(logs) if logs else 0
+
+    by_provider = {}
+    for log in logs:
+        if log.provider not in by_provider:
+            by_provider[log.provider] = {"calls": 0, "cost": 0, "tokens": 0}
+        by_provider[log.provider]["calls"] += 1
+        by_provider[log.provider]["cost"] += log.cost_usd
+        by_provider[log.provider]["tokens"] += log.tokens_used
+
+    return {
+        "today": {
+            "total_calls": len(logs),
+            "total_cost_usd": round(total_cost, 4),
+            "total_tokens": total_tokens,
+            "avg_latency_ms": round(avg_latency, 2),
+            "by_provider": by_provider
+        },
+        "budget": {
+            "daily_limit_usd": settings.AI_DAILY_BUDGET_USD if hasattr(settings, 'AI_DAILY_BUDGET_USD') else 10.0,
+            "remaining_usd": round((settings.AI_DAILY_BUDGET_USD if hasattr(settings, 'AI_DAILY_BUDGET_USD') else 10.0) - total_cost, 4)
+        }
+    }
 
 
 @app.websocket("/ws/events")
