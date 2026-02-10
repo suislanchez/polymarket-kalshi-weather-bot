@@ -18,6 +18,24 @@ class Settings(BaseSettings):
     BLS_API_KEY: Optional[str] = None
     MAPBOX_TOKEN: Optional[str] = None
 
+    # AI API Keys
+    ANTHROPIC_API_KEY: Optional[str] = None
+    GROQ_API_KEY: Optional[str] = None
+
+    # AI Model Configuration
+    CLAUDE_MODEL: str = "claude-sonnet-4-20250514"
+    GROQ_MODEL: str = "llama-3.1-70b-versatile"
+
+    # AI Feature Flags
+    AI_ENHANCED_SIGNALS: bool = True  # Use Claude for signal reasoning
+    AI_FAST_CLASSIFICATION: bool = True  # Use Groq for market classification
+    AI_LOG_ALL_CALLS: bool = True  # Log all AI API calls
+    AI_DAILY_BUDGET_USD: float = 10.0  # Daily spending limit for AI APIs
+
+    # Category Settings
+    ENABLED_CATEGORIES: list = ["weather", "crypto", "politics", "economics"]
+    EXCLUDE_SPORTS: bool = True  # Always exclude sports markets
+
     # Bot settings
     SIMULATION_MODE: bool = True  # Always True for Phase 1
     INITIAL_BANKROLL: float = 10000.0  # Virtual bankroll

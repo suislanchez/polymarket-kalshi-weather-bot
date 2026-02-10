@@ -17,6 +17,13 @@ pandas==2.1.4
 # Scheduling
 apscheduler==3.10.4
 
+# AI / LLM
+anthropic>=0.40.0
+groq>=0.4.0
+
+# Logging
+structlog>=24.1.0
+
 # Utils
 python-dotenv==1.0.0
 orjson==3.9.10

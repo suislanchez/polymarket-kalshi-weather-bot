@@ -64,7 +64,7 @@ function App() {
 
   // Get unique cities from signals
   const cities = useMemo(() => {
-    if (!data) return []
+    if (!data?.active_signals) return []
     const uniqueCities = new Set<string>()
     data.active_signals.forEach(s => {
       if (s.city) uniqueCities.add(s.city)
@@ -74,7 +74,7 @@ function App() {
 
   // Filter signals
   const filteredSignals = useMemo(() => {
-    if (!data) return []
+    if (!data?.active_signals) return []
     return data.active_signals.filter(signal => {
       if (signalFilters.search) {
         const search = signalFilters.search.toLowerCase()
@@ -96,7 +96,7 @@ function App() {
 
   // Filter trades
   const filteredTrades = useMemo(() => {
-    if (!data) return []
+    if (!data?.recent_trades) return []
     return data.recent_trades.filter(trade => {
       if (tradeFilters.search) {
         const search = tradeFilters.search.toLowerCase()
@@ -257,7 +257,7 @@ function App() {
             <div className="px-4 py-3 border-b border-neutral-800 flex items-center justify-between">
               <span className="text-xs font-medium text-neutral-500 uppercase tracking-wider">Active Signals</span>
               <span className="px-2 py-0.5 text-[10px] font-medium bg-amber-500/10 text-amber-500 border border-amber-500/20">
-                {filteredSignals.length} / {data.active_signals.length} signals
+                {filteredSignals.length} / {data?.active_signals?.length ?? 0} signals
               </span>
             </div>
             <FilterBar
@@ -280,7 +280,7 @@ function App() {
           <div className="px-4 py-3 border-b border-neutral-800 flex items-center justify-between">
             <span className="text-xs font-medium text-neutral-500 uppercase tracking-wider">Trade History</span>
             <span className="text-[10px] text-neutral-600 tabular-nums">
-              {filteredTrades.length} / {data.recent_trades.length} trades
+              {filteredTrades.length} / {data?.recent_trades?.length ?? 0} trades
             </span>
           </div>
           <FilterBar

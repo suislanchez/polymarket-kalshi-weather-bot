@@ -2,10 +2,15 @@
 import httpx
 import re
 import json
+import logging
 from datetime import datetime
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Set
 from dataclasses import dataclass
 import asyncio
+
+from backend.core.classifier import classify_market, is_sports_market, MarketCategory
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -209,12 +214,150 @@ async def fetch_all_weather_markets() -> List[MarketData]:
     return polymarket_markets + kalshi_markets
 
 
+async def fetch_polymarket_markets(
+    categories: Optional[Set[str]] = None,
+    exclude_sports: bool = True,
+    limit: int = 200
+) -> List[MarketData]:
+    """
+    Fetch markets from Polymarket with category filtering.
+
+    Args:
+        categories: Set of categories to include (None = all except sports)
+        exclude_sports: Whether to exclude sports markets
+        limit: Maximum events to fetch
+
+    Returns:
+        List of MarketData for matching markets
+    """
+    url = "https://gamma-api.polymarket.com/events"
+    params = {
+        "active": "true",
+        "closed": "false",
+        "limit": limit
+    }
+
+    markets = []
+
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(url, params=params, timeout=15.0)
+            response.raise_for_status()
+            events = response.json()
+
+            for event in events:
+                title = event.get("title", "")
+                event_slug = event.get("slug", "")
+
+                # Skip sports if excluded
+                if exclude_sports and is_sports_market(title):
+                    continue
+
+                # Classify the market
+                category, confidence = classify_market(title)
+
+                # Filter by requested categories
+                if categories and category.value not in categories:
+                    continue
+
+                # Get markets within this event
+                event_markets = event.get("markets", [])
+                for market in event_markets:
+                    market_title = market.get("question", title)
+
+                    # Parse weather details if applicable
+                    parsed = {}
+                    if category == MarketCategory.WEATHER:
+                        parsed = parse_weather_market(market_title)
+
+                    # Parse prices safely
+                    outcome_prices = market.get("outcomePrices", "")
+                    yes_price = 0.5
+                    if outcome_prices:
+                        try:
+                            prices = json.loads(outcome_prices) if isinstance(outcome_prices, str) else outcome_prices
+                            if isinstance(prices, list) and len(prices) >= 1:
+                                yes_price = float(prices[0])
+                        except (json.JSONDecodeError, ValueError, TypeError) as e:
+                            logger.debug(f"Price parse error for {market.get('id', 'unknown')}: {e}")
+
+                    markets.append(MarketData(
+                        platform="polymarket",
+                        ticker=market.get("id", ""),
+                        title=market_title,
+                        category=category.value,
+                        subcategory=parsed.get("subcategory"),
+                        yes_price=yes_price,
+                        no_price=1 - yes_price,
+                        volume=float(market.get("volume", 0) or 0),
+                        settlement_time=None,
+                        threshold=parsed.get("threshold"),
+                        direction=parsed.get("direction"),
+                        event_slug=event_slug
+                    ))
+
+        except Exception as e:
+            logger.error(f"Polymarket fetch error: {e}")
+
+    logger.info(f"Fetched {len(markets)} Polymarket markets")
+    return markets
+
+
+async def fetch_all_markets(
+    categories: Optional[Set[str]] = None,
+    exclude_sports: bool = True
+) -> List[MarketData]:
+    """
+    Fetch markets from all platforms.
+
+    Args:
+        categories: Set of categories to include (e.g., {"weather", "crypto"})
+        exclude_sports: Whether to exclude sports markets (default True)
+
+    Returns:
+        Combined list of markets from all platforms
+    """
+    # Default categories from config
+    if categories is None:
+        from backend.config import settings
+        categories = set(settings.ENABLED_CATEGORIES)
+
+    # Fetch from all platforms in parallel
+    polymarket_task = fetch_polymarket_markets(categories, exclude_sports)
+    kalshi_task = fetch_kalshi_markets_public()
+
+    polymarket_markets, kalshi_markets = await asyncio.gather(
+        polymarket_task, kalshi_task
+    )
+
+    # Filter Kalshi markets by category too
+    if categories:
+        kalshi_markets = [m for m in kalshi_markets if m.category in categories]
+
+    all_markets = polymarket_markets + kalshi_markets
+    logger.info(f"Total markets fetched: {len(all_markets)} (Polymarket: {len(polymarket_markets)}, Kalshi: {len(kalshi_markets)})")
+
+    return all_markets
+
+
 # Quick test
 if __name__ == "__main__":
     async def test():
-        markets = await fetch_polymarket_weather_markets()
-        print(f"Found {len(markets)} Polymarket weather markets")
-        for m in markets[:5]:
-            print(f"  {m.title[:60]}... - ${m.volume:,.0f} volume")
+        # Test multi-category fetch
+        print("Fetching all markets (excluding sports)...")
+        markets = await fetch_polymarket_markets(exclude_sports=True)
+        print(f"Found {len(markets)} Polymarket markets")
+
+        # Group by category
+        by_category: Dict[str, List[MarketData]] = {}
+        for m in markets:
+            if m.category not in by_category:
+                by_category[m.category] = []
+            by_category[m.category].append(m)
+
+        for cat, cat_markets in by_category.items():
+            print(f"\n{cat.upper()} ({len(cat_markets)} markets):")
+            for m in cat_markets[:3]:
+                print(f"  {m.title[:60]}... - ${m.volume:,.0f}")
 
     asyncio.run(test())
