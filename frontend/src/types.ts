@@ -38,6 +38,7 @@ export interface Trade {
   id: number
   market_ticker: string
   platform: string
+  event_slug?: string | null
   direction: string
   entry_price: number
   size: number

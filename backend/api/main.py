@@ -113,6 +113,7 @@ class TradeResponse(BaseModel):
     id: int
     market_ticker: str
     platform: str
+    event_slug: Optional[str] = None
     direction: str
     entry_price: float
     size: float
@@ -394,6 +395,7 @@ async def get_trades(
             id=t.id,
             market_ticker=t.market_ticker,
             platform=t.platform,
+            event_slug=t.event_slug,
             direction=t.direction,
             entry_price=t.entry_price,
             size=t.size,
@@ -454,6 +456,7 @@ async def simulate_trade(
     trade = Trade(
         market_ticker=signal.market.ticker,
         platform=signal.market.platform,
+        event_slug=getattr(signal.market, "event_slug", None),
         direction=signal.direction,
         entry_price=signal.market.yes_price if signal.direction == "yes" else signal.market.no_price,
         size=min(signal.suggested_size, state.bankroll * 0.05),
@@ -814,6 +817,7 @@ async def get_dashboard(db: Session = Depends(get_db)):
             id=t.id,
             market_ticker=t.market_ticker,
             platform=t.platform,
+            event_slug=t.event_slug,
             direction=t.direction,
             entry_price=t.entry_price,
             size=t.size,

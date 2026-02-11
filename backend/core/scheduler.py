@@ -149,6 +149,7 @@ async def scan_and_trade_job():
                 trade = Trade(
                     market_ticker=signal.market.ticker,
                     platform=signal.market.platform,
+                    event_slug=getattr(signal.market, "event_slug", None),
                     direction=signal.direction,
                     entry_price=signal.market.yes_price if signal.direction == "yes" else signal.market.no_price,
                     size=trade_size,

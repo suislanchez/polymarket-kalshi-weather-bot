@@ -132,7 +132,7 @@ export function TradesTable({ trades }: Props) {
             const isWin = trade.result === 'win'
             const platformKey = trade.platform.toLowerCase() as keyof typeof platformStyles
             const style = platformStyles[platformKey] || platformStyles.kalshi
-            const marketUrl = getMarketUrl(trade.platform, trade.market_ticker)
+            const marketUrl = getMarketUrl(trade.platform, trade.market_ticker, trade.event_slug ?? undefined)
 
             return (
               <tr

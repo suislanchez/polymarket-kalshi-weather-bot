@@ -107,6 +107,7 @@ class Trade(Base):
     signal_id = Column(Integer, index=True)
     market_ticker = Column(String, index=True)
     platform = Column(String)
+    event_slug = Column(String, nullable=True)  # For building platform URLs
 
     # Trade details
     direction = Column(String)

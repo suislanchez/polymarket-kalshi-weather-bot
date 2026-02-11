@@ -1,8 +1,6 @@
 import { useState, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { fetchDashboard, runScan, simulateTrade, startBot, stopBot, fetchAIStats } from './api'
-import { Map } from './components/Map'
-import { Globe } from './components/Globe'
 import { StatsCards } from './components/StatsCards'
 import { SignalsTable } from './components/SignalsTable'
 import { TradesTable } from './components/TradesTable'
@@ -174,6 +172,23 @@ function App() {
   }
   const citiesData = data.cities ?? []
   const equityCurve = data.equity_curve ?? []
+  const cityHighlights = useMemo(() => {
+    if (!citiesData.length) return []
+    return [...citiesData]
+      .sort((a, b) => b.confidence - a.confidence)
+      .slice(0, 3)
+  }, [citiesData])
+  const highConfidenceCount = useMemo(() => {
+    return citiesData.filter(city => city.confidence >= 0.7).length
+  }, [citiesData])
+  const platformBreakdown = useMemo(() => {
+    const counts: Record<string, number> = {}
+    data?.active_signals?.forEach(signal => {
+      const key = signal.platform.toLowerCase()
+      counts[key] = (counts[key] || 0) + 1
+    })
+    return counts
+  }, [data?.active_signals])
 
   return (
     <div className="min-h-screen bg-black text-neutral-200">
@@ -234,30 +249,25 @@ function App() {
           <StatsCards stats={stats} />
         </section>
 
-        {/* Main Grid - Globe, Map, Terminal */}
-        <div className="grid lg:grid-cols-3 gap-2 mb-3">
-          {/* Globe */}
-          <div className="bg-neutral-900 border border-neutral-800 overflow-hidden">
+        {/* Primary analytic layout */}
+        <div className="grid gap-3 xl:grid-cols-[3fr,2fr] mb-3">
+          {/* Equity Chart */}
+          <div className="bg-neutral-900 border border-neutral-800 overflow-hidden flex flex-col">
             <div className="px-3 py-2 border-b border-neutral-800 flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <span className="text-xs font-medium text-neutral-500 uppercase tracking-wider">3D Globe</span>
-                <div className="live-dot" />
-              </div>
-              <span className="text-[10px] text-neutral-600 tabular-nums">{citiesData.length} markets</span>
+              <span className="text-xs font-medium text-neutral-500 uppercase tracking-wider">Portfolio Performance</span>
+              <span className={`text-xs tabular-nums ${stats.total_pnl >= 0 ? 'text-green-500' : 'text-red-500'}`}>
+                {stats.total_pnl >= 0 ? '+' : ''}${stats.total_pnl.toFixed(0)}
+              </span>
             </div>
-            <Globe cities={citiesData} />
+            <div className="p-3 flex-1">
+              <EquityChart
+                data={equityCurve}
+                initialBankroll={stats.bankroll - stats.total_pnl}
+              />
+            </div>
           </div>
 
-          {/* Map */}
-          <div className="bg-neutral-900 border border-neutral-800 overflow-hidden">
-            <div className="px-3 py-2 border-b border-neutral-800 flex items-center justify-between">
-              <span className="text-xs font-medium text-neutral-500 uppercase tracking-wider">Market Coverage</span>
-              <span className="text-[10px] text-neutral-600">US Markets</span>
-            </div>
-            <Map cities={citiesData} />
-          </div>
-
-          {/* Terminal */}
+          {/* System Log */}
           <div className="bg-neutral-900 border border-neutral-800 overflow-hidden">
             <Terminal
               isRunning={stats.is_running}
@@ -270,30 +280,77 @@ function App() {
           </div>
         </div>
 
-        {/* Charts Row */}
-        <div className="grid lg:grid-cols-2 gap-2 mb-3">
-          {/* Equity Chart */}
+        {/* Coverage summaries */}
+        <div className="grid gap-3 md:grid-cols-2 mb-3">
           <div className="bg-neutral-900 border border-neutral-800 overflow-hidden">
             <div className="px-3 py-2 border-b border-neutral-800 flex items-center justify-between">
-              <span className="text-xs font-medium text-neutral-500 uppercase tracking-wider">Portfolio Performance</span>
-              <span className={`text-xs tabular-nums ${stats.total_pnl >= 0 ? 'text-green-500' : 'text-red-500'}`}>
-                {stats.total_pnl >= 0 ? '+' : ''}${stats.total_pnl.toFixed(0)}
-              </span>
+              <span className="text-xs font-medium text-neutral-500 uppercase tracking-wider">3D Globe (Summary)</span>
+              <span className="text-[10px] text-neutral-600">{citiesData.length} cities</span>
             </div>
-            <div className="p-3">
-              <EquityChart
-                data={equityCurve}
-                initialBankroll={stats.bankroll - stats.total_pnl}
-              />
+            <div className="p-4 space-y-4">
+              <div className="flex items-end justify-between">
+                <div>
+                  <div className="text-xs uppercase text-neutral-500 mb-1 tracking-wider">Active Cities</div>
+                  <div className="text-3xl font-semibold text-neutral-100">{citiesData.length}</div>
+                </div>
+                <div className="text-right">
+                  <div className="text-xs uppercase text-neutral-500 mb-1 tracking-wider">High Confidence ≥70%</div>
+                  <div className="text-xl font-semibold text-green-400">{highConfidenceCount}</div>
+                </div>
+              </div>
+              <div className="space-y-2">
+                {cityHighlights.length > 0 ? cityHighlights.map(city => (
+                  <div key={city.city} className="flex items-center justify-between text-sm text-neutral-300 border border-neutral-800/80 px-3 py-2">
+                    <span className="uppercase tracking-wide text-[11px]">{city.city}</span>
+                    <span className="text-neutral-500 tabular-nums">
+                      {city.high_temp.toFixed(0)}°F · {(city.confidence * 100).toFixed(0)}%
+                    </span>
+                  </div>
+                )) : (
+                  <div className="text-neutral-600 text-sm">Waiting for weather data...</div>
+                )}
+              </div>
             </div>
           </div>
-
-          {/* Signals */}
           <div className="bg-neutral-900 border border-neutral-800 overflow-hidden">
+            <div className="px-3 py-2 border-b border-neutral-800 flex items-center justify-between">
+              <span className="text-xs font-medium text-neutral-500 uppercase tracking-wider">Market Coverage</span>
+              <span className="text-[10px] text-neutral-600">{data?.active_signals?.length ?? 0} signals</span>
+            </div>
+            <div className="p-4 space-y-4">
+              <div className="flex items-end justify-between">
+                <div>
+                  <div className="text-xs uppercase text-neutral-500 mb-1 tracking-wider">Active Signals</div>
+                  <div className="text-3xl font-semibold text-neutral-100">{data?.active_signals?.length ?? 0}</div>
+                </div>
+                <div className="text-right">
+                  <div className="text-xs uppercase text-neutral-500 mb-1 tracking-wider">Actionable</div>
+                  <div className="text-xl font-semibold text-amber-400">{filteredSignals.length}</div>
+                </div>
+              </div>
+              <div className="space-y-2">
+                {Object.keys(platformBreakdown).length > 0 ? (
+                  Object.entries(platformBreakdown).map(([platform, count]) => (
+                    <div key={platform} className="flex items-center justify-between text-sm border border-neutral-800/80 px-3 py-2">
+                      <span className="uppercase tracking-wide text-[11px]">{platform}</span>
+                      <span className="text-neutral-500 tabular-nums">{count} markets</span>
+                    </div>
+                  ))
+                ) : (
+                  <div className="text-neutral-600 text-sm">No signals loaded yet</div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Signals & Trades */}
+        <div className="grid gap-3 lg:grid-cols-2">
+          <div className="bg-neutral-900 border border-neutral-800 overflow-hidden flex flex-col">
             <div className="px-3 py-2 border-b border-neutral-800 flex items-center justify-between">
               <span className="text-xs font-medium text-neutral-500 uppercase tracking-wider">Active Signals</span>
               <span className="px-2 py-0.5 text-[10px] font-medium bg-amber-500/10 text-amber-500 border border-amber-500/20">
-                {filteredSignals.length} / {data?.active_signals?.length ?? 0} signals
+                {filteredSignals.length} / {data?.active_signals?.length ?? 0}
               </span>
             </div>
             <FilterBar
@@ -301,7 +358,7 @@ function App() {
               onFilterChange={setSignalFilters}
               cities={cities}
             />
-            <div className="p-3 max-h-[250px] overflow-y-auto">
+            <div className="p-3 max-h-[360px] overflow-y-auto flex-1">
               <SignalsTable
                 signals={filteredSignals}
                 onSimulateTrade={(ticker) => tradeMutation.mutate(ticker)}
@@ -309,24 +366,22 @@ function App() {
               />
             </div>
           </div>
-        </div>
-
-        {/* Trades Table */}
-        <div className="bg-neutral-900 border border-neutral-800 overflow-hidden">
-          <div className="px-3 py-2 border-b border-neutral-800 flex items-center justify-between">
-            <span className="text-xs font-medium text-neutral-500 uppercase tracking-wider">Trade History</span>
-            <span className="text-[10px] text-neutral-600 tabular-nums">
-              {filteredTrades.length} / {data?.recent_trades?.length ?? 0} trades
-            </span>
-          </div>
-          <FilterBar
-            filters={tradeFilters}
-            onFilterChange={setTradeFilters}
-            cities={[]}
-            showStatus
-          />
-          <div className="p-3 max-h-[280px] overflow-y-auto">
-            <TradesTable trades={filteredTrades} />
+          <div className="bg-neutral-900 border border-neutral-800 overflow-hidden flex flex-col">
+            <div className="px-3 py-2 border-b border-neutral-800 flex items-center justify-between">
+              <span className="text-xs font-medium text-neutral-500 uppercase tracking-wider">Trade History</span>
+              <span className="text-[10px] text-neutral-600 tabular-nums">
+                {filteredTrades.length} / {data?.recent_trades?.length ?? 0}
+              </span>
+            </div>
+            <FilterBar
+              filters={tradeFilters}
+              onFilterChange={setTradeFilters}
+              cities={[]}
+              showStatus
+            />
+            <div className="p-3 max-h-[360px] overflow-y-auto flex-1">
+              <TradesTable trades={filteredTrades} />
+            </div>
           </div>
         </div>
 
