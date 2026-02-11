@@ -109,6 +109,8 @@ async def fetch_polymarket_weather_markets() -> List[MarketData]:
             response.raise_for_status()
             events = response.json()
 
+            logger.info(f"Polymarket returned {len(events)} events")
+
             for event in events:
                 title = event.get("title", "")
                 title_lower = title.lower()
@@ -122,6 +124,8 @@ async def fetch_polymarket_weather_markets() -> List[MarketData]:
 
                 if not is_weather:
                     continue
+
+                logger.debug(f"Found weather event: {title[:60]}...")
 
                 # Get markets within this event
                 event_markets = event.get("markets", [])

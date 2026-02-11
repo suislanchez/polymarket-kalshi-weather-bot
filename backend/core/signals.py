@@ -1,4 +1,5 @@
 """Signal generator - calculates edges and generates trading signals."""
+import logging
 from datetime import datetime
 from typing import Optional, List, Dict
 from dataclasses import dataclass, field
@@ -7,6 +8,8 @@ import asyncio
 from backend.config import settings
 from backend.data.weather import WeatherPrediction, fetch_weather_prediction
 from backend.data.markets import MarketData, fetch_all_weather_markets
+
+logger = logging.getLogger("trading_bot")
 
 
 @dataclass
@@ -184,11 +187,14 @@ async def scan_for_signals() -> List[TradingSignal]:
     """
     signals = []
 
+    logger.info("Fetching markets from Polymarket...")
+
     # Fetch markets and weather data concurrently
     markets_task = fetch_all_weather_markets()
     weather_cache: Dict[str, WeatherPrediction] = {}
 
     markets = await markets_task
+    logger.info(f"Found {len(markets)} weather markets")
 
     # Group markets by city
     city_markets: Dict[str, List[MarketData]] = {}
@@ -198,11 +204,16 @@ async def scan_for_signals() -> List[TradingSignal]:
                 city_markets[market.subcategory] = []
             city_markets[market.subcategory].append(market)
 
+    logger.info(f"Markets span {len(city_markets)} cities: {list(city_markets.keys())}")
+
     # Fetch weather for each city
     for city in city_markets.keys():
         weather = await fetch_weather_prediction(city)
         if weather:
             weather_cache[city] = weather
+            logger.debug(f"Weather for {city}: {weather.high_temp:.1f}°F high")
+
+    logger.info(f"Weather data available for {len(weather_cache)} cities")
 
     # Generate signals for each market
     for market in markets:
@@ -214,9 +225,14 @@ async def scan_for_signals() -> List[TradingSignal]:
 
         if signal:
             signals.append(signal)
+            if signal.passes_threshold:
+                logger.info(f"SIGNAL: {signal.market.title[:50]}... Edge: {signal.edge:+.1%} -> {signal.direction.upper()}")
 
     # Sort by absolute edge (best opportunities first)
     signals.sort(key=lambda s: abs(s.edge), reverse=True)
+
+    actionable = [s for s in signals if s.passes_threshold]
+    logger.info(f"Generated {len(signals)} signals, {len(actionable)} actionable (>{settings.MIN_EDGE_THRESHOLD:.0%} edge)")
 
     return signals
 

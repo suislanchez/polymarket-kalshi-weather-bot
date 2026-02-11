@@ -1,11 +1,17 @@
 """Weather data fetchers - NWS, Open-Meteo Ensemble, ECMWF."""
 import httpx
+import logging
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List, Tuple
 import asyncio
 from dataclasses import dataclass
 
 from backend.config import settings
+
+logger = logging.getLogger("trading_bot")
+
+# Rate limiting for Open-Meteo (free tier: ~10 requests/minute)
+OPENMETEO_DELAY = 0.5  # seconds between requests
 
 
 @dataclass
@@ -27,8 +33,15 @@ class WeatherPrediction:
             point = self.high_temp if use_high else self.low_temp
             # Assume ~3°F standard deviation for NWS forecasts
             std_dev = 3.0
-            from scipy import stats
-            return 1 - stats.norm.cdf(threshold, loc=point, scale=std_dev)
+            try:
+                from scipy import stats
+                return 1 - stats.norm.cdf(threshold, loc=point, scale=std_dev)
+            except ImportError:
+                # Simple linear approximation without scipy
+                diff = point - threshold
+                # Rough approximation: prob changes ~16% per std_dev
+                prob = 0.5 + (diff / std_dev) * 0.16
+                return max(0.0, min(1.0, prob))
 
         above = sum(1 for t in temps if t > threshold)
         return above / len(temps)
@@ -106,7 +119,7 @@ async def fetch_nws_forecast(city: str) -> Optional[WeatherPrediction]:
             )
 
         except Exception as e:
-            print(f"NWS fetch error for {city}: {e}")
+            logger.warning(f"NWS fetch error for {city}: {e}")
             return None
 
 
@@ -193,8 +206,14 @@ async def fetch_openmeteo_ensemble(
                 source="openmeteo_gfs_ensemble"
             )
 
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 429:
+                logger.warning(f"Open-Meteo rate limited for {city}, will retry on next scan")
+            else:
+                logger.error(f"Open-Meteo HTTP error for {city}: {e}")
+            return None
         except Exception as e:
-            print(f"Open-Meteo fetch error for {city}: {e}")
+            logger.error(f"Open-Meteo fetch error for {city}: {e}")
             return None
 
 
@@ -218,17 +237,28 @@ async def fetch_weather_prediction(city: str) -> Optional[WeatherPrediction]:
 
 
 async def fetch_all_cities() -> Dict[str, WeatherPrediction]:
-    """Fetch weather predictions for all supported cities."""
+    """Fetch weather predictions for all supported cities with rate limiting."""
     cities = list(settings.CITY_COORDS.keys())
+    results = {}
 
-    tasks = [fetch_weather_prediction(city) for city in cities]
-    results = await asyncio.gather(*tasks)
+    logger.info(f"Fetching weather for {len(cities)} cities...")
 
-    return {
-        city: pred
-        for city, pred in zip(cities, results)
-        if pred is not None
-    }
+    for city in cities:
+        try:
+            pred = await fetch_weather_prediction(city)
+            if pred:
+                results[city] = pred
+                logger.debug(f"Weather for {city}: High {pred.high_temp:.1f}°F, {len(pred.ensemble_highs)} ensemble members")
+            else:
+                logger.warning(f"No weather data for {city}")
+
+            # Rate limiting delay
+            await asyncio.sleep(OPENMETEO_DELAY)
+        except Exception as e:
+            logger.error(f"Failed to fetch weather for {city}: {e}")
+
+    logger.info(f"Weather data fetched for {len(results)}/{len(cities)} cities")
+    return results
 
 
 # Quick test

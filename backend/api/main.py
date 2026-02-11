@@ -150,7 +150,16 @@ class EventResponse(BaseModel):
 # Initialize database and scheduler on startup
 @app.on_event("startup")
 async def startup():
+    import logging
+    logger = logging.getLogger("trading_bot")
+
+    print("=" * 60)
+    print("PREDICTION MARKET TRADING BOT v2.0")
+    print("=" * 60)
+    print("Initializing database...")
+
     init_db()
+
     # Initialize bot state if not exists
     db = SessionLocal()
     try:
@@ -165,17 +174,33 @@ async def startup():
             )
             db.add(state)
             db.commit()
+            print(f"Created new bot state with ${settings.INITIAL_BANKROLL:,.2f} bankroll")
         else:
             # Set running on startup
             state.is_running = True
             db.commit()
+            print(f"Loaded bot state: Bankroll ${state.bankroll:,.2f}, P&L ${state.total_pnl:+,.2f}, {state.total_trades} trades")
     finally:
         db.close()
+
+    print("")
+    print("Configuration:")
+    print(f"  - Simulation mode: {settings.SIMULATION_MODE}")
+    print(f"  - Min edge threshold: {settings.MIN_EDGE_THRESHOLD:.0%}")
+    print(f"  - Kelly fraction: {settings.KELLY_FRACTION:.0%}")
+    print(f"  - Enabled categories: {settings.ENABLED_CATEGORIES}")
+    print("")
 
     # Start the autonomous trading scheduler
     from backend.core.scheduler import start_scheduler, log_event
     start_scheduler()
     log_event("success", "Trading bot initialized and running")
+
+    print("Bot is now running autonomously!")
+    print("  - Market scan: every 5 minutes")
+    print("  - Settlement check: every 30 minutes")
+    print("  - Heartbeat: every 1 minute")
+    print("=" * 60)
 
 
 @app.on_event("shutdown")

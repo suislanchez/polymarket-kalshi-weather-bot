@@ -63,6 +63,9 @@ async def scan_and_trade_job():
     Runs every 5 minutes.
     """
     log_event("info", "Starting market scan...")
+    logger.info("=" * 60)
+    logger.info("MARKET SCAN STARTED")
+    logger.info("=" * 60)
 
     try:
         # Scan for signals
