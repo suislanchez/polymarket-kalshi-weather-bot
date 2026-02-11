@@ -102,13 +102,29 @@ async def scan_and_trade_job():
                 log_event("info", "Bot is paused, skipping trades")
                 return
 
-            # Execute trades for top signals (AGGRESSIVE: max 20 per scan)
-            MAX_TRADES_PER_SCAN = 20
-            MIN_TRADE_SIZE = 5  # Minimum $5 per trade
-            MAX_TRADE_FRACTION = 0.10  # Up to 10% of bankroll per trade
+            # SMART TRADING: Quality over quantity
+            MAX_TRADES_PER_SCAN = 5  # Reduced - only best trades
+            MIN_TRADE_SIZE = 20  # Minimum $20 per trade (meaningful size)
+            MAX_TRADE_FRACTION = 0.05  # Max 5% of bankroll per trade
+            MAX_PER_CATEGORY = getattr(settings, 'MAX_TRADES_PER_CATEGORY', 3)
+            MAX_TOTAL_PENDING = getattr(settings, 'MAX_TOTAL_PENDING_TRADES', 15)
+
+            # Check total pending trades
+            total_pending = db.query(Trade).filter(Trade.settled == False).count()
+            if total_pending >= MAX_TOTAL_PENDING:
+                log_event("info", f"Max pending trades reached ({total_pending}/{MAX_TOTAL_PENDING}), skipping new trades")
+                return
+
+            # Track trades per category this scan
+            category_counts = {}
 
             trades_executed = 0
-            for signal in actionable[:MAX_TRADES_PER_SCAN]:
+            for signal in actionable[:MAX_TRADES_PER_SCAN * 2]:  # Check more, execute fewer
+                # Category limit
+                cat = getattr(signal.market, 'category', 'other') or 'other'
+                if category_counts.get(cat, 0) >= MAX_PER_CATEGORY:
+                    continue
+
                 # Check if we already have a pending trade for this market
                 existing = db.query(Trade).filter(
                     Trade.market_ticker == signal.market.ticker,
@@ -116,14 +132,17 @@ async def scan_and_trade_job():
                 ).first()
 
                 if existing:
-                    continue  # Skip silently to reduce log spam
+                    continue
 
-                # Calculate trade size (more aggressive)
+                # Calculate trade size (conservative)
                 trade_size = min(signal.suggested_size, state.bankroll * MAX_TRADE_FRACTION)
-                trade_size = max(trade_size, MIN_TRADE_SIZE)  # At least $5
+                trade_size = max(trade_size, MIN_TRADE_SIZE)
 
                 if state.bankroll < MIN_TRADE_SIZE:
                     log_event("warning", f"Bankroll too low: ${state.bankroll:.2f}")
+                    break
+
+                if trades_executed >= MAX_TRADES_PER_SCAN:
                     break
 
                 # Create trade
@@ -141,10 +160,10 @@ async def scan_and_trade_job():
                 db.add(trade)
                 state.total_trades += 1
                 trades_executed += 1
+                category_counts[cat] = category_counts.get(cat, 0) + 1
 
                 # Truncate title for display
                 title_short = signal.market.title[:40] + "..." if len(signal.market.title) > 40 else signal.market.title
-                cat = getattr(signal.market, 'category', 'other') or 'other'
 
                 log_event("trade", f"[{cat.upper()}] {signal.direction.upper()} ${trade_size:.0f} @ {trade.entry_price:.0%}: {title_short}", {
                     "ticker": signal.market.ticker,
@@ -263,19 +282,19 @@ def start_scheduler():
 
     scheduler = AsyncIOScheduler()
 
-    # Scan markets every 2 minutes (AGGRESSIVE)
+    # Scan markets every 5 minutes (balanced - not too aggressive)
     scheduler.add_job(
         scan_and_trade_job,
-        IntervalTrigger(minutes=2),
+        IntervalTrigger(minutes=5),
         id="market_scan",
         replace_existing=True,
         max_instances=1
     )
 
-    # Check settlements every 10 minutes (faster P&L updates)
+    # Check settlements every 15 minutes (markets don't resolve that fast)
     scheduler.add_job(
         settlement_job,
-        IntervalTrigger(minutes=10),
+        IntervalTrigger(minutes=15),
         id="settlement_check",
         replace_existing=True,
         max_instances=1
@@ -291,10 +310,12 @@ def start_scheduler():
     )
 
     scheduler.start()
-    log_event("success", "Autonomous trading scheduler started (AGGRESSIVE MODE)", {
-        "scan_interval": "2 minutes",
-        "settlement_interval": "10 minutes",
-        "max_trades_per_scan": 20
+    log_event("success", "Trading scheduler started (SMART MODE - cost optimized)", {
+        "scan_interval": "5 minutes",
+        "settlement_interval": "15 minutes",
+        "max_trades_per_scan": 5,
+        "min_edge": f"{settings.MIN_EDGE_THRESHOLD:.0%}",
+        "ai_provider": "groq (free)"
     })
 
     # Run initial scan

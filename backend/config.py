@@ -22,25 +22,32 @@ class Settings(BaseSettings):
     ANTHROPIC_API_KEY: Optional[str] = None
     GROQ_API_KEY: Optional[str] = None
 
-    # AI Model Configuration
-    CLAUDE_MODEL: str = "claude-sonnet-4-20250514"
-    GROQ_MODEL: str = "llama-3.1-70b-versatile"
+    # AI Model Configuration - USE GROQ ONLY (basically free)
+    CLAUDE_MODEL: str = "claude-sonnet-4-20250514"  # Only for manual/critical analysis
+    GROQ_MODEL: str = "llama-3.1-8b-instant"  # Fast & FREE - use this for everything
 
-    # AI Feature Flags
-    AI_ENHANCED_SIGNALS: bool = True  # Use Claude for signal reasoning
-    AI_FAST_CLASSIFICATION: bool = True  # Use Groq for market classification
+    # AI Feature Flags - COST OPTIMIZED
+    AI_ENHANCED_SIGNALS: bool = False  # Disable Claude (expensive) - use Groq only
+    AI_FAST_CLASSIFICATION: bool = True  # Use Groq for classification (free)
     AI_LOG_ALL_CALLS: bool = True  # Log all AI API calls
-    AI_DAILY_BUDGET_USD: float = 10.0  # Daily spending limit for AI APIs
+    AI_DAILY_BUDGET_USD: float = 1.0  # Low budget - rely on Groq (free)
+    AI_MAX_CALLS_PER_SCAN: int = 3  # Limit AI calls per scan
 
     # Category Settings
     ENABLED_CATEGORIES: list = ["weather", "crypto", "politics", "economics"]
     EXCLUDE_SPORTS: bool = True  # Always exclude sports markets
 
-    # Bot settings
+    # Bot settings - SMART TRADING
     SIMULATION_MODE: bool = True  # Always True for Phase 1
     INITIAL_BANKROLL: float = 10000.0  # Virtual bankroll
-    KELLY_FRACTION: float = 0.25  # Quarter Kelly
-    MIN_EDGE_THRESHOLD: float = 0.08  # 8 percentage points
+    KELLY_FRACTION: float = 0.15  # Reduced from 0.25 - more conservative
+    MIN_EDGE_THRESHOLD: float = 0.12  # Increased from 8% to 12% - only best trades
+
+    # Smart filters
+    MIN_MARKET_VOLUME: float = 10000.0  # Only trade markets with $10k+ volume
+    MAX_DAYS_TO_RESOLUTION: int = 30  # Skip markets resolving > 30 days out
+    MAX_TRADES_PER_CATEGORY: int = 3  # Limit exposure per category
+    MAX_TOTAL_PENDING_TRADES: int = 15  # Max open positions
 
     # Polling intervals (seconds)
     MARKET_SCAN_INTERVAL: int = 60

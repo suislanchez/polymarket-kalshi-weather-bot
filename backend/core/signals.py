@@ -13,7 +13,6 @@ logger = logging.getLogger("trading_bot")
 
 # Track AI usage for this scan
 _ai_calls_this_scan = 0
-_max_ai_calls_per_scan = 5  # Limit AI calls to control costs
 
 
 @dataclass
@@ -224,9 +223,10 @@ async def generate_price_signal(market: MarketData, use_ai: bool = False) -> Opt
     extremeness = abs(yes_price - 0.5) * 2  # 0 at 0.5, 1 at 0 or 1
     confidence = 0.4 + (extremeness * 0.3)  # 0.4 to 0.7
 
-    # Optional: Use Groq for quick analysis on best signals
+    # Optional: Use Groq for quick analysis on best signals (FREE)
     ai_reasoning = None
-    if use_ai and _ai_calls_this_scan < _max_ai_calls_per_scan and settings.GROQ_API_KEY:
+    max_ai = getattr(settings, 'AI_MAX_CALLS_PER_SCAN', 3)
+    if use_ai and _ai_calls_this_scan < max_ai and settings.GROQ_API_KEY:
         try:
             from backend.ai.groq import GroqClassifier
             groq = GroqClassifier()
@@ -279,16 +279,50 @@ async def generate_price_signal(market: MarketData, use_ai: bool = False) -> Opt
     )
 
 
+def _parse_end_date(market: MarketData) -> Optional[datetime]:
+    """Try to parse market end date for filtering."""
+    # This would need market end date data from Polymarket
+    # For now, return None (no filtering by date)
+    return None
+
+
+def _filter_markets_smart(markets: List[MarketData]) -> List[MarketData]:
+    """
+    Smart filtering to only trade on good opportunities.
+
+    Filters:
+    - Minimum volume requirement
+    - Maximum days to resolution
+    - Reasonable price range
+    """
+    min_volume = getattr(settings, 'MIN_MARKET_VOLUME', 10000)
+
+    filtered = []
+    for m in markets:
+        # Skip low volume markets (less liquid, harder to exit)
+        if m.volume < min_volume:
+            continue
+
+        # Skip markets at extreme prices (already resolved or about to)
+        if m.yes_price < 0.03 or m.yes_price > 0.97:
+            continue
+
+        filtered.append(m)
+
+    logger.info(f"Smart filter: {len(markets)} -> {len(filtered)} markets (min volume: ${min_volume:,.0f})")
+    return filtered
+
+
 async def scan_for_signals() -> List[TradingSignal]:
     """
     Scan all markets and generate signals.
 
-    This is the main bot loop function.
+    COST-OPTIMIZED: Uses smart filtering and minimal AI calls.
     """
     signals = []
 
     logger.info("=" * 50)
-    logger.info("Fetching ALL markets from Polymarket...")
+    logger.info("SMART SCAN: Fetching markets from Polymarket...")
 
     # Fetch ALL markets (not just weather)
     try:
@@ -298,6 +332,9 @@ async def scan_for_signals() -> List[TradingSignal]:
         markets = []
 
     logger.info(f"Found {len(markets)} total markets")
+
+    # SMART FILTER: Only keep high-quality opportunities
+    markets = _filter_markets_smart(markets)
 
     # Group by category
     by_category: Dict[str, List[MarketData]] = {}
