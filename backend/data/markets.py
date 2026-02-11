@@ -163,43 +163,17 @@ async def fetch_polymarket_weather_markets() -> List[MarketData]:
 
 async def fetch_kalshi_markets_public() -> List[MarketData]:
     """
-    Fetch Kalshi market data from public sources.
-    Note: Full API requires auth, but we can scrape public data.
+    Fetch Kalshi market data.
+
+    Note: Kalshi requires authenticated API access.
+    To enable real Kalshi markets, add KALSHI_API_KEY and KALSHI_API_SECRET to .env
+    and implement their API: https://trading-api.readme.io/reference/getting-started
+
+    Currently returns empty list - only Polymarket data is used.
     """
-    # For simulation, we'll generate realistic mock data based on real market structures
-    # In production, you'd use authenticated Kalshi API
-
-    markets = []
-
-    # Known Kalshi weather market structure
-    cities = ["nyc", "chicago", "miami", "austin"]
-    today = datetime.now()
-
-    for city in cities:
-        # Kalshi typically offers bracket markets for temperature
-        # e.g., "High temp 40-44°F", "High temp 45-49°F", etc.
-        base_temps = [30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80]
-
-        for i, temp in enumerate(base_temps[:-1]):
-            upper = base_temps[i + 1]
-
-            # Simulate realistic prices based on typical weather
-            # This would be replaced with real API data
-            markets.append(MarketData(
-                platform="kalshi",
-                ticker=f"KXHIGH{city.upper()}-{today.strftime('%y%b%d').upper()}-T{temp}",
-                title=f"Highest temperature in {city.upper()} today {temp}-{upper}°F",
-                category="weather",
-                subcategory=city,
-                yes_price=0.15,  # Placeholder - real data from API
-                no_price=0.85,
-                volume=10000,
-                settlement_time=today.replace(hour=23, minute=59),
-                threshold=float(temp),
-                direction="above"
-            ))
-
-    return markets
+    # Kalshi requires API authentication - return empty for now
+    # Real implementation would use: https://trading-api.kalshi.com/trade-api/v2/markets
+    return []
 
 
 async def fetch_all_weather_markets() -> List[MarketData]:
