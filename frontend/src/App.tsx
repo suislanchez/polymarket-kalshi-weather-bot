@@ -69,20 +69,24 @@ function App() {
     },
   })
 
+  const activeSignals = data?.active_signals ?? []
+  const recentTrades = data?.recent_trades ?? []
+  const citiesData = data?.cities ?? []
+
   // Get unique cities from signals
   const cities = useMemo(() => {
-    if (!data?.active_signals) return []
+    if (activeSignals.length === 0) return []
     const uniqueCities = new Set<string>()
-    data.active_signals.forEach(s => {
+    activeSignals.forEach(s => {
       if (s.city) uniqueCities.add(s.city)
     })
     return Array.from(uniqueCities).sort()
-  }, [data])
+  }, [activeSignals])
 
   // Filter signals
   const filteredSignals = useMemo(() => {
-    if (!data?.active_signals) return []
-    return data.active_signals.filter(signal => {
+    if (activeSignals.length === 0) return []
+    return activeSignals.filter(signal => {
       if (signalFilters.search) {
         const search = signalFilters.search.toLowerCase()
         if (!signal.market_title.toLowerCase().includes(search) &&
@@ -103,12 +107,12 @@ function App() {
       }
       return true
     })
-  }, [data, signalFilters])
+  }, [activeSignals, signalFilters])
 
   // Filter trades
   const filteredTrades = useMemo(() => {
-    if (!data?.recent_trades) return []
-    return data.recent_trades.filter(trade => {
+    if (recentTrades.length === 0) return []
+    return recentTrades.filter(trade => {
       if (tradeFilters.search) {
         const search = tradeFilters.search.toLowerCase()
         if (!trade.market_ticker.toLowerCase().includes(search)) {
@@ -124,7 +128,38 @@ function App() {
       }
       return true
     })
-  }, [data, tradeFilters])
+  }, [recentTrades, tradeFilters])
+
+  const cityHighlights = useMemo(() => {
+    if (!citiesData.length) return []
+    return [...citiesData]
+      .sort((a, b) => b.confidence - a.confidence)
+      .slice(0, 3)
+  }, [citiesData])
+
+  const highConfidenceCount = useMemo(() => {
+    return citiesData.filter(city => city.confidence >= 0.7).length
+  }, [citiesData])
+
+  const platformBreakdown = useMemo(() => {
+    const counts: Record<string, number> = {}
+    activeSignals.forEach(signal => {
+      const key = signal.platform.toLowerCase()
+      counts[key] = (counts[key] || 0) + 1
+    })
+    return counts
+  }, [activeSignals])
+
+  const stats = data?.stats ?? {
+    is_running: false,
+    last_run: null,
+    total_trades: 0,
+    total_pnl: 0,
+    bankroll: 10000,
+    winning_trades: 0,
+    win_rate: 0
+  }
+  const equityCurve = data?.equity_curve ?? []
 
   if (isLoading) {
     return (
@@ -159,36 +194,6 @@ function App() {
       </div>
     )
   }
-
-  // Safe defaults for data properties
-  const stats = data.stats ?? {
-    is_running: false,
-    last_run: null,
-    total_trades: 0,
-    total_pnl: 0,
-    bankroll: 10000,
-    winning_trades: 0,
-    win_rate: 0
-  }
-  const citiesData = data.cities ?? []
-  const equityCurve = data.equity_curve ?? []
-  const cityHighlights = useMemo(() => {
-    if (!citiesData.length) return []
-    return [...citiesData]
-      .sort((a, b) => b.confidence - a.confidence)
-      .slice(0, 3)
-  }, [citiesData])
-  const highConfidenceCount = useMemo(() => {
-    return citiesData.filter(city => city.confidence >= 0.7).length
-  }, [citiesData])
-  const platformBreakdown = useMemo(() => {
-    const counts: Record<string, number> = {}
-    data?.active_signals?.forEach(signal => {
-      const key = signal.platform.toLowerCase()
-      counts[key] = (counts[key] || 0) + 1
-    })
-    return counts
-  }, [data?.active_signals])
 
   return (
     <div className="min-h-screen bg-black text-neutral-200">
@@ -315,13 +320,13 @@ function App() {
           <div className="bg-neutral-900 border border-neutral-800 overflow-hidden">
             <div className="px-3 py-2 border-b border-neutral-800 flex items-center justify-between">
               <span className="text-xs font-medium text-neutral-500 uppercase tracking-wider">Market Coverage</span>
-              <span className="text-[10px] text-neutral-600">{data?.active_signals?.length ?? 0} signals</span>
+              <span className="text-[10px] text-neutral-600">{activeSignals.length} signals</span>
             </div>
             <div className="p-4 space-y-4">
               <div className="flex items-end justify-between">
                 <div>
                   <div className="text-xs uppercase text-neutral-500 mb-1 tracking-wider">Active Signals</div>
-                  <div className="text-3xl font-semibold text-neutral-100">{data?.active_signals?.length ?? 0}</div>
+                  <div className="text-3xl font-semibold text-neutral-100">{activeSignals.length}</div>
                 </div>
                 <div className="text-right">
                   <div className="text-xs uppercase text-neutral-500 mb-1 tracking-wider">Actionable</div>
@@ -350,7 +355,7 @@ function App() {
             <div className="px-3 py-2 border-b border-neutral-800 flex items-center justify-between">
               <span className="text-xs font-medium text-neutral-500 uppercase tracking-wider">Active Signals</span>
               <span className="px-2 py-0.5 text-[10px] font-medium bg-amber-500/10 text-amber-500 border border-amber-500/20">
-                {filteredSignals.length} / {data?.active_signals?.length ?? 0}
+                {filteredSignals.length} / {activeSignals.length}
               </span>
             </div>
             <FilterBar
