@@ -7,7 +7,7 @@ import asyncio
 
 from backend.config import settings
 from backend.data.weather import WeatherPrediction, fetch_weather_prediction
-from backend.data.markets import MarketData, fetch_all_weather_markets
+from backend.data.markets import MarketData, fetch_all_weather_markets, fetch_all_markets
 
 logger = logging.getLogger("trading_bot")
 
@@ -16,18 +16,18 @@ logger = logging.getLogger("trading_bot")
 class TradingSignal:
     """A trading signal with all relevant data."""
     market: MarketData
-    weather: WeatherPrediction
+    weather: Optional[WeatherPrediction] = None
 
     # Core signal data
-    model_probability: float  # Our calculated probability
-    market_probability: float  # Implied by market price
-    edge: float  # Difference
-    direction: str  # "yes" or "no"
+    model_probability: float = 0.5  # Our calculated probability
+    market_probability: float = 0.5  # Implied by market price
+    edge: float = 0.0  # Difference
+    direction: str = "yes"  # "yes" or "no"
 
     # Confidence and sizing
-    confidence: float
-    kelly_fraction: float
-    suggested_size: float
+    confidence: float = 0.5
+    kelly_fraction: float = 0.0
+    suggested_size: float = 0.0
 
     # Metadata
     sources: List[str] = field(default_factory=list)
@@ -179,6 +179,77 @@ async def generate_signal(
     )
 
 
+async def generate_price_signal(market: MarketData) -> Optional[TradingSignal]:
+    """
+    Generate a trading signal for non-weather markets based on price analysis.
+
+    Uses contrarian logic: extreme prices often revert.
+    - Markets at < 0.15 or > 0.85 are considered extreme
+    - We bet against the crowd with a small edge assumption
+    """
+    yes_price = market.yes_price
+
+    # Skip markets at very extreme prices (likely to resolve soon)
+    if yes_price < 0.03 or yes_price > 0.97:
+        return None
+
+    # Skip markets with middle prices (no clear signal)
+    if 0.30 <= yes_price <= 0.70:
+        return None
+
+    # Contrarian signal: bet against extreme prices
+    # If market says 85% YES, we estimate maybe 75% (10% edge for NO)
+    # If market says 15% YES, we estimate maybe 25% (10% edge for YES)
+
+    if yes_price > 0.70:
+        # Market is very confident YES - contrarian NO bet
+        model_prob = yes_price - 0.10  # Our estimate is lower
+        direction = "no"
+        edge = (1 - model_prob) - (1 - yes_price)  # NO edge
+    elif yes_price < 0.30:
+        # Market is very confident NO - contrarian YES bet
+        model_prob = yes_price + 0.10  # Our estimate is higher
+        direction = "yes"
+        edge = model_prob - yes_price  # YES edge
+    else:
+        return None
+
+    # Confidence based on how extreme the price is
+    extremeness = abs(yes_price - 0.5) * 2  # 0 at 0.5, 1 at 0 or 1
+    confidence = 0.4 + (extremeness * 0.3)  # 0.4 to 0.7
+
+    # Kelly sizing
+    bankroll = settings.INITIAL_BANKROLL
+    suggested_size = calculate_kelly_size(
+        edge=abs(edge),
+        probability=model_prob,
+        market_price=yes_price,
+        direction=direction,
+        bankroll=bankroll
+    )
+
+    # Build reasoning
+    reasoning = (
+        f"Price signal: Market at {yes_price:.0%} {direction.upper()}, "
+        f"contrarian estimate {model_prob:.0%}, "
+        f"Edge: {edge:+.1%}"
+    )
+
+    return TradingSignal(
+        market=market,
+        weather=None,
+        model_probability=model_prob,
+        market_probability=yes_price,
+        edge=edge,
+        direction=direction,
+        confidence=confidence,
+        kelly_fraction=suggested_size / bankroll if bankroll > 0 else 0,
+        suggested_size=suggested_size,
+        sources=["price_analysis"],
+        reasoning=reasoning
+    )
+
+
 async def scan_for_signals() -> List[TradingSignal]:
     """
     Scan all markets and generate signals.
@@ -187,52 +258,78 @@ async def scan_for_signals() -> List[TradingSignal]:
     """
     signals = []
 
-    logger.info("Fetching markets from Polymarket...")
+    logger.info("=" * 50)
+    logger.info("Fetching ALL markets from Polymarket...")
 
-    # Fetch markets and weather data concurrently
-    markets_task = fetch_all_weather_markets()
+    # Fetch ALL markets (not just weather)
+    try:
+        markets = await fetch_all_markets(exclude_sports=True)
+    except Exception as e:
+        logger.error(f"Failed to fetch markets: {e}")
+        markets = []
+
+    logger.info(f"Found {len(markets)} total markets")
+
+    # Group by category
+    by_category: Dict[str, List[MarketData]] = {}
+    for market in markets:
+        cat = market.category or "other"
+        if cat not in by_category:
+            by_category[cat] = []
+        by_category[cat].append(market)
+
+    for cat, cat_markets in by_category.items():
+        logger.info(f"  {cat.upper()}: {len(cat_markets)} markets")
+
+    # Weather markets - use weather data for signals
     weather_cache: Dict[str, WeatherPrediction] = {}
+    weather_markets = by_category.get("weather", [])
 
-    markets = await markets_task
-    logger.info(f"Found {len(markets)} weather markets")
+    if weather_markets:
+        # Get unique cities
+        cities = set(m.subcategory for m in weather_markets if m.subcategory)
+        logger.info(f"Fetching weather for {len(cities)} cities...")
 
-    # Group markets by city
-    city_markets: Dict[str, List[MarketData]] = {}
-    for market in markets:
-        if market.subcategory:
-            if market.subcategory not in city_markets:
-                city_markets[market.subcategory] = []
-            city_markets[market.subcategory].append(market)
+        for city in cities:
+            try:
+                weather = await fetch_weather_prediction(city)
+                if weather:
+                    weather_cache[city] = weather
+                await asyncio.sleep(0.3)  # Rate limit
+            except Exception as e:
+                logger.warning(f"Weather fetch failed for {city}: {e}")
 
-    logger.info(f"Markets span {len(city_markets)} cities: {list(city_markets.keys())}")
+        # Generate weather signals
+        for market in weather_markets:
+            if market.subcategory and market.subcategory in weather_cache:
+                weather = weather_cache[market.subcategory]
+                signal = await generate_signal(market, weather)
+                if signal:
+                    signals.append(signal)
 
-    # Fetch weather for each city
-    for city in city_markets.keys():
-        weather = await fetch_weather_prediction(city)
-        if weather:
-            weather_cache[city] = weather
-            logger.debug(f"Weather for {city}: {weather.high_temp:.1f}°F high")
+    # Non-weather markets - use price-based signals
+    non_weather_markets = [m for m in markets if m.category != "weather"]
+    logger.info(f"Analyzing {len(non_weather_markets)} non-weather markets for price signals...")
 
-    logger.info(f"Weather data available for {len(weather_cache)} cities")
-
-    # Generate signals for each market
-    for market in markets:
-        if not market.subcategory or market.subcategory not in weather_cache:
-            continue
-
-        weather = weather_cache[market.subcategory]
-        signal = await generate_signal(market, weather)
-
-        if signal:
-            signals.append(signal)
-            if signal.passes_threshold:
-                logger.info(f"SIGNAL: {signal.market.title[:50]}... Edge: {signal.edge:+.1%} -> {signal.direction.upper()}")
+    for market in non_weather_markets:
+        try:
+            signal = await generate_price_signal(market)
+            if signal:
+                signals.append(signal)
+        except Exception as e:
+            logger.debug(f"Signal generation failed for {market.ticker}: {e}")
 
     # Sort by absolute edge (best opportunities first)
     signals.sort(key=lambda s: abs(s.edge), reverse=True)
 
+    # Log actionable signals
     actionable = [s for s in signals if s.passes_threshold]
-    logger.info(f"Generated {len(signals)} signals, {len(actionable)} actionable (>{settings.MIN_EDGE_THRESHOLD:.0%} edge)")
+    logger.info(f"=" * 50)
+    logger.info(f"SCAN COMPLETE: {len(signals)} signals, {len(actionable)} actionable")
+
+    for signal in actionable[:10]:
+        logger.info(f"  [{signal.market.category.upper()}] {signal.market.title[:40]}...")
+        logger.info(f"    Edge: {signal.edge:+.1%} -> {signal.direction.upper()} @ ${signal.suggested_size:.2f}")
 
     return signals
 

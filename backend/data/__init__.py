@@ -1,2 +1,1 @@
-from backend.data.weather import *
-from backend.data.markets import *
+# Data module - imports handled in individual files to avoid circular imports

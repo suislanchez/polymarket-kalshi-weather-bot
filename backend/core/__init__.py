@@ -1,1 +1,1 @@
-from backend.core.signals import *
+# Core module - imports handled in individual files to avoid circular imports
