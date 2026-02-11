@@ -155,6 +155,19 @@ function App() {
     )
   }
 
+  // Safe defaults for data properties
+  const stats = data.stats ?? {
+    is_running: false,
+    last_run: null,
+    total_trades: 0,
+    total_pnl: 0,
+    bankroll: 10000,
+    winning_trades: 0,
+    win_rate: 0
+  }
+  const citiesData = data.cities ?? []
+  const equityCurve = data.equity_curve ?? []
+
   return (
     <div className="min-h-screen bg-black text-neutral-200">
       <div className="max-w-[1600px] mx-auto px-4 sm:px-6 py-6">
@@ -167,11 +180,11 @@ function App() {
                   Prediction Market Trading Bot
                 </h1>
                 <span className={`px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider ${
-                  data.stats.is_running
+                  stats.is_running
                     ? 'bg-green-500/10 text-green-500 border border-green-500/20'
                     : 'bg-neutral-800 text-neutral-500 border border-neutral-700'
                 }`}>
-                  {data.stats.is_running ? 'Live' : 'Idle'}
+                  {stats.is_running ? 'Live' : 'Idle'}
                 </span>
                 <span className="px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider bg-blue-500/10 text-blue-400 border border-blue-500/20">
                   Simulation
@@ -179,8 +192,8 @@ function App() {
               </div>
               <p className="text-neutral-600 text-xs">
                 AI-enhanced trading across Weather, Crypto, Politics, Economics | Kalshi + Polymarket
-                {data.stats.last_run && (
-                  <span className="ml-2">| Last scan: {new Date(data.stats.last_run).toLocaleTimeString()}</span>
+                {stats.last_run && (
+                  <span className="ml-2">| Last scan: {new Date(stats.last_run).toLocaleTimeString()}</span>
                 )}
               </p>
             </div>
@@ -201,7 +214,7 @@ function App() {
 
         {/* Stats Grid */}
         <section className="mb-4">
-          <StatsCards stats={data.stats} />
+          <StatsCards stats={stats} />
         </section>
 
         {/* Main Grid - Globe, Map, Terminal */}
@@ -213,9 +226,9 @@ function App() {
                 <span className="text-xs font-medium text-neutral-500 uppercase tracking-wider">3D Globe</span>
                 <div className="live-dot" />
               </div>
-              <span className="text-[10px] text-neutral-600 tabular-nums">{data.cities.length} markets</span>
+              <span className="text-[10px] text-neutral-600 tabular-nums">{citiesData.length} markets</span>
             </div>
-            <Globe cities={data.cities} />
+            <Globe cities={citiesData} />
           </div>
 
           {/* Map */}
@@ -224,15 +237,15 @@ function App() {
               <span className="text-xs font-medium text-neutral-500 uppercase tracking-wider">Market Coverage</span>
               <span className="text-[10px] text-neutral-600">US Markets</span>
             </div>
-            <Map cities={data.cities} />
+            <Map cities={citiesData} />
           </div>
 
           {/* Terminal */}
           <div className="bg-neutral-900 border border-neutral-800 overflow-hidden">
             <Terminal
-              isRunning={data.stats.is_running}
-              lastRun={data.stats.last_run}
-              stats={{ total_trades: data.stats.total_trades, total_pnl: data.stats.total_pnl }}
+              isRunning={stats.is_running}
+              lastRun={stats.last_run}
+              stats={{ total_trades: stats.total_trades, total_pnl: stats.total_pnl }}
               onStart={() => startMutation.mutate()}
               onStop={() => stopMutation.mutate()}
               onScan={() => scanMutation.mutate()}
@@ -246,14 +259,14 @@ function App() {
           <div className="bg-neutral-900 border border-neutral-800 overflow-hidden">
             <div className="px-4 py-3 border-b border-neutral-800 flex items-center justify-between">
               <span className="text-xs font-medium text-neutral-500 uppercase tracking-wider">Portfolio Performance</span>
-              <span className={`text-xs tabular-nums ${data.stats.total_pnl >= 0 ? 'text-green-500' : 'text-red-500'}`}>
-                {data.stats.total_pnl >= 0 ? '+' : ''}${data.stats.total_pnl.toFixed(0)}
+              <span className={`text-xs tabular-nums ${stats.total_pnl >= 0 ? 'text-green-500' : 'text-red-500'}`}>
+                {stats.total_pnl >= 0 ? '+' : ''}${stats.total_pnl.toFixed(0)}
               </span>
             </div>
             <div className="p-4">
               <EquityChart
-                data={data.equity_curve}
-                initialBankroll={data.stats.bankroll - data.stats.total_pnl}
+                data={equityCurve}
+                initialBankroll={stats.bankroll - stats.total_pnl}
               />
             </div>
           </div>
