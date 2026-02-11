@@ -225,49 +225,74 @@ async def settle_pending_trades(db: Session) -> List[Trade]:
     Process all pending trades that are ready for settlement.
     Returns list of newly settled trades.
     """
-    pending = db.query(Trade).filter(Trade.settled == False).all()
+    import logging
+    logger = logging.getLogger("trading_bot")
+
+    try:
+        pending = db.query(Trade).filter(Trade.settled == False).all()
+    except Exception as e:
+        logger.error(f"Failed to query pending trades: {e}")
+        return []
+
     settled_trades = []
 
     for trade in pending:
-        is_settled, settlement_value, pnl = await check_market_settlement(trade)
+        try:
+            is_settled, settlement_value, pnl = await check_market_settlement(trade)
 
-        if is_settled and settlement_value is not None:
-            # Update trade record
-            trade.settled = True
-            trade.settlement_value = settlement_value
-            trade.pnl = pnl
-            trade.settlement_time = datetime.utcnow()
+            if is_settled and settlement_value is not None:
+                # Update trade record
+                trade.settled = True
+                trade.settlement_value = settlement_value
+                trade.pnl = pnl
+                trade.settlement_time = datetime.utcnow()
 
-            # Determine result
-            if pnl > 0:
-                trade.result = "win"
-            elif pnl < 0:
-                trade.result = "loss"
-            else:
-                trade.result = "push"  # Breakeven
+                # Determine result
+                if pnl is not None and pnl > 0:
+                    trade.result = "win"
+                elif pnl is not None and pnl < 0:
+                    trade.result = "loss"
+                else:
+                    trade.result = "push"  # Breakeven
 
-            settled_trades.append(trade)
+                settled_trades.append(trade)
+        except Exception as e:
+            logger.error(f"Failed to settle trade {trade.id}: {e}")
+            continue
 
     if settled_trades:
-        db.commit()
+        try:
+            db.commit()
+        except Exception as e:
+            logger.error(f"Failed to commit settlements: {e}")
+            db.rollback()
+            return []
 
     return settled_trades
 
 
 async def update_bot_state_with_settlements(db: Session, settled_trades: List[Trade]) -> None:
     """Update bot state with P&L from settled trades."""
+    import logging
+    logger = logging.getLogger("trading_bot")
+
     if not settled_trades:
         return
 
-    state = db.query(BotState).first()
-    if not state:
-        return
+    try:
+        state = db.query(BotState).first()
+        if not state:
+            logger.warning("Bot state not found, cannot update with settlements")
+            return
 
-    for trade in settled_trades:
-        if trade.pnl is not None:
-            state.total_pnl += trade.pnl
-            state.bankroll += trade.pnl
-            if trade.result == "win":
-                state.winning_trades += 1
+        for trade in settled_trades:
+            if trade.pnl is not None:
+                state.total_pnl += trade.pnl
+                state.bankroll += trade.pnl
+                if trade.result == "win":
+                    state.winning_trades += 1
 
-    db.commit()
+        db.commit()
+    except Exception as e:
+        logger.error(f"Failed to update bot state with settlements: {e}")
+        db.rollback()

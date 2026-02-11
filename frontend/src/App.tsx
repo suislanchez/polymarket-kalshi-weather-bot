@@ -142,7 +142,7 @@ function App() {
         <div className="text-center max-w-md mx-auto p-8">
           <div className="text-red-500 text-xs uppercase tracking-wider mb-2">Connection Error</div>
           <div className="text-neutral-300 text-sm mb-6">
-            Unable to connect to backend. Ensure server is running on port 8000.
+            Unable to connect to backend API. Check your connection and try again.
           </div>
           <button
             onClick={() => refetch()}
@@ -213,15 +213,15 @@ function App() {
         </header>
 
         {/* Stats Grid */}
-        <section className="mb-4">
+        <section className="mb-3">
           <StatsCards stats={stats} />
         </section>
 
         {/* Main Grid - Globe, Map, Terminal */}
-        <div className="grid lg:grid-cols-3 gap-2 mb-4">
+        <div className="grid lg:grid-cols-3 gap-2 mb-3">
           {/* Globe */}
           <div className="bg-neutral-900 border border-neutral-800 overflow-hidden">
-            <div className="px-4 py-3 border-b border-neutral-800 flex items-center justify-between">
+            <div className="px-3 py-2 border-b border-neutral-800 flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <span className="text-xs font-medium text-neutral-500 uppercase tracking-wider">3D Globe</span>
                 <div className="live-dot" />
@@ -233,7 +233,7 @@ function App() {
 
           {/* Map */}
           <div className="bg-neutral-900 border border-neutral-800 overflow-hidden">
-            <div className="px-4 py-3 border-b border-neutral-800 flex items-center justify-between">
+            <div className="px-3 py-2 border-b border-neutral-800 flex items-center justify-between">
               <span className="text-xs font-medium text-neutral-500 uppercase tracking-wider">Market Coverage</span>
               <span className="text-[10px] text-neutral-600">US Markets</span>
             </div>
@@ -254,16 +254,16 @@ function App() {
         </div>
 
         {/* Charts Row */}
-        <div className="grid lg:grid-cols-2 gap-2 mb-4">
+        <div className="grid lg:grid-cols-2 gap-2 mb-3">
           {/* Equity Chart */}
           <div className="bg-neutral-900 border border-neutral-800 overflow-hidden">
-            <div className="px-4 py-3 border-b border-neutral-800 flex items-center justify-between">
+            <div className="px-3 py-2 border-b border-neutral-800 flex items-center justify-between">
               <span className="text-xs font-medium text-neutral-500 uppercase tracking-wider">Portfolio Performance</span>
               <span className={`text-xs tabular-nums ${stats.total_pnl >= 0 ? 'text-green-500' : 'text-red-500'}`}>
                 {stats.total_pnl >= 0 ? '+' : ''}${stats.total_pnl.toFixed(0)}
               </span>
             </div>
-            <div className="p-4">
+            <div className="p-3">
               <EquityChart
                 data={equityCurve}
                 initialBankroll={stats.bankroll - stats.total_pnl}
@@ -273,7 +273,7 @@ function App() {
 
           {/* Signals */}
           <div className="bg-neutral-900 border border-neutral-800 overflow-hidden">
-            <div className="px-4 py-3 border-b border-neutral-800 flex items-center justify-between">
+            <div className="px-3 py-2 border-b border-neutral-800 flex items-center justify-between">
               <span className="text-xs font-medium text-neutral-500 uppercase tracking-wider">Active Signals</span>
               <span className="px-2 py-0.5 text-[10px] font-medium bg-amber-500/10 text-amber-500 border border-amber-500/20">
                 {filteredSignals.length} / {data?.active_signals?.length ?? 0} signals
@@ -284,7 +284,7 @@ function App() {
               onFilterChange={setSignalFilters}
               cities={cities}
             />
-            <div className="p-4 max-h-[300px] overflow-y-auto">
+            <div className="p-3 max-h-[250px] overflow-y-auto">
               <SignalsTable
                 signals={filteredSignals}
                 onSimulateTrade={(ticker) => tradeMutation.mutate(ticker)}
@@ -296,7 +296,7 @@ function App() {
 
         {/* Trades Table */}
         <div className="bg-neutral-900 border border-neutral-800 overflow-hidden">
-          <div className="px-4 py-3 border-b border-neutral-800 flex items-center justify-between">
+          <div className="px-3 py-2 border-b border-neutral-800 flex items-center justify-between">
             <span className="text-xs font-medium text-neutral-500 uppercase tracking-wider">Trade History</span>
             <span className="text-[10px] text-neutral-600 tabular-nums">
               {filteredTrades.length} / {data?.recent_trades?.length ?? 0} trades
@@ -308,7 +308,7 @@ function App() {
             cities={[]}
             showStatus
           />
-          <div className="p-4">
+          <div className="p-3 max-h-[280px] overflow-y-auto">
             <TradesTable trades={filteredTrades} />
           </div>
         </div>

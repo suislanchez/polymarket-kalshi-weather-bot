@@ -34,7 +34,7 @@ export function Map({ cities }: Props) {
   }
 
   return (
-    <div className="h-[350px] relative">
+    <div className="h-[280px] relative">
       <MapContainer
         center={[39.8283, -98.5795]}
         zoom={4}

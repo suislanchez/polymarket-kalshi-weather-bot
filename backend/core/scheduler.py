@@ -209,10 +209,15 @@ async def heartbeat_job():
     Background job: Periodic heartbeat to show system is alive.
     Runs every minute.
     """
-    db = SessionLocal()
+    db = None
     try:
+        db = SessionLocal()
         state = db.query(BotState).first()
         pending = db.query(Trade).filter(Trade.settled == False).count()
+
+        if state is None:
+            log_event("warning", "Heartbeat: Bot state not initialized")
+            return
 
         log_event("data", f"Heartbeat: {pending} pending trades, bankroll: ${state.bankroll:.2f}", {
             "pending_trades": pending,
@@ -222,7 +227,8 @@ async def heartbeat_job():
     except Exception as e:
         log_event("warning", f"Heartbeat failed: {str(e)}")
     finally:
-        db.close()
+        if db:
+            db.close()
 
 
 def start_scheduler():

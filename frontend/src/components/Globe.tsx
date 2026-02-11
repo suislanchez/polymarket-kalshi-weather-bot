@@ -9,7 +9,7 @@ interface Props {
 
 export function Globe({ cities }: Props) {
   const globeEl = useRef<any>(null)
-  const [dimensions, setDimensions] = useState({ width: 400, height: 350 })
+  const [dimensions, setDimensions] = useState({ width: 400, height: 280 })
   const containerRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -104,7 +104,7 @@ export function Globe({ cities }: Props) {
   }, [cities])
 
   return (
-    <div ref={containerRef} className="h-[350px] relative globe-container bg-black overflow-hidden">
+    <div ref={containerRef} className="h-[280px] relative globe-container bg-black overflow-hidden">
       <GlobeGL
         ref={globeEl}
         width={dimensions.width}

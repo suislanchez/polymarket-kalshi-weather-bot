@@ -7,6 +7,7 @@ from .base import (
     AIAnalysis, AnomalyReport, TradeRecommendation, BaseAIClient,
     create_signal_prompt
 )
+from .logger import get_ai_logger
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +76,43 @@ class ClaudeAnalyzer(BaseAIClient):
             tokens_used = message.usage.input_tokens + message.usage.output_tokens
             latency_ms = (time.time() - start_time) * 1000
 
+            # Log to file and database
+            ai_logger = get_ai_logger()
+            record = ai_logger.log_call(
+                provider="claude",
+                model=self.model,
+                prompt=prompt,
+                response=response_text,
+                latency_ms=latency_ms,
+                tokens_used=tokens_used,
+                related_market=signal_data.get('market_ticker'),
+                call_type="analysis",
+                success=True
+            )
+            # Persist to database synchronously
+            try:
+                from backend.models.database import SessionLocal, AILog
+                from datetime import datetime
+                db = SessionLocal()
+                try:
+                    db_record = AILog(
+                        timestamp=datetime.fromisoformat(record.timestamp),
+                        provider=record.provider,
+                        model=record.model,
+                        call_type=record.call_type,
+                        latency_ms=record.latency_ms,
+                        tokens_used=record.tokens_used,
+                        cost_usd=record.cost_usd,
+                        success=True,
+                        related_market=record.related_market
+                    )
+                    db.add(db_record)
+                    db.commit()
+                finally:
+                    db.close()
+            except Exception as db_err:
+                logger.debug(f"DB logging skipped: {db_err}")
+
             # Parse confidence from response (simple heuristic)
             confidence = 0.7  # Default
             if "high confidence" in response_text.lower():
@@ -105,6 +143,44 @@ class ClaudeAnalyzer(BaseAIClient):
         except Exception as e:
             logger.error(f"Claude analysis failed: {e}")
             latency_ms = (time.time() - start_time) * 1000
+
+            # Log failed call to database
+            try:
+                ai_logger = get_ai_logger()
+                record = ai_logger.log_call(
+                    provider="claude",
+                    model=self.model,
+                    prompt="",
+                    response="",
+                    latency_ms=latency_ms,
+                    tokens_used=0,
+                    related_market=signal_data.get('market_ticker'),
+                    call_type="analysis",
+                    success=False,
+                    error=str(e)
+                )
+                from backend.models.database import SessionLocal, AILog
+                from datetime import datetime
+                db = SessionLocal()
+                try:
+                    db_record = AILog(
+                        timestamp=datetime.fromisoformat(record.timestamp),
+                        provider=record.provider,
+                        model=record.model,
+                        call_type=record.call_type,
+                        latency_ms=record.latency_ms,
+                        tokens_used=0,
+                        cost_usd=0,
+                        success=False,
+                        related_market=record.related_market
+                    )
+                    db.add(db_record)
+                    db.commit()
+                finally:
+                    db.close()
+            except Exception:
+                pass
+
             return AIAnalysis(
                 reasoning=f"Analysis unavailable: {str(e)}",
                 confidence=0.0,
@@ -123,6 +199,7 @@ class ClaudeAnalyzer(BaseAIClient):
         """Classify market using Claude (for complex cases)."""
         # For classification, prefer Groq for speed
         # Claude is used as fallback for complex cases
+        start_time = time.time()
         try:
             client = self._get_client()
 
@@ -141,6 +218,42 @@ Categories: weather, crypto, politics, economics, sports, other"""
             )
 
             response = message.content[0].text.strip().lower()
+            tokens_used = message.usage.input_tokens + message.usage.output_tokens
+            latency_ms = (time.time() - start_time) * 1000
+
+            # Log to database
+            try:
+                ai_logger = get_ai_logger()
+                record = ai_logger.log_call(
+                    provider="claude",
+                    model=self.model,
+                    prompt=prompt,
+                    response=response,
+                    latency_ms=latency_ms,
+                    tokens_used=tokens_used,
+                    call_type="classification",
+                    success=True
+                )
+                from backend.models.database import SessionLocal, AILog
+                from datetime import datetime
+                db = SessionLocal()
+                try:
+                    db_record = AILog(
+                        timestamp=datetime.fromisoformat(record.timestamp),
+                        provider=record.provider,
+                        model=record.model,
+                        call_type=record.call_type,
+                        latency_ms=record.latency_ms,
+                        tokens_used=record.tokens_used,
+                        cost_usd=record.cost_usd,
+                        success=True
+                    )
+                    db.add(db_record)
+                    db.commit()
+                finally:
+                    db.close()
+            except Exception:
+                pass
 
             # Map response to category
             valid_categories = ["weather", "crypto", "politics", "economics", "sports", "other"]

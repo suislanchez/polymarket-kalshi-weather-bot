@@ -58,3 +58,22 @@ export async function settleTradesApi(): Promise<{ settled_count: number }> {
   const { data } = await api.post('/settle-trades')
   return data
 }
+
+export interface AIStats {
+  today: {
+    total_calls: number
+    total_cost_usd: number
+    total_tokens: number
+    avg_latency_ms: number
+    by_provider: Record<string, { calls: number; cost: number; tokens: number }>
+  }
+  budget: {
+    daily_limit_usd: number
+    remaining_usd: number
+  }
+}
+
+export async function fetchAIStats(): Promise<AIStats> {
+  const { data } = await api.get<AIStats>('/ai/stats')
+  return data
+}

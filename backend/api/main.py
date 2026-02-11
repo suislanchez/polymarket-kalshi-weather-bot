@@ -49,11 +49,13 @@ class ConnectionManager:
             self.active_connections.remove(websocket)
 
     async def broadcast(self, message: dict):
+        import logging
+        logger = logging.getLogger("trading_bot")
         for connection in self.active_connections:
             try:
                 await connection.send_json(message)
-            except:
-                pass
+            except Exception as e:
+                logger.debug(f"Failed to broadcast to connection: {e}")
 
 
 ws_manager = ConnectionManager()
@@ -215,102 +217,130 @@ async def get_stats(db: Session = Depends(get_db)):
 @app.get("/api/weather", response_model=List[CityWeather])
 async def get_weather():
     """Get current weather predictions for all cities."""
-    weather_data = await fetch_all_cities()
+    import logging
+    logger = logging.getLogger("trading_bot")
 
-    cities = []
-    for city, pred in weather_data.items():
-        coords = settings.CITY_COORDS.get(city, (0, 0))
-        cities.append(CityWeather(
-            city=city,
-            lat=coords[0],
-            lon=coords[1],
-            high_temp=pred.high_temp,
-            low_temp=pred.low_temp,
-            ensemble_count=len(pred.ensemble_highs),
-            confidence=pred.confidence(),
-            prob_above_40=pred.prob_above(40),
-            prob_above_50=pred.prob_above(50),
-            prob_above_60=pred.prob_above(60)
-        ))
+    try:
+        weather_data = await fetch_all_cities()
 
-    return cities
+        cities = []
+        for city, pred in weather_data.items():
+            coords = settings.CITY_COORDS.get(city, (0, 0))
+            cities.append(CityWeather(
+                city=city,
+                lat=coords[0],
+                lon=coords[1],
+                high_temp=pred.high_temp,
+                low_temp=pred.low_temp,
+                ensemble_count=len(pred.ensemble_highs),
+                confidence=pred.confidence(),
+                prob_above_40=pred.prob_above(40),
+                prob_above_50=pred.prob_above(50),
+                prob_above_60=pred.prob_above(60)
+            ))
+
+        return cities
+    except Exception as e:
+        logger.error(f"Error fetching weather data: {e}")
+        return []
 
 
 @app.get("/api/markets", response_model=List[MarketResponse])
 async def get_markets():
     """Get all active weather markets."""
-    markets = await fetch_all_weather_markets()
+    import logging
+    logger = logging.getLogger("trading_bot")
 
-    return [
-        MarketResponse(
-            platform=m.platform,
-            ticker=m.ticker,
-            title=m.title,
-            category=m.category,
-            subcategory=m.subcategory,
-            yes_price=m.yes_price,
-            volume=m.volume,
-            threshold=m.threshold,
-            model_probability=None,
-            edge=None
-        )
-        for m in markets
-    ]
+    try:
+        markets = await fetch_all_weather_markets()
+
+        return [
+            MarketResponse(
+                platform=m.platform,
+                ticker=m.ticker,
+                title=m.title,
+                category=m.category,
+                subcategory=m.subcategory,
+                yes_price=m.yes_price,
+                volume=m.volume,
+                threshold=m.threshold,
+                model_probability=None,
+                edge=None
+            )
+            for m in markets
+        ]
+    except Exception as e:
+        logger.error(f"Error fetching markets: {e}")
+        return []
 
 
 @app.get("/api/signals", response_model=List[SignalResponse])
 async def get_signals():
     """Get current trading signals."""
-    signals = await scan_for_signals()
+    import logging
+    logger = logging.getLogger("trading_bot")
 
-    return [
-        SignalResponse(
-            market_ticker=s.market.ticker,
-            market_title=s.market.title,
-            platform=s.market.platform,
-            city=s.market.subcategory,
-            direction=s.direction,
-            model_probability=s.model_probability,
-            market_probability=s.market_probability,
-            edge=s.edge,
-            confidence=s.confidence,
-            suggested_size=s.suggested_size,
-            reasoning=s.reasoning,
-            timestamp=s.timestamp,
-            category=getattr(s.market, 'category', 'weather'),
-            subcategory=s.market.subcategory,
-            event_slug=getattr(s.market, 'event_slug', None)
-        )
-        for s in signals
-    ]
+    try:
+        signals = await scan_for_signals()
+
+        return [
+            SignalResponse(
+                market_ticker=s.market.ticker,
+                market_title=s.market.title,
+                platform=s.market.platform,
+                city=s.market.subcategory,
+                direction=s.direction,
+                model_probability=s.model_probability,
+                market_probability=s.market_probability,
+                edge=s.edge,
+                confidence=s.confidence,
+                suggested_size=s.suggested_size,
+                reasoning=s.reasoning,
+                timestamp=s.timestamp,
+                category=getattr(s.market, 'category', 'weather'),
+                subcategory=s.market.subcategory,
+                event_slug=getattr(s.market, 'event_slug', None)
+            )
+            for s in signals
+        ]
+    except Exception as e:
+        logger.error(f"Error fetching signals: {e}")
+        return []
 
 
 @app.get("/api/signals/actionable", response_model=List[SignalResponse])
 async def get_actionable_signals():
     """Get only signals that pass the edge threshold."""
-    signals = await scan_for_signals()
-    actionable = [s for s in signals if s.passes_threshold]
+    import logging
+    logger = logging.getLogger("trading_bot")
 
-    return [
-        SignalResponse(
-            market_ticker=s.market.ticker,
-            market_title=s.market.title,
-            platform=s.market.platform,
-            city=s.market.subcategory,
-            direction=s.direction,
-            model_probability=s.model_probability,
-            market_probability=s.market_probability,
-            edge=s.edge,
-            confidence=s.confidence,
-            suggested_size=s.suggested_size,
-            reasoning=s.reasoning,
-            timestamp=s.timestamp,
-            category=getattr(s.market, 'category', 'weather'),
-            subcategory=s.market.subcategory,
-            event_slug=getattr(s.market, 'event_slug', None)
-        )
-        for s in actionable
-    ]
+    try:
+        signals = await scan_for_signals()
+        actionable = [s for s in signals if s.passes_threshold]
+
+        return [
+            SignalResponse(
+                market_ticker=s.market.ticker,
+                market_title=s.market.title,
+                platform=s.market.platform,
+                city=s.market.subcategory,
+                direction=s.direction,
+                model_probability=s.model_probability,
+                market_probability=s.market_probability,
+                edge=s.edge,
+                confidence=s.confidence,
+                suggested_size=s.suggested_size,
+                reasoning=s.reasoning,
+                timestamp=s.timestamp,
+                category=getattr(s.market, 'category', 'weather'),
+                subcategory=s.market.subcategory,
+                event_slug=getattr(s.market, 'event_slug', None)
+            )
+            for s in actionable
+        ]
+    except Exception as e:
+        logger.error(f"Error fetching actionable signals: {e}")
+        return []
 
 
 @app.get("/api/trades", response_model=List[TradeResponse])
@@ -535,26 +565,33 @@ async def get_all_markets(
         categories: Comma-separated list of categories (e.g., "weather,crypto")
         exclude_sports: Whether to exclude sports markets (default True)
     """
-    cat_set = None
-    if categories:
-        cat_set = set(categories.split(","))
+    import logging
+    logger = logging.getLogger("trading_bot")
 
-    markets = await fetch_all_markets(cat_set, exclude_sports)
+    try:
+        cat_set = None
+        if categories:
+            cat_set = set(categories.split(","))
 
-    return [
-        {
-            "platform": m.platform,
-            "ticker": m.ticker,
-            "title": m.title,
-            "category": m.category,
-            "subcategory": m.subcategory,
-            "yes_price": m.yes_price,
-            "volume": m.volume,
-            "threshold": m.threshold,
-            "event_slug": m.event_slug
-        }
-        for m in markets
-    ]
+        markets = await fetch_all_markets(cat_set, exclude_sports)
+
+        return [
+            {
+                "platform": m.platform,
+                "ticker": m.ticker,
+                "title": m.title,
+                "category": m.category,
+                "subcategory": m.subcategory,
+                "yes_price": m.yes_price,
+                "volume": m.volume,
+                "threshold": m.threshold,
+                "event_slug": m.event_slug
+            }
+            for m in markets
+        ]
+    except Exception as e:
+        logger.error(f"Error fetching all markets: {e}")
+        return []
 
 
 class AILogResponse(BaseModel):
@@ -677,7 +714,10 @@ async def websocket_events(websocket: WebSocket):
 
     except WebSocketDisconnect:
         ws_manager.disconnect(websocket)
-    except Exception:
+    except Exception as e:
+        import logging
+        logger = logging.getLogger("trading_bot")
+        logger.warning(f"WebSocket error: {e}")
         ws_manager.disconnect(websocket)
 
 

@@ -37,16 +37,16 @@ export function StatsCards({ stats }: Props) {
 
   return (
     <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
-      <div className="bg-neutral-900 border border-neutral-800 p-4">
-        <div className="text-neutral-500 text-xs uppercase tracking-wider mb-2">Virtual Bankroll</div>
+      <div className="bg-neutral-900 border border-neutral-800 p-3">
+        <div className="text-neutral-500 text-xs uppercase tracking-wider mb-1">Virtual Bankroll</div>
         <div className="text-xl font-semibold tabular-nums text-neutral-100">
           ${formatNumber(stats.bankroll)}
         </div>
         <div className="text-neutral-600 text-xs mt-1">Simulation mode</div>
       </div>
 
-      <div className="bg-neutral-900 border border-neutral-800 p-4">
-        <div className="text-neutral-500 text-xs uppercase tracking-wider mb-2">Total P&L</div>
+      <div className="bg-neutral-900 border border-neutral-800 p-3">
+        <div className="text-neutral-500 text-xs uppercase tracking-wider mb-1">Total P&L</div>
         <div className={`text-xl font-semibold tabular-nums ${stats.total_pnl >= 0 ? 'text-green-500' : 'text-red-500'}`}>
           {stats.total_pnl >= 0 ? '+' : ''}${formatNumber(Math.abs(stats.total_pnl))}
         </div>
@@ -56,8 +56,8 @@ export function StatsCards({ stats }: Props) {
         <ProgressBar value={Math.abs(returnPercent)} max={50} color={stats.total_pnl >= 0 ? 'green' : 'red'} />
       </div>
 
-      <div className="bg-neutral-900 border border-neutral-800 p-4">
-        <div className="text-neutral-500 text-xs uppercase tracking-wider mb-2">Win Rate</div>
+      <div className="bg-neutral-900 border border-neutral-800 p-3">
+        <div className="text-neutral-500 text-xs uppercase tracking-wider mb-1">Win Rate</div>
         <div className={`text-xl font-semibold tabular-nums ${winRatePercent >= 55 ? 'text-green-500' : winRatePercent >= 45 ? 'text-yellow-500' : 'text-red-500'}`}>
           {winRatePercent.toFixed(1)}%
         </div>
@@ -70,8 +70,8 @@ export function StatsCards({ stats }: Props) {
         />
       </div>
 
-      <div className="bg-neutral-900 border border-neutral-800 p-4">
-        <div className="text-neutral-500 text-xs uppercase tracking-wider mb-2">Total Trades</div>
+      <div className="bg-neutral-900 border border-neutral-800 p-3">
+        <div className="text-neutral-500 text-xs uppercase tracking-wider mb-1">Total Trades</div>
         <div className={`text-xl font-semibold tabular-nums ${stats.is_running ? 'text-green-500' : 'text-neutral-100'}`}>
           {stats.total_trades}
         </div>

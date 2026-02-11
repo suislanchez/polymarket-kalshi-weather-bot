@@ -5,6 +5,7 @@ from typing import Optional, Dict, Any, List
 import logging
 
 from .base import AIAnalysis, BaseAIClient, create_classification_prompt
+from .logger import get_ai_logger
 
 logger = logging.getLogger(__name__)
 
@@ -72,8 +73,43 @@ class GroqClassifier(BaseAIClient):
 
             result = response.choices[0].message.content.strip().lower()
             latency_ms = (time.time() - start_time) * 1000
+            tokens_used = response.usage.total_tokens if response.usage else 0
 
             logger.debug(f"Groq classification: '{title[:30]}...' -> {result} ({latency_ms:.0f}ms)")
+
+            # Log to database
+            try:
+                ai_logger = get_ai_logger()
+                record = ai_logger.log_call(
+                    provider="groq",
+                    model=self.model,
+                    prompt=prompt,
+                    response=result,
+                    latency_ms=latency_ms,
+                    tokens_used=tokens_used,
+                    call_type="classification",
+                    success=True
+                )
+                from backend.models.database import SessionLocal, AILog
+                from datetime import datetime
+                db = SessionLocal()
+                try:
+                    db_record = AILog(
+                        timestamp=datetime.fromisoformat(record.timestamp),
+                        provider=record.provider,
+                        model=record.model,
+                        call_type=record.call_type,
+                        latency_ms=record.latency_ms,
+                        tokens_used=record.tokens_used,
+                        cost_usd=record.cost_usd,
+                        success=True
+                    )
+                    db.add(db_record)
+                    db.commit()
+                finally:
+                    db.close()
+            except Exception:
+                pass
 
             # Parse response
             parts = result.split(",")
@@ -221,6 +257,42 @@ Key question: Is this edge reliable?"""
             result = response.choices[0].message.content.strip()
             latency_ms = (time.time() - start_time) * 1000
             tokens_used = response.usage.total_tokens if response.usage else 0
+
+            # Log to database
+            try:
+                ai_logger = get_ai_logger()
+                record = ai_logger.log_call(
+                    provider="groq",
+                    model=self.model,
+                    prompt=prompt,
+                    response=result,
+                    latency_ms=latency_ms,
+                    tokens_used=tokens_used,
+                    related_market=signal_data.get('market_ticker'),
+                    call_type="analysis",
+                    success=True
+                )
+                from backend.models.database import SessionLocal, AILog
+                from datetime import datetime
+                db = SessionLocal()
+                try:
+                    db_record = AILog(
+                        timestamp=datetime.fromisoformat(record.timestamp),
+                        provider=record.provider,
+                        model=record.model,
+                        call_type=record.call_type,
+                        latency_ms=record.latency_ms,
+                        tokens_used=record.tokens_used,
+                        cost_usd=record.cost_usd,
+                        success=True,
+                        related_market=record.related_market
+                    )
+                    db.add(db_record)
+                    db.commit()
+                finally:
+                    db.close()
+            except Exception:
+                pass
 
             confidence = 0.6
             if "reliable" in result.lower() or "strong" in result.lower():
