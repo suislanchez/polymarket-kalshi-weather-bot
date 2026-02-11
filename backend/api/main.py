@@ -196,10 +196,12 @@ async def startup():
     start_scheduler()
     log_event("success", "Trading bot initialized and running")
 
-    print("Bot is now running autonomously!")
-    print("  - Market scan: every 5 minutes")
-    print("  - Settlement check: every 30 minutes")
-    print("  - Heartbeat: every 1 minute")
+    print("Bot is now running in AGGRESSIVE MODE!")
+    print("  - Market scan: every 2 minutes")
+    print("  - Settlement check: every 10 minutes")
+    print("  - Max trades per scan: 20")
+    print("  - Min trade size: $5")
+    print("  - AI analysis: Groq on top 5 signals/scan")
     print("=" * 60)
 
 

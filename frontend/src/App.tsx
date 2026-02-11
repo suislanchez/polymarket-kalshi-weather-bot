@@ -1,6 +1,6 @@
 import { useState, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { fetchDashboard, runScan, simulateTrade, startBot, stopBot } from './api'
+import { fetchDashboard, runScan, simulateTrade, startBot, stopBot, fetchAIStats } from './api'
 import { Map } from './components/Map'
 import { Globe } from './components/Globe'
 import { StatsCards } from './components/StatsCards'
@@ -33,6 +33,13 @@ function App() {
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['dashboard'],
     queryFn: fetchDashboard,
+    refetchInterval: 10000, // Faster refresh for aggressive trading
+  })
+
+  // AI cost tracking
+  const { data: aiStats } = useQuery({
+    queryKey: ['aiStats'],
+    queryFn: fetchAIStats,
     refetchInterval: 30000,
   })
 
@@ -194,6 +201,16 @@ function App() {
                 AI-enhanced trading across Weather, Crypto, Politics, Economics | Kalshi + Polymarket
                 {stats.last_run && (
                   <span className="ml-2">| Last scan: {new Date(stats.last_run).toLocaleTimeString()}</span>
+                )}
+                {aiStats && (
+                  <span className="ml-2">
+                    | AI: {aiStats.today.total_calls} calls, ${aiStats.today.total_cost_usd.toFixed(4)} today
+                    {aiStats.today.by_provider && Object.keys(aiStats.today.by_provider).length > 0 && (
+                      <span className="text-neutral-500">
+                        {' '}({Object.entries(aiStats.today.by_provider).map(([p, d]: [string, any]) => `${p}: ${d.calls}`).join(', ')})
+                      </span>
+                    )}
+                  </span>
                 )}
               </p>
             </div>

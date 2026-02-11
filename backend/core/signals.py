@@ -11,6 +11,10 @@ from backend.data.markets import MarketData, fetch_all_weather_markets, fetch_al
 
 logger = logging.getLogger("trading_bot")
 
+# Track AI usage for this scan
+_ai_calls_this_scan = 0
+_max_ai_calls_per_scan = 5  # Limit AI calls to control costs
+
 
 @dataclass
 class TradingSignal:
@@ -179,7 +183,7 @@ async def generate_signal(
     )
 
 
-async def generate_price_signal(market: MarketData) -> Optional[TradingSignal]:
+async def generate_price_signal(market: MarketData, use_ai: bool = False) -> Optional[TradingSignal]:
     """
     Generate a trading signal for non-weather markets based on price analysis.
 
@@ -187,6 +191,8 @@ async def generate_price_signal(market: MarketData) -> Optional[TradingSignal]:
     - Markets at < 0.15 or > 0.85 are considered extreme
     - We bet against the crowd with a small edge assumption
     """
+    global _ai_calls_this_scan
+
     yes_price = market.yes_price
 
     # Skip markets at very extreme prices (likely to resolve soon)
@@ -218,6 +224,27 @@ async def generate_price_signal(market: MarketData) -> Optional[TradingSignal]:
     extremeness = abs(yes_price - 0.5) * 2  # 0 at 0.5, 1 at 0 or 1
     confidence = 0.4 + (extremeness * 0.3)  # 0.4 to 0.7
 
+    # Optional: Use Groq for quick analysis on best signals
+    ai_reasoning = None
+    if use_ai and _ai_calls_this_scan < _max_ai_calls_per_scan and settings.GROQ_API_KEY:
+        try:
+            from backend.ai.groq import GroqClassifier
+            groq = GroqClassifier()
+            analysis = await groq.analyze_signal({
+                'market_title': market.title,
+                'market_ticker': market.ticker,
+                'direction': direction,
+                'edge': edge,
+                'yes_price': yes_price
+            })
+            if analysis:
+                ai_reasoning = analysis.reasoning
+                confidence = max(confidence, analysis.confidence)
+                _ai_calls_this_scan += 1
+                logger.info(f"Groq analysis for {market.ticker}: {ai_reasoning[:50]}...")
+        except Exception as e:
+            logger.debug(f"Groq analysis skipped: {e}")
+
     # Kelly sizing
     bankroll = settings.INITIAL_BANKROLL
     suggested_size = calculate_kelly_size(
@@ -234,6 +261,8 @@ async def generate_price_signal(market: MarketData) -> Optional[TradingSignal]:
         f"contrarian estimate {model_prob:.0%}, "
         f"Edge: {edge:+.1%}"
     )
+    if ai_reasoning:
+        reasoning += f" | AI: {ai_reasoning[:100]}"
 
     return TradingSignal(
         market=market,
@@ -245,7 +274,7 @@ async def generate_price_signal(market: MarketData) -> Optional[TradingSignal]:
         confidence=confidence,
         kelly_fraction=suggested_size / bankroll if bankroll > 0 else 0,
         suggested_size=suggested_size,
-        sources=["price_analysis"],
+        sources=["price_analysis"] + (["groq"] if ai_reasoning else []),
         reasoning=reasoning
     )
 
@@ -311,9 +340,18 @@ async def scan_for_signals() -> List[TradingSignal]:
     non_weather_markets = [m for m in markets if m.category != "weather"]
     logger.info(f"Analyzing {len(non_weather_markets)} non-weather markets for price signals...")
 
-    for market in non_weather_markets:
+    # Reset AI call counter for this scan
+    global _ai_calls_this_scan
+    _ai_calls_this_scan = 0
+
+    # Sort by price extremeness to prioritize best opportunities for AI analysis
+    non_weather_markets.sort(key=lambda m: abs(m.yes_price - 0.5), reverse=True)
+
+    for i, market in enumerate(non_weather_markets):
         try:
-            signal = await generate_price_signal(market)
+            # Use AI for top 5 most extreme-priced markets
+            use_ai = i < 5
+            signal = await generate_price_signal(market, use_ai=use_ai)
             if signal:
                 signals.append(signal)
         except Exception as e:
