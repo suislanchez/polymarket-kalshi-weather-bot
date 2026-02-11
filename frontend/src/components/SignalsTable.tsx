@@ -64,18 +64,30 @@ export function SignalsTable({ signals, onSimulateTrade, isSimulating }: Props) 
       : <ArrowDown className="w-3 h-3 text-green-500" />
   }
 
+  // Edge threshold for actionable signals (3%)
+  const EDGE_THRESHOLD = 0.03
+  const actionableCount = signals.filter(s => Math.abs(s.edge) >= EDGE_THRESHOLD).length
+
   if (signals.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center py-12 text-neutral-600">
         <div className="text-4xl mb-4 opacity-30">---</div>
-        <p className="text-sm">No actionable signals</p>
-        <p className="text-xs mt-1">Signals appear when edge exceeds 8%</p>
+        <p className="text-sm">No signals detected</p>
+        <p className="text-xs mt-1">Waiting for market data...</p>
       </div>
     )
   }
 
   return (
     <div className="overflow-x-auto">
+      <div className="flex items-center justify-between px-2 py-2 border-b border-neutral-800 text-xs">
+        <span className="text-neutral-500">
+          {signals.length} signals ({actionableCount} actionable)
+        </span>
+        <span className="text-neutral-600">
+          Edge threshold: 3%
+        </span>
+      </div>
       <table className="w-full">
         <thead>
           <tr className="text-neutral-600 text-left text-xs border-b border-neutral-800">
@@ -119,6 +131,7 @@ export function SignalsTable({ signals, onSimulateTrade, isSimulating }: Props) 
         <tbody>
           {sortedSignals.map((signal) => {
             const edgePercent = Math.abs(signal.edge * 100)
+            const isActionable = Math.abs(signal.edge) >= EDGE_THRESHOLD
             const platformKey = signal.platform.toLowerCase() as keyof typeof platformStyles
             const style = platformStyles[platformKey] || platformStyles.kalshi
             const marketUrl = getMarketUrl(signal.platform, signal.market_ticker, signal.event_slug)
@@ -128,7 +141,9 @@ export function SignalsTable({ signals, onSimulateTrade, isSimulating }: Props) 
             return (
               <tr
                 key={signal.market_ticker}
-                className="border-b border-neutral-800 hover:bg-neutral-900/50 transition-colors"
+                className={`border-b border-neutral-800 hover:bg-neutral-900/50 transition-colors ${
+                  !isActionable ? 'opacity-50' : ''
+                }`}
               >
                 <td className="py-3 px-2">
                   <div className="max-w-[280px]">
@@ -142,6 +157,11 @@ export function SignalsTable({ signals, onSimulateTrade, isSimulating }: Props) 
                       {signal.city && (
                         <span className="px-1.5 py-0.5 text-[10px] font-medium capitalize bg-neutral-800 text-neutral-400 border border-neutral-700">
                           {signal.city.replace('_', ' ')}
+                        </span>
+                      )}
+                      {isActionable && (
+                        <span className="px-1.5 py-0.5 text-[10px] font-bold uppercase bg-green-500/20 text-green-400 border border-green-500/30">
+                          ACTIONABLE
                         </span>
                       )}
                     </div>

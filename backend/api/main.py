@@ -196,14 +196,14 @@ async def startup():
     start_scheduler()
     log_event("success", "Trading bot initialized and running")
 
-    print("Bot is now running in SMART MODE (cost-optimized)!")
-    print("  - Market scan: every 5 minutes")
-    print("  - Settlement check: every 15 minutes")
-    print("  - Max trades per scan: 5 (quality over quantity)")
-    print("  - Min edge threshold: 12% (only best opportunities)")
-    print("  - Min market volume: $10,000 (liquid markets only)")
+    print("Bot is now running in AGGRESSIVE MODE!")
+    print("  - Market scan: every 2 minutes")
+    print("  - Settlement check: every 10 minutes")
+    print("  - Max trades per scan: 15 (high volume)")
+    print("  - Min edge threshold: 3% (capture more opportunities)")
+    print("  - Min market volume: $1,000 (wide coverage)")
     print("  - AI: Groq only (FREE) - no expensive Claude calls")
-    print("  - Risk limits: 3 trades/category, 15 max pending")
+    print("  - Risk limits: 10 trades/category, 50 max pending")
     print("=" * 60)
 
 

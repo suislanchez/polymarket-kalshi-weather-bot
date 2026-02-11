@@ -186,38 +186,44 @@ async def generate_price_signal(market: MarketData, use_ai: bool = False) -> Opt
     """
     Generate a trading signal for non-weather markets based on price analysis.
 
-    Uses contrarian logic: extreme prices often revert.
-    - Markets at < 0.15 or > 0.85 are considered extreme
-    - We bet against the crowd with a small edge assumption
+    AGGRESSIVE MODE: Generate signals for more markets
+    - Markets at < 0.25 or > 0.75 get contrarian signals
+    - Markets in 0.25-0.75 get momentum signals (go with the trend)
     """
     global _ai_calls_this_scan
 
     yes_price = market.yes_price
 
-    # Skip markets at very extreme prices (likely to resolve soon)
-    if yes_price < 0.03 or yes_price > 0.97:
+    # Skip markets at very extreme prices (already resolved or about to)
+    if yes_price < 0.02 or yes_price > 0.98:
         return None
 
-    # Skip markets with middle prices (no clear signal)
-    if 0.30 <= yes_price <= 0.70:
-        return None
-
-    # Contrarian signal: bet against extreme prices
-    # If market says 85% YES, we estimate maybe 75% (10% edge for NO)
-    # If market says 15% YES, we estimate maybe 25% (10% edge for YES)
-
-    if yes_price > 0.70:
+    # AGGRESSIVE: Generate signals for ALL markets
+    if yes_price > 0.75:
         # Market is very confident YES - contrarian NO bet
-        model_prob = yes_price - 0.10  # Our estimate is lower
+        model_prob = yes_price - 0.08  # Smaller edge assumption
         direction = "no"
-        edge = (1 - model_prob) - (1 - yes_price)  # NO edge
-    elif yes_price < 0.30:
+        edge = (1 - model_prob) - (1 - yes_price)
+    elif yes_price < 0.25:
         # Market is very confident NO - contrarian YES bet
-        model_prob = yes_price + 0.10  # Our estimate is higher
+        model_prob = yes_price + 0.08
         direction = "yes"
-        edge = model_prob - yes_price  # YES edge
+        edge = model_prob - yes_price
+    elif yes_price >= 0.55:
+        # Leaning YES - momentum bet YES
+        model_prob = min(yes_price + 0.05, 0.95)
+        direction = "yes"
+        edge = model_prob - yes_price
+    elif yes_price <= 0.45:
+        # Leaning NO - momentum bet NO
+        model_prob = max(yes_price - 0.05, 0.05)
+        direction = "no"
+        edge = (1 - model_prob) - (1 - yes_price)
     else:
-        return None
+        # Dead center (0.45-0.55) - small contrarian NO bet (markets tend to stay uncertain)
+        model_prob = yes_price - 0.03
+        direction = "no"
+        edge = 0.03
 
     # Confidence based on how extreme the price is
     extremeness = abs(yes_price - 0.5) * 2  # 0 at 0.5, 1 at 0 or 1
@@ -288,28 +294,43 @@ def _parse_end_date(market: MarketData) -> Optional[datetime]:
 
 def _filter_markets_smart(markets: List[MarketData]) -> List[MarketData]:
     """
-    Smart filtering to only trade on good opportunities.
+    AGGRESSIVE filtering - focus on SHORT-TERM markets.
 
     Filters:
-    - Minimum volume requirement
-    - Maximum days to resolution
-    - Reasonable price range
+    - Lower minimum volume requirement
+    - Skip only truly extreme prices
+    - Prioritize markets resolving soon (within MAX_DAYS_TO_RESOLUTION)
     """
-    min_volume = getattr(settings, 'MIN_MARKET_VOLUME', 10000)
+    from datetime import datetime, timedelta, timezone
+
+    min_volume = getattr(settings, 'MIN_MARKET_VOLUME', 1000)
+    max_days = getattr(settings, 'MAX_DAYS_TO_RESOLUTION', 7)  # Focus on markets resolving within 7 days
+    now = datetime.now(timezone.utc)
+    max_end_date = now + timedelta(days=max_days)
 
     filtered = []
+    short_term_count = 0
+
     for m in markets:
-        # Skip low volume markets (less liquid, harder to exit)
+        # Skip very low volume markets
         if m.volume < min_volume:
             continue
 
-        # Skip markets at extreme prices (already resolved or about to)
-        if m.yes_price < 0.03 or m.yes_price > 0.97:
+        # Skip markets at extreme prices (already resolved)
+        if m.yes_price < 0.02 or m.yes_price > 0.98:
             continue
 
-        filtered.append(m)
+        # Prioritize short-term markets
+        if m.settlement_time:
+            if m.settlement_time <= max_end_date:
+                short_term_count += 1
+                filtered.insert(0, m)  # Put short-term at front
+            else:
+                filtered.append(m)  # Long-term at back
+        else:
+            filtered.append(m)  # Unknown end date at back
 
-    logger.info(f"Smart filter: {len(markets)} -> {len(filtered)} markets (min volume: ${min_volume:,.0f})")
+    logger.info(f"Aggressive filter: {len(markets)} -> {len(filtered)} markets ({short_term_count} short-term within {max_days} days)")
     return filtered
 
 

@@ -102,12 +102,12 @@ async def scan_and_trade_job():
                 log_event("info", "Bot is paused, skipping trades")
                 return
 
-            # SMART TRADING: Quality over quantity
-            MAX_TRADES_PER_SCAN = 5  # Reduced - only best trades
-            MIN_TRADE_SIZE = 20  # Minimum $20 per trade (meaningful size)
-            MAX_TRADE_FRACTION = 0.05  # Max 5% of bankroll per trade
-            MAX_PER_CATEGORY = getattr(settings, 'MAX_TRADES_PER_CATEGORY', 3)
-            MAX_TOTAL_PENDING = getattr(settings, 'MAX_TOTAL_PENDING_TRADES', 15)
+            # AGGRESSIVE TRADING: Short-term, high volume
+            MAX_TRADES_PER_SCAN = 15  # Lots of trades per scan
+            MIN_TRADE_SIZE = 10  # Minimum $10 per trade
+            MAX_TRADE_FRACTION = 0.08  # Max 8% of bankroll per trade
+            MAX_PER_CATEGORY = getattr(settings, 'MAX_TRADES_PER_CATEGORY', 10)
+            MAX_TOTAL_PENDING = getattr(settings, 'MAX_TOTAL_PENDING_TRADES', 50)
 
             # Check total pending trades
             total_pending = db.query(Trade).filter(Trade.settled == False).count()
@@ -282,19 +282,19 @@ def start_scheduler():
 
     scheduler = AsyncIOScheduler()
 
-    # Scan markets every 5 minutes (balanced - not too aggressive)
+    # Scan markets every 2 minutes (AGGRESSIVE)
     scheduler.add_job(
         scan_and_trade_job,
-        IntervalTrigger(minutes=5),
+        IntervalTrigger(minutes=2),
         id="market_scan",
         replace_existing=True,
         max_instances=1
     )
 
-    # Check settlements every 15 minutes (markets don't resolve that fast)
+    # Check settlements every 10 minutes (check frequently for short-term markets)
     scheduler.add_job(
         settlement_job,
-        IntervalTrigger(minutes=15),
+        IntervalTrigger(minutes=10),
         id="settlement_check",
         replace_existing=True,
         max_instances=1
@@ -310,10 +310,10 @@ def start_scheduler():
     )
 
     scheduler.start()
-    log_event("success", "Trading scheduler started (SMART MODE - cost optimized)", {
-        "scan_interval": "5 minutes",
-        "settlement_interval": "15 minutes",
-        "max_trades_per_scan": 5,
+    log_event("success", "Trading scheduler started (AGGRESSIVE MODE - short-term focus)", {
+        "scan_interval": "2 minutes",
+        "settlement_interval": "10 minutes",
+        "max_trades_per_scan": 15,
         "min_edge": f"{settings.MIN_EDGE_THRESHOLD:.0%}",
         "ai_provider": "groq (free)"
     })

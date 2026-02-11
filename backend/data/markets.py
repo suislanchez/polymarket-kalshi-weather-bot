@@ -259,6 +259,16 @@ async def fetch_polymarket_markets(
                         except (json.JSONDecodeError, ValueError, TypeError) as e:
                             logger.debug(f"Price parse error for {market.get('id', 'unknown')}: {e}")
 
+                    # Parse end date for short-term filtering
+                    end_date = None
+                    end_date_str = market.get("endDate") or event.get("endDate")
+                    if end_date_str:
+                        try:
+                            # Parse ISO format: 2024-02-15T00:00:00Z
+                            end_date = datetime.fromisoformat(end_date_str.replace('Z', '+00:00'))
+                        except (ValueError, AttributeError):
+                            pass
+
                     markets.append(MarketData(
                         platform="polymarket",
                         ticker=market.get("id", ""),
@@ -268,7 +278,7 @@ async def fetch_polymarket_markets(
                         yes_price=yes_price,
                         no_price=1 - yes_price,
                         volume=float(market.get("volume", 0) or 0),
-                        settlement_time=None,
+                        settlement_time=end_date,
                         threshold=parsed.get("threshold"),
                         direction=parsed.get("direction"),
                         event_slug=event_slug

@@ -13,7 +13,8 @@ export async function fetchDashboard(): Promise<DashboardData> {
 }
 
 export async function fetchSignals(): Promise<Signal[]> {
-  const { data } = await api.get<Signal[]>('/signals/actionable')
+  // Fetch ALL signals, not just actionable - user wants to see everything
+  const { data } = await api.get<Signal[]>('/signals')
   return data
 }
 

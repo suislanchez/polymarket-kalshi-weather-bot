@@ -37,17 +37,17 @@ class Settings(BaseSettings):
     ENABLED_CATEGORIES: list = ["weather", "crypto", "politics", "economics"]
     EXCLUDE_SPORTS: bool = True  # Always exclude sports markets
 
-    # Bot settings - SMART TRADING
+    # Bot settings - AGGRESSIVE SHORT-TERM TRADING
     SIMULATION_MODE: bool = True  # Always True for Phase 1
     INITIAL_BANKROLL: float = 10000.0  # Virtual bankroll
-    KELLY_FRACTION: float = 0.15  # Reduced from 0.25 - more conservative
-    MIN_EDGE_THRESHOLD: float = 0.12  # Increased from 8% to 12% - only best trades
+    KELLY_FRACTION: float = 0.30  # Aggressive - 30% Kelly
+    MIN_EDGE_THRESHOLD: float = 0.03  # Low threshold - 3% edge is enough
 
-    # Smart filters
-    MIN_MARKET_VOLUME: float = 10000.0  # Only trade markets with $10k+ volume
-    MAX_DAYS_TO_RESOLUTION: int = 30  # Skip markets resolving > 30 days out
-    MAX_TRADES_PER_CATEGORY: int = 3  # Limit exposure per category
-    MAX_TOTAL_PENDING_TRADES: int = 15  # Max open positions
+    # Aggressive filters - focus on SHORT-TERM
+    MIN_MARKET_VOLUME: float = 1000.0  # Lower volume requirement
+    MAX_DAYS_TO_RESOLUTION: int = 7  # Only markets resolving within 1 WEEK
+    MAX_TRADES_PER_CATEGORY: int = 10  # More per category
+    MAX_TOTAL_PENDING_TRADES: int = 50  # Lots of positions
 
     # Polling intervals (seconds)
     MARKET_SCAN_INTERVAL: int = 60
