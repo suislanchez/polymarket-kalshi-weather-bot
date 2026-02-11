@@ -59,6 +59,11 @@ export async function settleTradesApi(): Promise<{ settled_count: number }> {
   return data
 }
 
+export async function resetBot(): Promise<{ status: string; trades_deleted: number; new_bankroll: number }> {
+  const { data } = await api.post('/bot/reset')
+  return data
+}
+
 export interface AIStats {
   today: {
     total_calls: number

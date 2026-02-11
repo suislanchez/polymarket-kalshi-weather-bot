@@ -562,6 +562,50 @@ async def stop_bot(db: Session = Depends(get_db)):
     return {"status": "stopped", "is_running": False}
 
 
+@app.post("/api/bot/reset")
+async def reset_bot(db: Session = Depends(get_db)):
+    """
+    Reset bot state and clear all trades.
+    Use this to start fresh after removing fake/simulated data.
+    """
+    from backend.core.scheduler import log_event
+    import logging
+    logger = logging.getLogger("trading_bot")
+
+    try:
+        # Delete all trades
+        trades_deleted = db.query(Trade).delete()
+
+        # Reset bot state
+        state = db.query(BotState).first()
+        if state:
+            state.bankroll = settings.INITIAL_BANKROLL
+            state.total_trades = 0
+            state.winning_trades = 0
+            state.total_pnl = 0.0
+            state.is_running = True
+
+        # Clear AI logs
+        ai_logs_deleted = db.query(AILog).delete()
+
+        db.commit()
+
+        log_event("success", f"Bot reset: Deleted {trades_deleted} trades, {ai_logs_deleted} AI logs. Starting fresh with ${settings.INITIAL_BANKROLL:,.2f}")
+        logger.info(f"Bot reset complete: {trades_deleted} trades deleted, bankroll reset to ${settings.INITIAL_BANKROLL:,.2f}")
+
+        return {
+            "status": "reset",
+            "trades_deleted": trades_deleted,
+            "ai_logs_deleted": ai_logs_deleted,
+            "new_bankroll": settings.INITIAL_BANKROLL
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to reset bot: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Reset failed: {e}")
+
+
 # ============ Category & AI Endpoints ============
 
 @app.get("/api/categories")

@@ -1,132 +1,106 @@
-"""Trade settlement logic - resolves pending trades using actual weather data."""
-import re
+"""Trade settlement logic - checks REAL market outcomes from Polymarket."""
 import httpx
+import logging
 from datetime import datetime, timedelta
 from typing import Optional, List, Tuple
 from sqlalchemy.orm import Session
 
-from backend.config import settings
 from backend.models.database import Trade, BotState
 
-
-# NWS weather station IDs for actual observations
-NWS_STATIONS = {
-    "nyc": "KNYC",
-    "chicago": "KORD",
-    "miami": "KMIA",
-    "austin": "KAUS",
-    "los_angeles": "KLAX",
-    "atlanta": "KATL",
-    "denver": "KDEN",
-    "seattle": "KSEA",
-    "dallas": "KDFW",
-    "boston": "KBOS",
-}
+logger = logging.getLogger("trading_bot")
 
 
-def parse_market_ticker(ticker: str) -> Tuple[Optional[str], Optional[float], Optional[str]]:
+async def fetch_polymarket_resolution(market_id: str) -> Tuple[bool, Optional[float]]:
     """
-    Parse market ticker to extract city, threshold, and direction.
+    Fetch actual market resolution from Polymarket API.
 
-    Examples:
-    - KXHIGHNYC-26FEB10-T45 -> ('nyc', 45.0, 'above')
-    - KXHIGHCHICAGO-26FEB10-T30 -> ('chicago', 30.0, 'above')
+    Returns: (is_resolved, settlement_value)
+        - settlement_value: 1.0 if YES won, 0.0 if NO won
     """
-    ticker_upper = ticker.upper()
-
-    # Extract city
-    city = None
-    for city_name in NWS_STATIONS.keys():
-        if city_name.upper() in ticker_upper:
-            city = city_name
-            break
-
-    # Extract threshold (T followed by number)
-    threshold_match = re.search(r'T(\d+)', ticker_upper)
-    threshold = float(threshold_match.group(1)) if threshold_match else None
-
-    # Determine direction (HIGH = above, LOW = below)
-    direction = None
-    if 'HIGH' in ticker_upper:
-        direction = 'above'
-    elif 'LOW' in ticker_upper:
-        direction = 'below'
-
-    return city, threshold, direction
-
-
-async def fetch_weather_actual(city: str, target_date: datetime) -> Optional[float]:
-    """
-    Fetch actual high temperature from NWS observations API.
-    Returns the actual high temp for the given date, or None if not available.
-    """
-    station_id = NWS_STATIONS.get(city.lower())
-    if not station_id:
-        return None
-
     try:
-        # NWS observations endpoint
-        url = f"https://api.weather.gov/stations/{station_id}/observations"
+        # Try to get market directly
+        url = f"https://gamma-api.polymarket.com/markets/{market_id}"
 
-        # Get observations for the target date
-        start = target_date.replace(hour=0, minute=0, second=0)
-        end = target_date.replace(hour=23, minute=59, second=59)
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(url)
 
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.get(
-                url,
-                params={
-                    "start": start.isoformat() + "Z",
-                    "end": end.isoformat() + "Z"
-                },
-                headers={"User-Agent": "WeatherTradingBot/1.0"}
-            )
+            if response.status_code == 404:
+                # Market not found by ID, try searching events
+                return await _search_market_in_events(market_id)
 
-            if response.status_code != 200:
-                return None
+            response.raise_for_status()
+            market = response.json()
 
-            data = response.json()
-            observations = data.get("features", [])
-
-            if not observations:
-                return None
-
-            # Find max temperature from observations
-            temps = []
-            for obs in observations:
-                props = obs.get("properties", {})
-                temp_c = props.get("temperature", {}).get("value")
-                if temp_c is not None:
-                    # Convert Celsius to Fahrenheit
-                    temp_f = (temp_c * 9/5) + 32
-                    temps.append(temp_f)
-
-            if temps:
-                return max(temps)
+            return _parse_market_resolution(market)
 
     except Exception as e:
-        print(f"Error fetching weather actual for {city}: {e}")
+        logger.warning(f"Failed to fetch Polymarket resolution for {market_id}: {e}")
+        return False, None
 
-    return None
+
+async def _search_market_in_events(market_id: str) -> Tuple[bool, Optional[float]]:
+    """Search for market in events (both active and closed)."""
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            # Search closed events first (more likely to be resolved)
+            for closed in [True, False]:
+                params = {
+                    "closed": str(closed).lower(),
+                    "limit": 200
+                }
+                response = await client.get(
+                    "https://gamma-api.polymarket.com/events",
+                    params=params
+                )
+                response.raise_for_status()
+                events = response.json()
+
+                for event in events:
+                    for market in event.get("markets", []):
+                        if str(market.get("id")) == str(market_id):
+                            return _parse_market_resolution(market)
+
+        return False, None
+
+    except Exception as e:
+        logger.warning(f"Failed to search for market {market_id}: {e}")
+        return False, None
 
 
-async def simulate_weather_actual(city: str, trade: Trade) -> float:
-    """
-    For simulation mode: Generate a realistic settlement value based on model probability.
-    This creates deterministic but realistic outcomes for testing.
-    """
-    import random
-    # Use trade ID as seed for deterministic results
-    random.seed(trade.id)
+def _parse_market_resolution(market: dict) -> Tuple[bool, Optional[float]]:
+    """Parse market data to determine if resolved and outcome."""
+    is_closed = market.get("closed", False)
 
-    # Settlement based on model probability (with some noise)
-    base_prob = trade.model_probability
-    # Add some noise (-10% to +10%)
-    noise = random.uniform(-0.1, 0.1)
-    final_prob = max(0, min(1, base_prob + noise))
+    if not is_closed:
+        return False, None
 
-    # Determine outcome
-    return 1.0 if random.random() < final_prob else 0.0
+    # Get outcome prices
+    outcome_prices = market.get("outcomePrices", [])
+    if not outcome_prices:
+        return False, None
+
+    try:
+        # Parse YES price
+        if isinstance(outcome_prices, str):
+            import json
+            outcome_prices = json.loads(outcome_prices)
+
+        yes_price = float(outcome_prices[0]) if outcome_prices else 0.5
+
+        # If YES price is very close to 0 or 1, market is resolved
+        if yes_price > 0.99:
+            logger.info(f"Market {market.get('id')} resolved: YES won")
+            return True, 1.0  # YES won
+        elif yes_price < 0.01:
+            logger.info(f"Market {market.get('id')} resolved: NO won")
+            return True, 0.0  # NO won
+        else:
+            # Market is closed but not fully resolved (maybe disputed)
+            return False, None
+
+    except (ValueError, IndexError, TypeError) as e:
+        logger.warning(f"Failed to parse outcome prices: {e}")
+        return False, None
 
 
 def calculate_pnl(trade: Trade, settlement_value: float) -> float:
@@ -165,75 +139,45 @@ async def check_market_settlement(trade: Trade) -> Tuple[bool, Optional[float], 
     """
     Check if a trade's market has settled and determine the outcome.
 
+    Uses REAL Polymarket API data - no simulation!
+
     Returns: (is_settled, settlement_value, pnl)
     """
-    # Parse the market ticker
-    city, threshold, direction = parse_market_ticker(trade.market_ticker)
+    # Get real resolution from Polymarket
+    is_resolved, settlement_value = await fetch_polymarket_resolution(trade.market_ticker)
 
-    if not all([city, threshold, direction]):
-        # Can't parse ticker - simulate settlement
-        settlement_value = await simulate_weather_actual(city or "nyc", trade)
-        pnl = calculate_pnl(trade, settlement_value)
-        return True, settlement_value, pnl
+    if not is_resolved or settlement_value is None:
+        # Market not yet resolved
+        return False, None, None
 
-    # Check if enough time has passed (market should settle after the date)
-    # Parse date from ticker (e.g., 26FEB10 = Feb 10, 2026)
-    date_match = re.search(r'(\d{2})([A-Z]{3})(\d{2})', trade.market_ticker.upper())
-    if date_match:
-        day = int(date_match.group(1))
-        month_str = date_match.group(2)
-        year = 2000 + int(date_match.group(3))
+    # Calculate real P&L
+    pnl = calculate_pnl(trade, settlement_value)
 
-        months = {'JAN': 1, 'FEB': 2, 'MAR': 3, 'APR': 4, 'MAY': 5, 'JUN': 6,
-                  'JUL': 7, 'AUG': 8, 'SEP': 9, 'OCT': 10, 'NOV': 11, 'DEC': 12}
-        month = months.get(month_str, 1)
+    logger.info(f"Trade {trade.id} settled: {trade.direction.upper()} @ {trade.entry_price:.0%} -> "
+                f"{'WIN' if (trade.direction == 'yes' and settlement_value == 1.0) or (trade.direction == 'no' and settlement_value == 0.0) else 'LOSS'} "
+                f"P&L: ${pnl:+.2f}")
 
-        try:
-            market_date = datetime(year, month, day)
-
-            # Market settles after midnight of the market date
-            if datetime.utcnow() < market_date + timedelta(hours=24):
-                return False, None, None  # Not settled yet
-
-            # Try to get actual weather data
-            actual_temp = await fetch_weather_actual(city, market_date)
-
-            if actual_temp is not None:
-                # Determine settlement based on actual temp
-                if direction == 'above':
-                    settlement_value = 1.0 if actual_temp >= threshold else 0.0
-                else:  # below
-                    settlement_value = 1.0 if actual_temp < threshold else 0.0
-
-                pnl = calculate_pnl(trade, settlement_value)
-                return True, settlement_value, pnl
-
-        except ValueError:
-            pass
-
-    # Fallback: simulate settlement for older trades (> 12 hours old)
-    if datetime.utcnow() - trade.timestamp > timedelta(hours=12):
-        settlement_value = await simulate_weather_actual(city or "nyc", trade)
-        pnl = calculate_pnl(trade, settlement_value)
-        return True, settlement_value, pnl
-
-    return False, None, None
+    return True, settlement_value, pnl
 
 
 async def settle_pending_trades(db: Session) -> List[Trade]:
     """
     Process all pending trades that are ready for settlement.
+    Uses REAL market outcomes from Polymarket API.
+
     Returns list of newly settled trades.
     """
-    import logging
-    logger = logging.getLogger("trading_bot")
-
     try:
         pending = db.query(Trade).filter(Trade.settled == False).all()
     except Exception as e:
         logger.error(f"Failed to query pending trades: {e}")
         return []
 
+    if not pending:
+        logger.info("No pending trades to settle")
+        return []
+
+    logger.info(f"Checking {len(pending)} pending trades for settlement...")
     settled_trades = []
 
     for trade in pending:
@@ -263,19 +207,19 @@ async def settle_pending_trades(db: Session) -> List[Trade]:
     if settled_trades:
         try:
             db.commit()
+            logger.info(f"Settled {len(settled_trades)} trades")
         except Exception as e:
             logger.error(f"Failed to commit settlements: {e}")
             db.rollback()
             return []
+    else:
+        logger.info("No trades ready for settlement (markets still open)")
 
     return settled_trades
 
 
 async def update_bot_state_with_settlements(db: Session, settled_trades: List[Trade]) -> None:
     """Update bot state with P&L from settled trades."""
-    import logging
-    logger = logging.getLogger("trading_bot")
-
     if not settled_trades:
         return
 
@@ -293,6 +237,7 @@ async def update_bot_state_with_settlements(db: Session, settled_trades: List[Tr
                     state.winning_trades += 1
 
         db.commit()
+        logger.info(f"Updated bot state: Bankroll ${state.bankroll:.2f}, P&L ${state.total_pnl:+.2f}")
     except Exception as e:
         logger.error(f"Failed to update bot state with settlements: {e}")
         db.rollback()
