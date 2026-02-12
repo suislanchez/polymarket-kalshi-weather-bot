@@ -1,9 +1,10 @@
 """Database models and connection."""
 from datetime import datetime
 from typing import Optional
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, JSON, Enum as SQLEnum
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, JSON, Enum as SQLEnum, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy import inspect
 import enum
 
 from backend.config import settings
@@ -223,6 +224,25 @@ class ScanLog(Base):
 def init_db():
     """Initialize database tables."""
     Base.metadata.create_all(bind=engine)
+    ensure_schema()
+
+
+def ensure_schema():
+    """Ensure newer schema fields exist even if migration wasn't run."""
+    inspector = inspect(engine)
+    try:
+        columns = [col["name"] for col in inspector.get_columns("trades")]
+    except Exception:
+        return
+
+    if "event_slug" not in columns:
+        stmt = "ALTER TABLE trades ADD COLUMN event_slug VARCHAR"
+        if engine.dialect.name not in ("sqlite", "mysql"):
+            stmt = "ALTER TABLE trades ADD COLUMN IF NOT EXISTS event_slug VARCHAR"
+
+        with engine.connect() as conn:
+            with conn.begin():
+                conn.execute(text(stmt))
 
 
 def get_db():

@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from typing import List, Optional
 import asyncio
 import json
+import os
 
 from backend.config import settings
 from backend.models.database import (
@@ -853,4 +854,4 @@ async def get_dashboard(db: Session = Depends(get_db)):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
