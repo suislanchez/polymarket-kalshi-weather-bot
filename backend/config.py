@@ -32,9 +32,9 @@ class Settings(BaseSettings):
     SCAN_INTERVAL_SECONDS: int = 60  # Scan every minute
     SETTLEMENT_INTERVAL_SECONDS: int = 120  # Check settlements every 2 min
     BTC_PRICE_SOURCE: str = "coingecko"
-    MIN_EDGE_THRESHOLD: float = 0.05  # 5% edge for fast markets
-    MAX_TRADES_PER_WINDOW: int = 1  # One trade per 5-min window
-    MAX_TOTAL_PENDING_TRADES: int = 20
+    MIN_EDGE_THRESHOLD: float = 0.02  # 2% edge - aggressive for fast markets
+    MAX_TRADES_PER_WINDOW: int = 3  # Multiple trades per window
+    MAX_TOTAL_PENDING_TRADES: int = 50
 
     # Volume filter
     MIN_MARKET_VOLUME: float = 100.0  # Low volume for 5-min markets

@@ -82,9 +82,9 @@ async def scan_and_trade_job():
                 log_event("info", "Bot is paused, skipping trades")
                 return
 
-            MAX_TRADES_PER_SCAN = 3
+            MAX_TRADES_PER_SCAN = 10
             MIN_TRADE_SIZE = 10
-            MAX_TRADE_FRACTION = 0.05
+            MAX_TRADE_FRACTION = 0.08
             MAX_TOTAL_PENDING = settings.MAX_TOTAL_PENDING_TRADES
 
             total_pending = db.query(Trade).filter(Trade.settled == False).count()

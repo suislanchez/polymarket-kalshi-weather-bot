@@ -106,7 +106,7 @@ def calculate_kelly_size(
     kelly *= settings.KELLY_FRACTION
 
     # Cap at maximum per-trade limit
-    max_fraction = 0.05
+    max_fraction = 0.10  # 10% max per trade - aggressive
     kelly = min(kelly, max_fraction)
 
     kelly = max(kelly, 0)
@@ -118,10 +118,10 @@ async def generate_btc_signal(market: BtcMarket) -> Optional[TradingSignal]:
     """
     Generate a trading signal for a BTC 5-min Up/Down market.
 
-    Strategy: Short-term momentum from CoinGecko price data.
-    - Fetch current BTC price and recent changes
-    - Estimate probability of BTC going up in the next 5 minutes
-    - Compare against market's Up/Down prices to find edge
+    AGGRESSIVE strategy:
+    - Momentum from 24h price trend
+    - Exploit any market price deviation from 50/50
+    - Contrarian when market is skewed without strong momentum
     """
     # Fetch BTC price data
     try:
@@ -133,48 +133,47 @@ async def generate_btc_signal(market: BtcMarket) -> Optional[TradingSignal]:
     if not btc:
         return None
 
-    # Market implied probability of UP
     market_up_prob = market.up_price
 
-    # Skip if prices are at extremes (already resolved or illiquid)
+    # Skip only truly resolved markets
     if market_up_prob < 0.02 or market_up_prob > 0.98:
         return None
 
-    # Calculate our model probability of UP
-    # Based on short-term momentum from available data
-    change_24h = btc.change_24h  # percentage
+    change_24h = btc.change_24h
 
-    # Momentum signal: recent trend slightly predicts next move
-    # But markets are efficient, so effect is small
-    # Positive 24h change -> slight upward momentum bias
+    # --- AGGRESSIVE MOMENTUM MODEL ---
+    # Start at 50/50, then layer on biases
+
+    # 1) Momentum bias from recent price action (bigger effect)
     momentum_bias = 0.0
-
-    # Strong recent moves create momentum
-    if abs(change_24h) > 3:
-        # Strong move - slight momentum continuation
-        momentum_bias = 0.03 if change_24h > 0 else -0.03
-    elif abs(change_24h) > 1:
-        # Moderate move
-        momentum_bias = 0.02 if change_24h > 0 else -0.02
+    if abs(change_24h) > 5:
+        momentum_bias = 0.08 if change_24h > 0 else -0.08
+    elif abs(change_24h) > 3:
+        momentum_bias = 0.06 if change_24h > 0 else -0.06
+    elif abs(change_24h) > 1.5:
+        momentum_bias = 0.04 if change_24h > 0 else -0.04
     elif abs(change_24h) > 0.5:
-        # Small move
+        momentum_bias = 0.03 if change_24h > 0 else -0.03
+    else:
         momentum_bias = 0.01 if change_24h > 0 else -0.01
 
-    # Base probability is 50/50 (random walk) + momentum adjustment
-    model_up_prob = 0.50 + momentum_bias
+    # 2) Market mispricing - if market deviates from 50/50, lean contrarian
+    #    These 5-min markets should be ~50/50, so any skew is opportunity
+    market_skew = market_up_prob - 0.50
+    contrarian_bias = -market_skew * 0.5  # Fade the skew
 
-    # Clamp to reasonable range
-    model_up_prob = max(0.30, min(0.70, model_up_prob))
+    # 3) Combine biases
+    model_up_prob = 0.50 + momentum_bias + contrarian_bias
 
-    # Also check if market price itself is mispriced
-    # If market shows 60% UP but our model says 50%, bet DOWN
-    # If market shows 40% UP but our model says 52%, bet UP
+    # Clamp to wide range (be aggressive)
+    model_up_prob = max(0.25, min(0.75, model_up_prob))
 
     # Calculate edge
     edge, direction = calculate_edge(model_up_prob, market_up_prob)
 
-    # Confidence based on how strong the momentum signal is
-    confidence = 0.4 + min(abs(momentum_bias) * 5, 0.3)
+    # Confidence: higher when momentum is strong or market is skewed
+    signal_strength = abs(momentum_bias) + abs(market_skew)
+    confidence = min(0.8, 0.4 + signal_strength * 3)
 
     # Kelly sizing
     bankroll = settings.INITIAL_BANKROLL
