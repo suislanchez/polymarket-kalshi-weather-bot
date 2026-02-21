@@ -2,13 +2,13 @@ import { formatDistanceToNow } from 'date-fns'
 import { ExternalLink, ArrowUpDown, ArrowUp, ArrowDown } from 'lucide-react'
 import { useState, useMemo } from 'react'
 import type { Trade } from '../types'
-import { getMarketUrl, platformStyles } from '../utils'
+import { getMarketUrl } from '../utils'
 
 interface Props {
   trades: Trade[]
 }
 
-type SortKey = 'timestamp' | 'size' | 'pnl' | 'platform' | 'result'
+type SortKey = 'timestamp' | 'size' | 'pnl' | 'result'
 type SortDir = 'asc' | 'desc'
 
 export function TradesTable({ trades }: Props) {
@@ -40,10 +40,6 @@ export function TradesTable({ trades }: Props) {
           aVal = a.pnl ?? 0
           bVal = b.pnl ?? 0
           break
-        case 'platform':
-          aVal = a.platform
-          bVal = b.platform
-          break
         case 'result':
           aVal = a.result
           bVal = b.result
@@ -63,8 +59,8 @@ export function TradesTable({ trades }: Props) {
   const SortIcon = ({ column }: { column: SortKey }) => {
     if (sortKey !== column) return <ArrowUpDown className="w-3 h-3 text-neutral-600" />
     return sortDir === 'asc'
-      ? <ArrowUp className="w-3 h-3 text-green-500" />
-      : <ArrowDown className="w-3 h-3 text-green-500" />
+      ? <ArrowUp className="w-3 h-3 text-orange-500" />
+      : <ArrowDown className="w-3 h-3 text-orange-500" />
   }
 
   if (trades.length === 0) {
@@ -72,7 +68,7 @@ export function TradesTable({ trades }: Props) {
       <div className="flex flex-col items-center justify-center py-12 text-neutral-600">
         <div className="text-4xl mb-4 opacity-30">---</div>
         <p className="text-sm">No trades yet</p>
-        <p className="text-xs mt-1">Simulated trades will appear here</p>
+        <p className="text-xs mt-1">BTC trades will appear here</p>
       </div>
     )
   }
@@ -90,14 +86,7 @@ export function TradesTable({ trades }: Props) {
                 Status <SortIcon column="result" />
               </div>
             </th>
-            <th
-              className="py-3 px-2 font-medium cursor-pointer hover:text-neutral-400 transition-colors"
-              onClick={() => handleSort('platform')}
-            >
-              <div className="flex items-center gap-1">
-                Market <SortIcon column="platform" />
-              </div>
-            </th>
+            <th className="py-3 px-2 font-medium">Window</th>
             <th className="py-3 px-2 font-medium text-center">Direction</th>
             <th
               className="py-3 px-2 font-medium text-right cursor-pointer hover:text-neutral-400 transition-colors"
@@ -130,9 +119,8 @@ export function TradesTable({ trades }: Props) {
           {sortedTrades.map((trade) => {
             const isPending = trade.result === 'pending'
             const isWin = trade.result === 'win'
-            const platformKey = trade.platform.toLowerCase() as keyof typeof platformStyles
-            const style = platformStyles[platformKey] || platformStyles.kalshi
-            const marketUrl = getMarketUrl(trade.platform, trade.market_ticker, trade.event_slug ?? undefined)
+            const marketUrl = getMarketUrl('polymarket', trade.market_ticker, trade.event_slug ?? undefined)
+            const isUp = trade.direction === 'up'
 
             return (
               <tr
@@ -151,18 +139,15 @@ export function TradesTable({ trades }: Props) {
                   </span>
                 </td>
                 <td className="py-3 px-2">
-                  <div className="max-w-[220px]">
-                    <span className={`px-1.5 py-0.5 text-[10px] font-medium uppercase border mr-2 ${style.badge}`}>
-                      {style.icon} {style.name}
-                    </span>
+                  <div className="max-w-[200px]">
                     <a
                       href={marketUrl}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="group inline-flex items-center gap-1 text-xs text-neutral-400 hover:text-neutral-200 transition-colors"
                     >
-                      <span className="truncate" title={trade.market_ticker}>
-                        {trade.market_ticker}
+                      <span className="truncate" title={trade.event_slug || trade.market_ticker}>
+                        {trade.event_slug || trade.market_ticker}
                       </span>
                       <ExternalLink className="w-3 h-3 opacity-0 group-hover:opacity-100 shrink-0" />
                     </a>
@@ -170,7 +155,7 @@ export function TradesTable({ trades }: Props) {
                 </td>
                 <td className="py-3 px-2 text-center">
                   <span className={`px-2 py-1 text-[10px] font-semibold uppercase ${
-                    trade.direction === 'yes'
+                    isUp
                       ? 'bg-green-500/10 text-green-500 border border-green-500/20'
                       : 'bg-red-500/10 text-red-500 border border-red-500/20'
                   }`}>

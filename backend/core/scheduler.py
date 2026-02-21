@@ -1,4 +1,4 @@
-"""Background scheduler for autonomous 24/7 trading."""
+"""Background scheduler for BTC 5-min autonomous trading."""
 import asyncio
 from datetime import datetime
 from typing import List, Optional
@@ -10,7 +10,6 @@ from backend.config import settings
 from backend.models.database import SessionLocal, Trade, BotState
 from backend.core.signals import scan_for_signals
 
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("trading_bot")
 
@@ -23,10 +22,7 @@ MAX_LOG_SIZE = 200
 
 
 def log_event(event_type: str, message: str, data: dict = None):
-    """
-    Log an event for terminal display.
-    event_type: 'info', 'success', 'warning', 'error', 'data', 'trade'
-    """
+    """Log an event for terminal display."""
     event = {
         "timestamp": datetime.utcnow().isoformat(),
         "type": event_type,
@@ -35,11 +31,9 @@ def log_event(event_type: str, message: str, data: dict = None):
     }
     event_log.append(event)
 
-    # Keep log size bounded
     while len(event_log) > MAX_LOG_SIZE:
         event_log.pop(0)
 
-    # Also log to console
     log_func = {
         "error": logger.error,
         "warning": logger.warning,
@@ -59,38 +53,24 @@ def get_recent_events(limit: int = 50) -> List[dict]:
 
 async def scan_and_trade_job():
     """
-    Background job: Scan markets, generate signals, execute simulated trades.
-    Runs every 5 minutes.
+    Background job: Scan BTC 5-min markets, generate signals, execute trades.
+    Runs every minute.
     """
-    log_event("info", "Starting market scan...")
-    logger.info("=" * 60)
-    logger.info("MARKET SCAN STARTED")
-    logger.info("=" * 60)
+    log_event("info", "Scanning BTC 5-min markets...")
 
     try:
-        # Scan for signals
         signals = await scan_for_signals()
         actionable = [s for s in signals if s.passes_threshold]
 
-        # Group signals by category for logging
-        by_cat = {}
-        for s in actionable:
-            cat = getattr(s.market, 'category', 'other') or 'other'
-            by_cat[cat] = by_cat.get(cat, 0) + 1
-
-        cat_summary = ", ".join(f"{c}: {n}" for c, n in sorted(by_cat.items(), key=lambda x: -x[1]))
-
-        log_event("data", f"Found {len(signals)} signals, {len(actionable)} actionable ({cat_summary})", {
+        log_event("data", f"Found {len(signals)} signals, {len(actionable)} actionable", {
             "total_signals": len(signals),
             "actionable": len(actionable),
-            "by_category": by_cat
         })
 
         if not actionable:
-            log_event("info", "No actionable signals found")
+            log_event("info", "No actionable BTC signals")
             return
 
-        # Get database session
         db = SessionLocal()
         try:
             state = db.query(BotState).first()
@@ -102,39 +82,27 @@ async def scan_and_trade_job():
                 log_event("info", "Bot is paused, skipping trades")
                 return
 
-            # AGGRESSIVE TRADING: Short-term, high volume
-            MAX_TRADES_PER_SCAN = 15  # Lots of trades per scan
-            MIN_TRADE_SIZE = 10  # Minimum $10 per trade
-            MAX_TRADE_FRACTION = 0.08  # Max 8% of bankroll per trade
-            MAX_PER_CATEGORY = getattr(settings, 'MAX_TRADES_PER_CATEGORY', 10)
-            MAX_TOTAL_PENDING = getattr(settings, 'MAX_TOTAL_PENDING_TRADES', 50)
+            MAX_TRADES_PER_SCAN = 3
+            MIN_TRADE_SIZE = 10
+            MAX_TRADE_FRACTION = 0.05
+            MAX_TOTAL_PENDING = settings.MAX_TOTAL_PENDING_TRADES
 
-            # Check total pending trades
             total_pending = db.query(Trade).filter(Trade.settled == False).count()
             if total_pending >= MAX_TOTAL_PENDING:
-                log_event("info", f"Max pending trades reached ({total_pending}/{MAX_TOTAL_PENDING}), skipping new trades")
+                log_event("info", f"Max pending trades reached ({total_pending}/{MAX_TOTAL_PENDING})")
                 return
 
-            # Track trades per category this scan
-            category_counts = {}
-
             trades_executed = 0
-            for signal in actionable[:MAX_TRADES_PER_SCAN * 2]:  # Check more, execute fewer
-                # Category limit
-                cat = getattr(signal.market, 'category', 'other') or 'other'
-                if category_counts.get(cat, 0) >= MAX_PER_CATEGORY:
-                    continue
-
-                # Check if we already have a pending trade for this market
+            for signal in actionable[:MAX_TRADES_PER_SCAN]:
+                # Check if we already have a trade for this market window
                 existing = db.query(Trade).filter(
-                    Trade.market_ticker == signal.market.ticker,
+                    Trade.market_ticker == signal.market.market_id,
                     Trade.settled == False
                 ).first()
 
                 if existing:
                     continue
 
-                # Calculate trade size (conservative)
                 trade_size = min(signal.suggested_size, state.bankroll * MAX_TRADE_FRACTION)
                 trade_size = max(trade_size, MIN_TRADE_SIZE)
 
@@ -145,13 +113,15 @@ async def scan_and_trade_job():
                 if trades_executed >= MAX_TRADES_PER_SCAN:
                     break
 
-                # Create trade
+                # Map up/down to yes/no for storage
+                entry_price = signal.market.up_price if signal.direction == "up" else signal.market.down_price
+
                 trade = Trade(
-                    market_ticker=signal.market.ticker,
-                    platform=signal.market.platform,
-                    event_slug=getattr(signal.market, "event_slug", None),
+                    market_ticker=signal.market.market_id,
+                    platform="polymarket",
+                    event_slug=signal.market.slug,
                     direction=signal.direction,
-                    entry_price=signal.market.yes_price if signal.direction == "yes" else signal.market.no_price,
+                    entry_price=entry_price,
                     size=trade_size,
                     model_probability=signal.model_probability,
                     market_price_at_entry=signal.market_probability,
@@ -161,26 +131,24 @@ async def scan_and_trade_job():
                 db.add(trade)
                 state.total_trades += 1
                 trades_executed += 1
-                category_counts[cat] = category_counts.get(cat, 0) + 1
 
-                # Truncate title for display
-                title_short = signal.market.title[:40] + "..." if len(signal.market.title) > 40 else signal.market.title
-
-                log_event("trade", f"[{cat.upper()}] {signal.direction.upper()} ${trade_size:.0f} @ {trade.entry_price:.0%}: {title_short}", {
-                    "ticker": signal.market.ticker,
-                    "category": cat,
-                    "direction": signal.direction,
-                    "size": trade_size,
-                    "edge": signal.edge,
-                    "entry_price": trade.entry_price,
-                    "title": signal.market.title
-                })
+                log_event("trade",
+                    f"BTC {signal.direction.upper()} ${trade_size:.0f} @ {entry_price:.0%} | {signal.market.slug}",
+                    {
+                        "slug": signal.market.slug,
+                        "direction": signal.direction,
+                        "size": trade_size,
+                        "edge": signal.edge,
+                        "entry_price": entry_price,
+                        "btc_price": signal.btc_price,
+                    }
+                )
 
             state.last_run = datetime.utcnow()
             db.commit()
 
             if trades_executed > 0:
-                log_event("success", f"Executed {trades_executed} trade(s)")
+                log_event("success", f"Executed {trades_executed} BTC trade(s)")
             else:
                 log_event("info", "No new trades executed")
 
@@ -195,16 +163,15 @@ async def scan_and_trade_job():
 async def settlement_job():
     """
     Background job: Check and settle pending trades.
-    Runs every 30 minutes.
+    Runs every 2 minutes (BTC 5-min markets resolve fast).
     """
-    log_event("info", "Checking trade settlements...")
+    log_event("info", "Checking BTC trade settlements...")
 
     try:
         from backend.core.settlement import settle_pending_trades, update_bot_state_with_settlements
 
         db = SessionLocal()
         try:
-            # Get count of pending trades
             pending_count = db.query(Trade).filter(Trade.settled == False).count()
 
             if pending_count == 0:
@@ -213,11 +180,9 @@ async def settlement_job():
 
             log_event("data", f"Processing {pending_count} pending trades")
 
-            # Settle trades
             settled = await settle_pending_trades(db)
 
             if settled:
-                # Update bot state
                 await update_bot_state_with_settlements(db, settled)
 
                 wins = sum(1 for t in settled if t.result == "win")
@@ -231,10 +196,9 @@ async def settlement_job():
                     "pnl": total_pnl
                 })
 
-                # Log individual settlements
                 for trade in settled:
-                    result_emoji = "+" if trade.pnl and trade.pnl > 0 else ""
-                    log_event("data", f"  {trade.market_ticker}: {trade.result.upper()} {result_emoji}${trade.pnl:.2f}")
+                    result_prefix = "+" if trade.pnl and trade.pnl > 0 else ""
+                    log_event("data", f"  {trade.event_slug}: {trade.result.upper()} {result_prefix}${trade.pnl:.2f}")
             else:
                 log_event("info", "No trades ready for settlement")
 
@@ -247,10 +211,7 @@ async def settlement_job():
 
 
 async def heartbeat_job():
-    """
-    Background job: Periodic heartbeat to show system is alive.
-    Runs every minute.
-    """
+    """Periodic heartbeat. Runs every minute."""
     db = None
     try:
         db = SessionLocal()
@@ -274,7 +235,7 @@ async def heartbeat_job():
 
 
 def start_scheduler():
-    """Start the background scheduler for autonomous trading."""
+    """Start the background scheduler for BTC 5-min trading."""
     global scheduler
 
     if scheduler is not None and scheduler.running:
@@ -283,19 +244,22 @@ def start_scheduler():
 
     scheduler = AsyncIOScheduler()
 
-    # Scan markets every 2 minutes (AGGRESSIVE)
+    scan_seconds = settings.SCAN_INTERVAL_SECONDS
+    settle_seconds = settings.SETTLEMENT_INTERVAL_SECONDS
+
+    # Scan BTC markets every minute
     scheduler.add_job(
         scan_and_trade_job,
-        IntervalTrigger(minutes=2),
+        IntervalTrigger(seconds=scan_seconds),
         id="market_scan",
         replace_existing=True,
         max_instances=1
     )
 
-    # Check settlements every 10 minutes (check frequently for short-term markets)
+    # Check settlements every 2 minutes
     scheduler.add_job(
         settlement_job,
-        IntervalTrigger(minutes=10),
+        IntervalTrigger(seconds=settle_seconds),
         id="settlement_check",
         replace_existing=True,
         max_instances=1
@@ -311,15 +275,12 @@ def start_scheduler():
     )
 
     scheduler.start()
-    log_event("success", "Trading scheduler started (AGGRESSIVE MODE - short-term focus)", {
-        "scan_interval": "2 minutes",
-        "settlement_interval": "10 minutes",
-        "max_trades_per_scan": 15,
+    log_event("success", "BTC 5-min trading scheduler started", {
+        "scan_interval": f"{scan_seconds}s",
+        "settlement_interval": f"{settle_seconds}s",
         "min_edge": f"{settings.MIN_EDGE_THRESHOLD:.0%}",
-        "ai_provider": "groq (free)"
     })
 
-    # Run initial scan
     asyncio.create_task(scan_and_trade_job())
 
 

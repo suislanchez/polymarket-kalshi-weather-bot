@@ -1,31 +1,27 @@
-"""Signal generator - calculates edges and generates trading signals."""
+"""Signal generator for BTC 5-minute Up/Down markets."""
 import logging
 from datetime import datetime
-from typing import Optional, List, Dict
+from typing import Optional, List
 from dataclasses import dataclass, field
 import asyncio
 
 from backend.config import settings
-from backend.data.weather import WeatherPrediction, fetch_weather_prediction
-from backend.data.markets import MarketData, fetch_all_weather_markets, fetch_all_markets
+from backend.data.btc_markets import BtcMarket, fetch_active_btc_markets
+from backend.data.crypto import fetch_crypto_price
 
 logger = logging.getLogger("trading_bot")
-
-# Track AI usage for this scan
-_ai_calls_this_scan = 0
 
 
 @dataclass
 class TradingSignal:
-    """A trading signal with all relevant data."""
-    market: MarketData
-    weather: Optional[WeatherPrediction] = None
+    """A trading signal for a BTC 5-min market."""
+    market: BtcMarket
 
     # Core signal data
-    model_probability: float = 0.5  # Our calculated probability
-    market_probability: float = 0.5  # Implied by market price
-    edge: float = 0.0  # Difference
-    direction: str = "yes"  # "yes" or "no"
+    model_probability: float = 0.5  # Our estimated probability of UP
+    market_probability: float = 0.5  # Market's implied UP probability
+    edge: float = 0.0
+    direction: str = "up"  # "up" or "down"
 
     # Confidence and sizing
     confidence: float = 0.5
@@ -36,6 +32,11 @@ class TradingSignal:
     sources: List[str] = field(default_factory=list)
     reasoning: str = ""
     timestamp: datetime = field(default_factory=datetime.utcnow)
+
+    # BTC price context
+    btc_price: float = 0.0
+    btc_change_1h: float = 0.0
+    btc_change_24h: float = 0.0
 
     @property
     def passes_threshold(self) -> bool:
@@ -50,20 +51,23 @@ def calculate_edge(
     """
     Calculate edge and determine direction.
 
+    For BTC 5-min markets:
+    - "up" is equivalent to "yes" (outcomePrices[0])
+    - "down" is equivalent to "no" (outcomePrices[1])
+
     Returns:
-        (edge, direction) where direction is "yes" or "no"
+        (edge, direction) where direction is "up" or "down"
     """
-    # Edge for YES bet
-    yes_edge = model_prob - market_price
+    # Edge for UP bet
+    up_edge = model_prob - market_price
 
-    # Edge for NO bet
-    no_edge = (1 - model_prob) - (1 - market_price)
+    # Edge for DOWN bet
+    down_edge = (1 - model_prob) - (1 - market_price)
 
-    # Take the more profitable direction
-    if yes_edge >= no_edge:
-        return yes_edge, "yes"
+    if up_edge >= down_edge:
+        return up_edge, "up"
     else:
-        return no_edge, "no"
+        return down_edge, "down"
 
 
 def calculate_kelly_size(
@@ -83,348 +87,168 @@ def calculate_kelly_size(
         q = probability of losing (1 - p)
         b = odds (payout ratio)
     """
-    if direction == "yes":
+    if direction == "up":
         win_prob = probability
         price = market_price
     else:
         win_prob = 1 - probability
         price = 1 - market_price
 
-    # Avoid division by zero
     if price <= 0 or price >= 1:
         return 0
 
-    # Odds: if you pay $0.30 and win $1.00, odds are (1-0.30)/0.30 = 2.33
     odds = (1 - price) / price
 
-    # Kelly fraction
     lose_prob = 1 - win_prob
     kelly = (win_prob * odds - lose_prob) / odds
 
-    # Apply fractional Kelly (quarter Kelly for safety)
+    # Apply fractional Kelly
     kelly *= settings.KELLY_FRACTION
 
     # Cap at maximum per-trade limit
-    max_fraction = 0.05  # 5% max per trade
+    max_fraction = 0.05
     kelly = min(kelly, max_fraction)
 
-    # Don't bet negative
     kelly = max(kelly, 0)
 
     return kelly * bankroll
 
 
-async def generate_signal(
-    market: MarketData,
-    weather: WeatherPrediction
-) -> Optional[TradingSignal]:
+async def generate_btc_signal(market: BtcMarket) -> Optional[TradingSignal]:
     """
-    Generate a trading signal for a weather market.
+    Generate a trading signal for a BTC 5-min Up/Down market.
 
-    Combines market price with weather prediction to find edge.
+    Strategy: Short-term momentum from CoinGecko price data.
+    - Fetch current BTC price and recent changes
+    - Estimate probability of BTC going up in the next 5 minutes
+    - Compare against market's Up/Down prices to find edge
     """
-    if not market.threshold:
-        # Can't calculate probability without knowing the threshold
+    # Fetch BTC price data
+    try:
+        btc = await fetch_crypto_price("BTC")
+    except Exception as e:
+        logger.warning(f"Failed to fetch BTC price: {e}")
         return None
 
-    # Calculate model probability
-    # Most weather markets ask: "Will high temp exceed X?"
-    if market.direction == "above" or market.direction is None:
-        model_prob = weather.prob_above(market.threshold)
-    else:
-        model_prob = weather.prob_below(market.threshold)
-
-    # Market implied probability
-    market_prob = market.yes_price
-
-    # Calculate edge and optimal direction
-    edge, direction = calculate_edge(model_prob, market_prob)
-
-    # Get confidence from ensemble
-    confidence = weather.confidence()
-
-    # Adjust edge threshold based on confidence
-    effective_threshold = settings.MIN_EDGE_THRESHOLD
-    if confidence < 0.5:
-        effective_threshold *= 1.5  # Require more edge if less confident
-
-    # Calculate Kelly sizing
-    bankroll = settings.INITIAL_BANKROLL  # Would come from DB in production
-    suggested_size = calculate_kelly_size(
-        edge=abs(edge),
-        probability=model_prob,
-        market_price=market.yes_price,
-        direction=direction,
-        bankroll=bankroll
-    )
-
-    # Build reasoning
-    sources = [weather.source]
-    reasoning = (
-        f"Model: {model_prob:.1%} (from {len(weather.ensemble_highs)} ensemble members), "
-        f"Market: {market_prob:.1%}, "
-        f"Edge: {edge:+.1%}, "
-        f"Threshold: {market.threshold}°F"
-    )
-
-    return TradingSignal(
-        market=market,
-        weather=weather,
-        model_probability=model_prob,
-        market_probability=market_prob,
-        edge=edge,
-        direction=direction,
-        confidence=confidence,
-        kelly_fraction=suggested_size / bankroll if bankroll > 0 else 0,
-        suggested_size=suggested_size,
-        sources=sources,
-        reasoning=reasoning
-    )
-
-
-async def generate_price_signal(market: MarketData, use_ai: bool = False) -> Optional[TradingSignal]:
-    """
-    Generate a trading signal for non-weather markets based on price analysis.
-
-    AGGRESSIVE MODE: Generate signals for more markets
-    - Markets at < 0.25 or > 0.75 get contrarian signals
-    - Markets in 0.25-0.75 get momentum signals (go with the trend)
-    """
-    global _ai_calls_this_scan
-
-    yes_price = market.yes_price
-
-    # Skip markets at very extreme prices (already resolved or about to)
-    if yes_price < 0.02 or yes_price > 0.98:
+    if not btc:
         return None
 
-    # AGGRESSIVE: Generate signals for ALL markets
-    if yes_price > 0.75:
-        # Market is very confident YES - contrarian NO bet
-        model_prob = yes_price - 0.08  # Smaller edge assumption
-        direction = "no"
-        edge = (1 - model_prob) - (1 - yes_price)
-    elif yes_price < 0.25:
-        # Market is very confident NO - contrarian YES bet
-        model_prob = yes_price + 0.08
-        direction = "yes"
-        edge = model_prob - yes_price
-    elif yes_price >= 0.55:
-        # Leaning YES - momentum bet YES
-        model_prob = min(yes_price + 0.05, 0.95)
-        direction = "yes"
-        edge = model_prob - yes_price
-    elif yes_price <= 0.45:
-        # Leaning NO - momentum bet NO
-        model_prob = max(yes_price - 0.05, 0.05)
-        direction = "no"
-        edge = (1 - model_prob) - (1 - yes_price)
-    else:
-        # Dead center (0.45-0.55) - small contrarian NO bet (markets tend to stay uncertain)
-        model_prob = yes_price - 0.03
-        direction = "no"
-        edge = 0.03
+    # Market implied probability of UP
+    market_up_prob = market.up_price
 
-    # Confidence based on how extreme the price is
-    extremeness = abs(yes_price - 0.5) * 2  # 0 at 0.5, 1 at 0 or 1
-    confidence = 0.4 + (extremeness * 0.3)  # 0.4 to 0.7
+    # Skip if prices are at extremes (already resolved or illiquid)
+    if market_up_prob < 0.02 or market_up_prob > 0.98:
+        return None
 
-    # Optional: Use Groq for quick analysis on best signals (FREE)
-    ai_reasoning = None
-    max_ai = getattr(settings, 'AI_MAX_CALLS_PER_SCAN', 3)
-    if use_ai and _ai_calls_this_scan < max_ai and settings.GROQ_API_KEY:
-        try:
-            from backend.ai.groq import GroqClassifier
-            groq = GroqClassifier()
-            analysis = await groq.analyze_signal({
-                'market_title': market.title,
-                'market_ticker': market.ticker,
-                'direction': direction,
-                'edge': edge,
-                'yes_price': yes_price
-            })
-            if analysis:
-                ai_reasoning = analysis.reasoning
-                confidence = max(confidence, analysis.confidence)
-                _ai_calls_this_scan += 1
-                logger.info(f"Groq analysis for {market.ticker}: {ai_reasoning[:50]}...")
-        except Exception as e:
-            logger.debug(f"Groq analysis skipped: {e}")
+    # Calculate our model probability of UP
+    # Based on short-term momentum from available data
+    change_24h = btc.change_24h  # percentage
+
+    # Momentum signal: recent trend slightly predicts next move
+    # But markets are efficient, so effect is small
+    # Positive 24h change -> slight upward momentum bias
+    momentum_bias = 0.0
+
+    # Strong recent moves create momentum
+    if abs(change_24h) > 3:
+        # Strong move - slight momentum continuation
+        momentum_bias = 0.03 if change_24h > 0 else -0.03
+    elif abs(change_24h) > 1:
+        # Moderate move
+        momentum_bias = 0.02 if change_24h > 0 else -0.02
+    elif abs(change_24h) > 0.5:
+        # Small move
+        momentum_bias = 0.01 if change_24h > 0 else -0.01
+
+    # Base probability is 50/50 (random walk) + momentum adjustment
+    model_up_prob = 0.50 + momentum_bias
+
+    # Clamp to reasonable range
+    model_up_prob = max(0.30, min(0.70, model_up_prob))
+
+    # Also check if market price itself is mispriced
+    # If market shows 60% UP but our model says 50%, bet DOWN
+    # If market shows 40% UP but our model says 52%, bet UP
+
+    # Calculate edge
+    edge, direction = calculate_edge(model_up_prob, market_up_prob)
+
+    # Confidence based on how strong the momentum signal is
+    confidence = 0.4 + min(abs(momentum_bias) * 5, 0.3)
 
     # Kelly sizing
     bankroll = settings.INITIAL_BANKROLL
     suggested_size = calculate_kelly_size(
         edge=abs(edge),
-        probability=model_prob,
-        market_price=yes_price,
+        probability=model_up_prob,
+        market_price=market_up_prob,
         direction=direction,
         bankroll=bankroll
     )
 
     # Build reasoning
     reasoning = (
-        f"Price signal: Market at {yes_price:.0%} {direction.upper()}, "
-        f"contrarian estimate {model_prob:.0%}, "
-        f"Edge: {edge:+.1%}"
+        f"BTC ${btc.current_price:,.0f} ({btc.change_24h:+.2f}% 24h) | "
+        f"Model UP: {model_up_prob:.0%} vs Market UP: {market_up_prob:.0%} | "
+        f"Edge: {edge:+.1%} -> {direction.upper()} | "
+        f"Window ends: {market.window_end.strftime('%H:%M UTC')}"
     )
-    if ai_reasoning:
-        reasoning += f" | AI: {ai_reasoning[:100]}"
 
     return TradingSignal(
         market=market,
-        weather=None,
-        model_probability=model_prob,
-        market_probability=yes_price,
+        model_probability=model_up_prob,
+        market_probability=market_up_prob,
         edge=edge,
         direction=direction,
         confidence=confidence,
         kelly_fraction=suggested_size / bankroll if bankroll > 0 else 0,
         suggested_size=suggested_size,
-        sources=["price_analysis"] + (["groq"] if ai_reasoning else []),
-        reasoning=reasoning
+        sources=["coingecko_momentum"],
+        reasoning=reasoning,
+        btc_price=btc.current_price,
+        btc_change_1h=0,  # CoinGecko free doesn't give 1h easily
+        btc_change_24h=btc.change_24h,
     )
-
-
-def _parse_end_date(market: MarketData) -> Optional[datetime]:
-    """Try to parse market end date for filtering."""
-    # This would need market end date data from Polymarket
-    # For now, return None (no filtering by date)
-    return None
-
-
-def _filter_markets_smart(markets: List[MarketData]) -> List[MarketData]:
-    """
-    AGGRESSIVE filtering - focus on SHORT-TERM markets.
-
-    Filters:
-    - Lower minimum volume requirement
-    - Skip only truly extreme prices
-    - Prioritize markets resolving soon (within MAX_DAYS_TO_RESOLUTION)
-    """
-    from datetime import datetime, timedelta, timezone
-
-    min_volume = getattr(settings, 'MIN_MARKET_VOLUME', 1000)
-    max_days = getattr(settings, 'MAX_DAYS_TO_RESOLUTION', 7)  # Focus on markets resolving within 7 days
-    now = datetime.now(timezone.utc)
-    max_end_date = now + timedelta(days=max_days)
-
-    filtered = []
-    short_term_count = 0
-
-    for m in markets:
-        # Skip very low volume markets
-        if m.volume < min_volume:
-            continue
-
-        # Skip markets at extreme prices (already resolved)
-        if m.yes_price < 0.02 or m.yes_price > 0.98:
-            continue
-
-        # Prioritize short-term markets
-        if m.settlement_time:
-            if m.settlement_time <= max_end_date:
-                short_term_count += 1
-                filtered.insert(0, m)  # Put short-term at front
-            else:
-                filtered.append(m)  # Long-term at back
-        else:
-            filtered.append(m)  # Unknown end date at back
-
-    logger.info(f"Aggressive filter: {len(markets)} -> {len(filtered)} markets ({short_term_count} short-term within {max_days} days)")
-    return filtered
 
 
 async def scan_for_signals() -> List[TradingSignal]:
     """
-    Scan all markets and generate signals.
-
-    COST-OPTIMIZED: Uses smart filtering and minimal AI calls.
+    Scan BTC 5-min markets and generate signals.
     """
     signals = []
 
     logger.info("=" * 50)
-    logger.info("SMART SCAN: Fetching markets from Polymarket...")
+    logger.info("BTC 5-MIN SCAN: Fetching markets from Polymarket...")
 
-    # Fetch ALL markets (not just weather)
     try:
-        markets = await fetch_all_markets(exclude_sports=True)
+        markets = await fetch_active_btc_markets()
     except Exception as e:
-        logger.error(f"Failed to fetch markets: {e}")
+        logger.error(f"Failed to fetch BTC markets: {e}")
         markets = []
 
-    logger.info(f"Found {len(markets)} total markets")
+    logger.info(f"Found {len(markets)} active BTC 5-min markets")
 
-    # SMART FILTER: Only keep high-quality opportunities
-    markets = _filter_markets_smart(markets)
-
-    # Group by category
-    by_category: Dict[str, List[MarketData]] = {}
     for market in markets:
-        cat = market.category or "other"
-        if cat not in by_category:
-            by_category[cat] = []
-        by_category[cat].append(market)
-
-    for cat, cat_markets in by_category.items():
-        logger.info(f"  {cat.upper()}: {len(cat_markets)} markets")
-
-    # Weather markets - use weather data for signals
-    weather_cache: Dict[str, WeatherPrediction] = {}
-    weather_markets = by_category.get("weather", [])
-
-    if weather_markets:
-        # Get unique cities
-        cities = set(m.subcategory for m in weather_markets if m.subcategory)
-        logger.info(f"Fetching weather for {len(cities)} cities...")
-
-        for city in cities:
-            try:
-                weather = await fetch_weather_prediction(city)
-                if weather:
-                    weather_cache[city] = weather
-                await asyncio.sleep(0.3)  # Rate limit
-            except Exception as e:
-                logger.warning(f"Weather fetch failed for {city}: {e}")
-
-        # Generate weather signals
-        for market in weather_markets:
-            if market.subcategory and market.subcategory in weather_cache:
-                weather = weather_cache[market.subcategory]
-                signal = await generate_signal(market, weather)
-                if signal:
-                    signals.append(signal)
-
-    # Non-weather markets - use price-based signals
-    non_weather_markets = [m for m in markets if m.category != "weather"]
-    logger.info(f"Analyzing {len(non_weather_markets)} non-weather markets for price signals...")
-
-    # Reset AI call counter for this scan
-    global _ai_calls_this_scan
-    _ai_calls_this_scan = 0
-
-    # Sort by price extremeness to prioritize best opportunities for AI analysis
-    non_weather_markets.sort(key=lambda m: abs(m.yes_price - 0.5), reverse=True)
-
-    for i, market in enumerate(non_weather_markets):
         try:
-            # Use AI for top 5 most extreme-priced markets
-            use_ai = i < 5
-            signal = await generate_price_signal(market, use_ai=use_ai)
+            signal = await generate_btc_signal(market)
             if signal:
                 signals.append(signal)
         except Exception as e:
-            logger.debug(f"Signal generation failed for {market.ticker}: {e}")
+            logger.debug(f"Signal generation failed for {market.slug}: {e}")
+
+        # Small delay to avoid CoinGecko rate limits
+        # (only needed if we're making multiple calls - reuse first result)
+        await asyncio.sleep(0.1)
 
     # Sort by absolute edge (best opportunities first)
     signals.sort(key=lambda s: abs(s.edge), reverse=True)
 
-    # Log actionable signals
     actionable = [s for s in signals if s.passes_threshold]
     logger.info(f"=" * 50)
     logger.info(f"SCAN COMPLETE: {len(signals)} signals, {len(actionable)} actionable")
 
-    for signal in actionable[:10]:
-        logger.info(f"  [{signal.market.category.upper()}] {signal.market.title[:40]}...")
+    for signal in actionable[:5]:
+        logger.info(f"  {signal.market.slug}")
         logger.info(f"    Edge: {signal.edge:+.1%} -> {signal.direction.upper()} @ ${signal.suggested_size:.2f}")
 
     return signals
@@ -436,10 +260,9 @@ async def get_actionable_signals() -> List[TradingSignal]:
     return [s for s in all_signals if s.passes_threshold]
 
 
-# Quick test
 if __name__ == "__main__":
     async def test():
-        print("Scanning for signals...")
+        print("Scanning BTC 5-min markets for signals...")
         signals = await scan_for_signals()
         print(f"\nFound {len(signals)} total signals")
 
@@ -447,9 +270,10 @@ if __name__ == "__main__":
         print(f"Actionable signals (>{settings.MIN_EDGE_THRESHOLD:.0%} edge): {len(actionable)}")
 
         for signal in actionable[:5]:
-            print(f"\n{signal.market.platform.upper()}: {signal.market.title[:50]}...")
-            print(f"  Model: {signal.model_probability:.1%} vs Market: {signal.market_probability:.1%}")
-            print(f"  Edge: {signal.edge:+.1%} → {signal.direction.upper()}")
-            print(f"  Suggested size: ${signal.suggested_size:.2f}")
+            print(f"\n{signal.market.slug}")
+            print(f"  BTC: ${signal.btc_price:,.0f} ({signal.btc_change_24h:+.2f}%)")
+            print(f"  Model UP: {signal.model_probability:.1%} vs Market UP: {signal.market_probability:.1%}")
+            print(f"  Edge: {signal.edge:+.1%} -> {signal.direction.upper()}")
+            print(f"  Size: ${signal.suggested_size:.2f}")
 
     asyncio.run(test())

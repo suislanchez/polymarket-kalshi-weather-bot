@@ -1,4 +1,4 @@
-"""FastAPI backend for the trading bot dashboard."""
+"""FastAPI backend for BTC 5-min trading bot dashboard."""
 from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
@@ -11,22 +11,20 @@ import os
 from backend.config import settings
 from backend.models.database import (
     get_db, init_db, SessionLocal,
-    Market, Signal, Trade, WeatherForecast, BotState, AILog, ScanLog
+    Signal, Trade, BotState, AILog, ScanLog
 )
 from backend.core.signals import scan_for_signals, TradingSignal
-from backend.data.weather import fetch_all_cities, WeatherPrediction
-from backend.data.markets import fetch_all_weather_markets, fetch_all_markets
-from backend.core.classifier import MarketCategory as MCEnum
+from backend.data.btc_markets import fetch_active_btc_markets, BtcMarket
+from backend.data.crypto import fetch_crypto_price
 
 from pydantic import BaseModel
 
 app = FastAPI(
-    title="Prediction Market Trading Bot",
-    description="Weather-based prediction market trading bot with simulation mode",
-    version="2.0.0"
+    title="BTC 5-Min Trading Bot",
+    description="Polymarket BTC Up/Down 5-minute market trading bot",
+    version="3.0.0"
 )
 
-# CORS for React frontend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -50,50 +48,44 @@ class ConnectionManager:
             self.active_connections.remove(websocket)
 
     async def broadcast(self, message: dict):
-        import logging
-        logger = logging.getLogger("trading_bot")
         for connection in self.active_connections:
             try:
                 await connection.send_json(message)
-            except Exception as e:
-                logger.debug(f"Failed to broadcast to connection: {e}")
+            except Exception:
+                pass
 
 
 ws_manager = ConnectionManager()
 
 
-# Pydantic models for API responses
-class CityWeather(BaseModel):
-    city: str
-    lat: float
-    lon: float
-    high_temp: float
-    low_temp: float
-    ensemble_count: int
-    confidence: float
-    prob_above_40: float
-    prob_above_50: float
-    prob_above_60: float
+# Pydantic response models
+class BtcPriceResponse(BaseModel):
+    price: float
+    change_24h: float
+    change_7d: float
+    market_cap: float
+    volume_24h: float
+    last_updated: datetime
 
 
-class MarketResponse(BaseModel):
-    platform: str
-    ticker: str
-    title: str
-    category: str
-    subcategory: Optional[str]
-    yes_price: float
+class BtcWindowResponse(BaseModel):
+    slug: str
+    market_id: str
+    up_price: float
+    down_price: float
+    window_start: datetime
+    window_end: datetime
     volume: float
-    threshold: Optional[float]
-    model_probability: Optional[float]
-    edge: Optional[float]
+    is_active: bool
+    is_upcoming: bool
+    time_until_end: float
+    spread: float
 
 
 class SignalResponse(BaseModel):
     market_ticker: str
     market_title: str
     platform: str
-    city: Optional[str]
     direction: str
     model_probability: float
     market_probability: float
@@ -102,12 +94,11 @@ class SignalResponse(BaseModel):
     suggested_size: float
     reasoning: str
     timestamp: datetime
-    # New fields
-    category: str = "weather"
-    subcategory: Optional[str] = None
+    category: str = "crypto"
     event_slug: Optional[str] = None
-    ai_reasoning: Optional[str] = None
-    ai_confidence: Optional[float] = None
+    btc_price: float = 0.0
+    btc_change_24h: float = 0.0
+    window_end: Optional[datetime] = None
 
 
 class TradeResponse(BaseModel):
@@ -136,7 +127,8 @@ class BotStats(BaseModel):
 
 class DashboardData(BaseModel):
     stats: BotStats
-    cities: List[CityWeather]
+    btc_price: Optional[BtcPriceResponse]
+    windows: List[BtcWindowResponse]
     active_signals: List[SignalResponse]
     recent_trades: List[TradeResponse]
     equity_curve: List[dict]
@@ -149,20 +141,16 @@ class EventResponse(BaseModel):
     data: dict = {}
 
 
-# Initialize database and scheduler on startup
+# Startup / Shutdown
 @app.on_event("startup")
 async def startup():
-    import logging
-    logger = logging.getLogger("trading_bot")
-
     print("=" * 60)
-    print("PREDICTION MARKET TRADING BOT v2.0")
+    print("BTC 5-MIN TRADING BOT v3.0")
     print("=" * 60)
     print("Initializing database...")
 
     init_db()
 
-    # Initialize bot state if not exists
     db = SessionLocal()
     try:
         state = db.query(BotState).first()
@@ -172,13 +160,12 @@ async def startup():
                 total_trades=0,
                 winning_trades=0,
                 total_pnl=0.0,
-                is_running=True  # Start running by default
+                is_running=True
             )
             db.add(state)
             db.commit()
             print(f"Created new bot state with ${settings.INITIAL_BANKROLL:,.2f} bankroll")
         else:
-            # Set running on startup
             state.is_running = True
             db.commit()
             print(f"Loaded bot state: Bankroll ${state.bankroll:,.2f}, P&L ${state.total_pnl:+,.2f}, {state.total_trades} trades")
@@ -190,22 +177,18 @@ async def startup():
     print(f"  - Simulation mode: {settings.SIMULATION_MODE}")
     print(f"  - Min edge threshold: {settings.MIN_EDGE_THRESHOLD:.0%}")
     print(f"  - Kelly fraction: {settings.KELLY_FRACTION:.0%}")
-    print(f"  - Enabled categories: {settings.ENABLED_CATEGORIES}")
+    print(f"  - Scan interval: {settings.SCAN_INTERVAL_SECONDS}s")
+    print(f"  - Settlement interval: {settings.SETTLEMENT_INTERVAL_SECONDS}s")
     print("")
 
-    # Start the autonomous trading scheduler
     from backend.core.scheduler import start_scheduler, log_event
     start_scheduler()
-    log_event("success", "Trading bot initialized and running")
+    log_event("success", "BTC 5-min trading bot initialized")
 
-    print("Bot is now running in AGGRESSIVE MODE!")
-    print("  - Market scan: every 2 minutes")
-    print("  - Settlement check: every 10 minutes")
-    print("  - Max trades per scan: 15 (high volume)")
-    print("  - Min edge threshold: 3% (capture more opportunities)")
-    print("  - Min market volume: $1,000 (wide coverage)")
-    print("  - AI: Groq only (FREE) - no expensive Claude calls")
-    print("  - Risk limits: 10 trades/category, 50 max pending")
+    print("Bot is now running - BTC 5-MIN MODE!")
+    print(f"  - Market scan: every {settings.SCAN_INTERVAL_SECONDS}s")
+    print(f"  - Settlement check: every {settings.SETTLEMENT_INTERVAL_SECONDS}s")
+    print(f"  - Min edge: {settings.MIN_EDGE_THRESHOLD:.0%}")
     print("=" * 60)
 
 
@@ -215,9 +198,10 @@ async def shutdown():
     stop_scheduler()
 
 
+# Core endpoints
 @app.get("/")
 async def root():
-    return {"status": "ok", "message": "Trading Bot API v2.0", "simulation_mode": settings.SIMULATION_MODE}
+    return {"status": "ok", "message": "BTC 5-Min Trading Bot API v3.0", "simulation_mode": settings.SIMULATION_MODE}
 
 
 @app.get("/api/health")
@@ -227,7 +211,6 @@ async def health():
 
 @app.get("/api/stats", response_model=BotStats)
 async def get_stats(db: Session = Depends(get_db)):
-    """Get current bot statistics."""
     state = db.query(BotState).first()
     if not state:
         raise HTTPException(status_code=404, detail="Bot state not initialized")
@@ -245,150 +228,103 @@ async def get_stats(db: Session = Depends(get_db)):
     )
 
 
-@app.get("/api/weather", response_model=List[CityWeather])
-async def get_weather():
-    """Get current weather predictions for all cities."""
-    import logging
-    logger = logging.getLogger("trading_bot")
-
+# BTC-specific endpoints
+@app.get("/api/btc/price", response_model=Optional[BtcPriceResponse])
+async def get_btc_price():
+    """Get current BTC price and momentum data."""
     try:
-        weather_data = await fetch_all_cities()
+        btc = await fetch_crypto_price("BTC")
+        if not btc:
+            return None
 
-        cities = []
-        for city, pred in weather_data.items():
-            coords = settings.CITY_COORDS.get(city, (0, 0))
-            cities.append(CityWeather(
-                city=city,
-                lat=coords[0],
-                lon=coords[1],
-                high_temp=pred.high_temp,
-                low_temp=pred.low_temp,
-                ensemble_count=len(pred.ensemble_highs),
-                confidence=pred.confidence(),
-                prob_above_40=pred.prob_above(40),
-                prob_above_50=pred.prob_above(50),
-                prob_above_60=pred.prob_above(60)
-            ))
-
-        return cities
-    except Exception as e:
-        logger.error(f"Error fetching weather data: {e}")
-        return []
+        return BtcPriceResponse(
+            price=btc.current_price,
+            change_24h=btc.change_24h,
+            change_7d=btc.change_7d,
+            market_cap=btc.market_cap,
+            volume_24h=btc.volume_24h,
+            last_updated=btc.last_updated
+        )
+    except Exception:
+        return None
 
 
-@app.get("/api/markets", response_model=List[MarketResponse])
-async def get_markets():
-    """Get all active weather markets."""
-    import logging
-    logger = logging.getLogger("trading_bot")
-
+@app.get("/api/btc/windows", response_model=List[BtcWindowResponse])
+async def get_btc_windows():
+    """Get upcoming BTC 5-min windows with prices."""
     try:
-        markets = await fetch_all_weather_markets()
-
+        markets = await fetch_active_btc_markets()
         return [
-            MarketResponse(
-                platform=m.platform,
-                ticker=m.ticker,
-                title=m.title,
-                category=m.category,
-                subcategory=m.subcategory,
-                yes_price=m.yes_price,
+            BtcWindowResponse(
+                slug=m.slug,
+                market_id=m.market_id,
+                up_price=m.up_price,
+                down_price=m.down_price,
+                window_start=m.window_start,
+                window_end=m.window_end,
                 volume=m.volume,
-                threshold=m.threshold,
-                model_probability=None,
-                edge=None
+                is_active=m.is_active,
+                is_upcoming=m.is_upcoming,
+                time_until_end=m.time_until_end,
+                spread=m.spread,
             )
             for m in markets
         ]
-    except Exception as e:
-        logger.error(f"Error fetching markets: {e}")
+    except Exception:
         return []
 
 
 @app.get("/api/signals", response_model=List[SignalResponse])
 async def get_signals():
-    """Get current trading signals."""
-    import logging
-    logger = logging.getLogger("trading_bot")
-
+    """Get current BTC trading signals."""
     try:
         signals = await scan_for_signals()
-
-        return [
-            SignalResponse(
-                market_ticker=s.market.ticker,
-                market_title=s.market.title,
-                platform=s.market.platform,
-                city=s.market.subcategory,
-                direction=s.direction,
-                model_probability=s.model_probability,
-                market_probability=s.market_probability,
-                edge=s.edge,
-                confidence=s.confidence,
-                suggested_size=s.suggested_size,
-                reasoning=s.reasoning,
-                timestamp=s.timestamp,
-                category=getattr(s.market, 'category', 'weather'),
-                subcategory=s.market.subcategory,
-                event_slug=getattr(s.market, 'event_slug', None)
-            )
-            for s in signals
-        ]
-    except Exception as e:
-        logger.error(f"Error fetching signals: {e}")
+        return [_signal_to_response(s) for s in signals]
+    except Exception:
         return []
 
 
 @app.get("/api/signals/actionable", response_model=List[SignalResponse])
 async def get_actionable_signals():
     """Get only signals that pass the edge threshold."""
-    import logging
-    logger = logging.getLogger("trading_bot")
-
     try:
         signals = await scan_for_signals()
         actionable = [s for s in signals if s.passes_threshold]
-
-        return [
-            SignalResponse(
-                market_ticker=s.market.ticker,
-                market_title=s.market.title,
-                platform=s.market.platform,
-                city=s.market.subcategory,
-                direction=s.direction,
-                model_probability=s.model_probability,
-                market_probability=s.market_probability,
-                edge=s.edge,
-                confidence=s.confidence,
-                suggested_size=s.suggested_size,
-                reasoning=s.reasoning,
-                timestamp=s.timestamp,
-                category=getattr(s.market, 'category', 'weather'),
-                subcategory=s.market.subcategory,
-                event_slug=getattr(s.market, 'event_slug', None)
-            )
-            for s in actionable
-        ]
-    except Exception as e:
-        logger.error(f"Error fetching actionable signals: {e}")
+        return [_signal_to_response(s) for s in actionable]
+    except Exception:
         return []
+
+
+def _signal_to_response(s: TradingSignal) -> SignalResponse:
+    return SignalResponse(
+        market_ticker=s.market.market_id,
+        market_title=f"BTC 5m - {s.market.slug}",
+        platform="polymarket",
+        direction=s.direction,
+        model_probability=s.model_probability,
+        market_probability=s.market_probability,
+        edge=s.edge,
+        confidence=s.confidence,
+        suggested_size=s.suggested_size,
+        reasoning=s.reasoning,
+        timestamp=s.timestamp,
+        category="crypto",
+        event_slug=s.market.slug,
+        btc_price=s.btc_price,
+        btc_change_24h=s.btc_change_24h,
+        window_end=s.market.window_end,
+    )
 
 
 @app.get("/api/trades", response_model=List[TradeResponse])
 async def get_trades(
     limit: int = 50,
     status: Optional[str] = None,
-    platform: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
-    """Get recent trades with optional filtering."""
     query = db.query(Trade)
-
     if status:
         query = query.filter(Trade.result == status)
-    if platform:
-        query = query.filter(Trade.platform == platform)
-
     trades = query.order_by(Trade.timestamp.desc()).limit(limit).all()
 
     return [
@@ -411,7 +347,6 @@ async def get_trades(
 
 @app.get("/api/equity-curve")
 async def get_equity_curve(db: Session = Depends(get_db)):
-    """Get equity curve data for charting."""
     trades = db.query(Trade).filter(Trade.settled == True).order_by(Trade.timestamp).all()
 
     curve = []
@@ -432,34 +367,27 @@ async def get_equity_curve(db: Session = Depends(get_db)):
 
 
 @app.post("/api/simulate-trade")
-async def simulate_trade(
-    signal_ticker: str,
-    db: Session = Depends(get_db)
-):
-    """
-    Simulate executing a trade based on a signal.
-    Records the trade for tracking.
-    """
+async def simulate_trade(signal_ticker: str, db: Session = Depends(get_db)):
     from backend.core.scheduler import log_event
 
     signals = await scan_for_signals()
-    signal = next((s for s in signals if s.market.ticker == signal_ticker), None)
+    signal = next((s for s in signals if s.market.market_id == signal_ticker), None)
 
     if not signal:
         raise HTTPException(status_code=404, detail="Signal not found")
 
-    # Get bot state
     state = db.query(BotState).first()
     if not state:
         raise HTTPException(status_code=500, detail="Bot state not initialized")
 
-    # Create trade
+    entry_price = signal.market.up_price if signal.direction == "up" else signal.market.down_price
+
     trade = Trade(
-        market_ticker=signal.market.ticker,
-        platform=signal.market.platform,
-        event_slug=getattr(signal.market, "event_slug", None),
+        market_ticker=signal.market.market_id,
+        platform="polymarket",
+        event_slug=signal.market.slug,
         direction=signal.direction,
-        entry_price=signal.market.yes_price if signal.direction == "yes" else signal.market.no_price,
+        entry_price=entry_price,
         size=min(signal.suggested_size, state.bankroll * 0.05),
         model_probability=signal.model_probability,
         market_price_at_entry=signal.market_probability,
@@ -470,17 +398,12 @@ async def simulate_trade(
     state.total_trades += 1
     db.commit()
 
-    log_event("trade", f"Manual trade: {signal.direction.upper()} {signal.market.ticker}", {
-        "ticker": signal.market.ticker,
-        "size": trade.size
-    })
-
+    log_event("trade", f"Manual BTC trade: {signal.direction.upper()} {signal.market.slug}")
     return {"status": "ok", "trade_id": trade.id, "size": trade.size}
 
 
 @app.post("/api/run-scan")
 async def run_scan(db: Session = Depends(get_db)):
-    """Manually trigger a market scan."""
     from backend.core.scheduler import run_manual_scan, log_event
 
     state = db.query(BotState).first()
@@ -488,7 +411,7 @@ async def run_scan(db: Session = Depends(get_db)):
         state.last_run = datetime.utcnow()
         db.commit()
 
-    log_event("info", "Manual scan triggered")
+    log_event("info", "Manual BTC scan triggered")
     await run_manual_scan()
 
     signals = await scan_for_signals()
@@ -504,7 +427,6 @@ async def run_scan(db: Session = Depends(get_db)):
 
 @app.post("/api/settle-trades")
 async def settle_trades_endpoint(db: Session = Depends(get_db)):
-    """Manually trigger trade settlement check."""
     from backend.core.settlement import settle_pending_trades, update_bot_state_with_settlements
     from backend.core.scheduler import log_event
 
@@ -522,9 +444,7 @@ async def settle_trades_endpoint(db: Session = Depends(get_db)):
 
 @app.get("/api/events", response_model=List[EventResponse])
 async def get_events(limit: int = 50):
-    """Get recent bot events for terminal display."""
     from backend.core.scheduler import get_recent_events
-
     events = get_recent_events(limit)
     return [
         EventResponse(
@@ -537,9 +457,9 @@ async def get_events(limit: int = 50):
     ]
 
 
+# Bot control
 @app.post("/api/bot/start")
 async def start_bot(db: Session = Depends(get_db)):
-    """Start autonomous trading."""
     from backend.core.scheduler import start_scheduler, log_event, is_scheduler_running
 
     state = db.query(BotState).first()
@@ -556,7 +476,6 @@ async def start_bot(db: Session = Depends(get_db)):
 
 @app.post("/api/bot/stop")
 async def stop_bot(db: Session = Depends(get_db)):
-    """Stop autonomous trading (pauses new trades, doesn't stop settlement)."""
     from backend.core.scheduler import log_event
 
     state = db.query(BotState).first()
@@ -570,19 +489,10 @@ async def stop_bot(db: Session = Depends(get_db)):
 
 @app.post("/api/bot/reset")
 async def reset_bot(db: Session = Depends(get_db)):
-    """
-    Reset bot state and clear all trades.
-    Use this to start fresh after removing fake/simulated data.
-    """
     from backend.core.scheduler import log_event
-    import logging
-    logger = logging.getLogger("trading_bot")
 
     try:
-        # Delete all trades
         trades_deleted = db.query(Trade).delete()
-
-        # Reset bot state
         state = db.query(BotState).first()
         if state:
             state.bankroll = settings.INITIAL_BANKROLL
@@ -591,13 +501,10 @@ async def reset_bot(db: Session = Depends(get_db)):
             state.total_pnl = 0.0
             state.is_running = True
 
-        # Clear AI logs
         ai_logs_deleted = db.query(AILog).delete()
-
         db.commit()
 
-        log_event("success", f"Bot reset: Deleted {trades_deleted} trades, {ai_logs_deleted} AI logs. Starting fresh with ${settings.INITIAL_BANKROLL:,.2f}")
-        logger.info(f"Bot reset complete: {trades_deleted} trades deleted, bankroll reset to ${settings.INITIAL_BANKROLL:,.2f}")
+        log_event("success", f"Bot reset: {trades_deleted} trades deleted. Fresh start with ${settings.INITIAL_BANKROLL:,.2f}")
 
         return {
             "status": "reset",
@@ -607,211 +514,63 @@ async def reset_bot(db: Session = Depends(get_db)):
         }
 
     except Exception as e:
-        logger.error(f"Failed to reset bot: {e}")
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Reset failed: {e}")
-
-
-# ============ Category & AI Endpoints ============
-
-@app.get("/api/categories")
-async def get_categories():
-    """Get list of supported market categories."""
-    return {
-        "categories": [
-            {"id": "weather", "name": "Weather", "icon": "thermometer", "enabled": True},
-            {"id": "crypto", "name": "Crypto", "icon": "bitcoin", "enabled": True},
-            {"id": "politics", "name": "Politics", "icon": "vote", "enabled": True},
-            {"id": "economics", "name": "Economics", "icon": "chart", "enabled": True},
-            {"id": "sports", "name": "Sports", "icon": "trophy", "enabled": False},  # Always disabled
-            {"id": "other", "name": "Other", "icon": "question", "enabled": True},
-        ],
-        "excluded": ["sports"]
-    }
-
-
-@app.get("/api/markets/all")
-async def get_all_markets(
-    categories: Optional[str] = None,
-    exclude_sports: bool = True
-):
-    """
-    Get markets from all platforms across categories.
-
-    Args:
-        categories: Comma-separated list of categories (e.g., "weather,crypto")
-        exclude_sports: Whether to exclude sports markets (default True)
-    """
-    import logging
-    logger = logging.getLogger("trading_bot")
-
-    try:
-        cat_set = None
-        if categories:
-            cat_set = set(categories.split(","))
-
-        markets = await fetch_all_markets(cat_set, exclude_sports)
-
-        return [
-            {
-                "platform": m.platform,
-                "ticker": m.ticker,
-                "title": m.title,
-                "category": m.category,
-                "subcategory": m.subcategory,
-                "yes_price": m.yes_price,
-                "volume": m.volume,
-                "threshold": m.threshold,
-                "event_slug": m.event_slug
-            }
-            for m in markets
-        ]
-    except Exception as e:
-        logger.error(f"Error fetching all markets: {e}")
-        return []
-
-
-class AILogResponse(BaseModel):
-    id: int
-    timestamp: datetime
-    provider: str
-    model: str
-    call_type: str
-    latency_ms: float
-    tokens_used: int
-    cost_usd: float
-    success: bool
-    related_market: Optional[str]
-
-
-@app.get("/api/ai/logs", response_model=List[AILogResponse])
-async def get_ai_logs(
-    limit: int = 50,
-    provider: Optional[str] = None,
-    db: Session = Depends(get_db)
-):
-    """Get recent AI API call logs."""
-    query = db.query(AILog)
-
-    if provider:
-        query = query.filter(AILog.provider == provider)
-
-    logs = query.order_by(AILog.timestamp.desc()).limit(limit).all()
-
-    return [
-        AILogResponse(
-            id=log.id,
-            timestamp=log.timestamp,
-            provider=log.provider,
-            model=log.model,
-            call_type=log.call_type,
-            latency_ms=log.latency_ms,
-            tokens_used=log.tokens_used,
-            cost_usd=log.cost_usd,
-            success=log.success,
-            related_market=log.related_market
-        )
-        for log in logs
-    ]
-
-
-@app.get("/api/ai/stats")
-async def get_ai_stats(db: Session = Depends(get_db)):
-    """Get AI usage statistics for today."""
-    from datetime import date
-
-    today_start = datetime.combine(date.today(), datetime.min.time())
-
-    logs = db.query(AILog).filter(AILog.timestamp >= today_start).all()
-
-    total_cost = sum(log.cost_usd for log in logs)
-    total_tokens = sum(log.tokens_used for log in logs)
-    avg_latency = sum(log.latency_ms for log in logs) / len(logs) if logs else 0
-
-    by_provider = {}
-    for log in logs:
-        if log.provider not in by_provider:
-            by_provider[log.provider] = {"calls": 0, "cost": 0, "tokens": 0}
-        by_provider[log.provider]["calls"] += 1
-        by_provider[log.provider]["cost"] += log.cost_usd
-        by_provider[log.provider]["tokens"] += log.tokens_used
-
-    return {
-        "today": {
-            "total_calls": len(logs),
-            "total_cost_usd": round(total_cost, 4),
-            "total_tokens": total_tokens,
-            "avg_latency_ms": round(avg_latency, 2),
-            "by_provider": by_provider
-        },
-        "budget": {
-            "daily_limit_usd": settings.AI_DAILY_BUDGET_USD if hasattr(settings, 'AI_DAILY_BUDGET_USD') else 10.0,
-            "remaining_usd": round((settings.AI_DAILY_BUDGET_USD if hasattr(settings, 'AI_DAILY_BUDGET_USD') else 10.0) - total_cost, 4)
-        }
-    }
-
-
-@app.websocket("/ws/events")
-async def websocket_events(websocket: WebSocket):
-    """WebSocket endpoint for real-time event streaming."""
-    await ws_manager.connect(websocket)
-
-    try:
-        # Send initial connection message
-        await websocket.send_json({
-            "timestamp": datetime.utcnow().isoformat(),
-            "type": "success",
-            "message": "Connected to trading bot"
-        })
-
-        # Send recent events
-        from backend.core.scheduler import get_recent_events
-        for event in get_recent_events(20):
-            await websocket.send_json(event)
-
-        # Keep connection alive and broadcast new events
-        last_event_count = len(get_recent_events(200))
-        while True:
-            await asyncio.sleep(2)
-
-            # Check for new events
-            current_events = get_recent_events(200)
-            if len(current_events) > last_event_count:
-                # Send new events
-                new_events = current_events[last_event_count - len(current_events):]
-                for event in new_events:
-                    await websocket.send_json(event)
-                last_event_count = len(current_events)
-
-            # Send heartbeat
-            await websocket.send_json({
-                "type": "heartbeat",
-                "timestamp": datetime.utcnow().isoformat()
-            })
-
-    except WebSocketDisconnect:
-        ws_manager.disconnect(websocket)
-    except Exception as e:
-        import logging
-        logger = logging.getLogger("trading_bot")
-        logger.warning(f"WebSocket error: {e}")
-        ws_manager.disconnect(websocket)
 
 
 @app.get("/api/dashboard", response_model=DashboardData)
 async def get_dashboard(db: Session = Depends(get_db)):
     """Get all dashboard data in one call."""
+    stats = await get_stats(db)
 
-    # Fetch all data concurrently
-    stats_task = get_stats(db)
-    weather_task = get_weather()
-    signals_task = get_actionable_signals()
+    # Fetch BTC price and windows concurrently
+    btc_price_data = None
+    try:
+        btc = await fetch_crypto_price("BTC")
+        if btc:
+            btc_price_data = BtcPriceResponse(
+                price=btc.current_price,
+                change_24h=btc.change_24h,
+                change_7d=btc.change_7d,
+                market_cap=btc.market_cap,
+                volume_24h=btc.volume_24h,
+                last_updated=btc.last_updated
+            )
+    except Exception:
+        pass
 
-    stats = await stats_task
-    cities = await weather_task
-    signals = await signals_task
+    # Fetch windows
+    windows = []
+    try:
+        markets = await fetch_active_btc_markets()
+        windows = [
+            BtcWindowResponse(
+                slug=m.slug,
+                market_id=m.market_id,
+                up_price=m.up_price,
+                down_price=m.down_price,
+                window_start=m.window_start,
+                window_end=m.window_end,
+                volume=m.volume,
+                is_active=m.is_active,
+                is_upcoming=m.is_upcoming,
+                time_until_end=m.time_until_end,
+                spread=m.spread,
+            )
+            for m in markets
+        ]
+    except Exception:
+        pass
 
-    # Get recent trades
+    # Signals
+    signals = []
+    try:
+        raw_signals = await scan_for_signals()
+        signals = [_signal_to_response(s) for s in raw_signals if s.passes_threshold]
+    except Exception:
+        pass
+
+    # Recent trades
     trades = db.query(Trade).order_by(Trade.timestamp.desc()).limit(20).all()
     recent_trades = [
         TradeResponse(
@@ -830,7 +589,7 @@ async def get_dashboard(db: Session = Depends(get_db)):
         for t in trades
     ]
 
-    # Get equity curve
+    # Equity curve
     equity_trades = db.query(Trade).filter(Trade.settled == True).order_by(Trade.timestamp).all()
     equity_curve = []
     cumulative_pnl = 0
@@ -845,11 +604,49 @@ async def get_dashboard(db: Session = Depends(get_db)):
 
     return DashboardData(
         stats=stats,
-        cities=cities,
+        btc_price=btc_price_data,
+        windows=windows,
         active_signals=signals,
         recent_trades=recent_trades,
         equity_curve=equity_curve
     )
+
+
+@app.websocket("/ws/events")
+async def websocket_events(websocket: WebSocket):
+    await ws_manager.connect(websocket)
+
+    try:
+        await websocket.send_json({
+            "timestamp": datetime.utcnow().isoformat(),
+            "type": "success",
+            "message": "Connected to BTC trading bot"
+        })
+
+        from backend.core.scheduler import get_recent_events
+        for event in get_recent_events(20):
+            await websocket.send_json(event)
+
+        last_event_count = len(get_recent_events(200))
+        while True:
+            await asyncio.sleep(2)
+
+            current_events = get_recent_events(200)
+            if len(current_events) > last_event_count:
+                new_events = current_events[last_event_count - len(current_events):]
+                for event in new_events:
+                    await websocket.send_json(event)
+                last_event_count = len(current_events)
+
+            await websocket.send_json({
+                "type": "heartbeat",
+                "timestamp": datetime.utcnow().isoformat()
+            })
+
+    except WebSocketDisconnect:
+        ws_manager.disconnect(websocket)
+    except Exception:
+        ws_manager.disconnect(websocket)
 
 
 if __name__ == "__main__":

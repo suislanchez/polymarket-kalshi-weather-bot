@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { DashboardData, Signal, CityWeather, Trade, BotStats } from './types'
+import type { DashboardData, Signal, Trade, BotStats, BtcPrice, BtcWindow } from './types'
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
@@ -13,13 +13,17 @@ export async function fetchDashboard(): Promise<DashboardData> {
 }
 
 export async function fetchSignals(): Promise<Signal[]> {
-  // Fetch ALL signals, not just actionable - user wants to see everything
   const { data } = await api.get<Signal[]>('/signals')
   return data
 }
 
-export async function fetchWeather(): Promise<CityWeather[]> {
-  const { data } = await api.get<CityWeather[]>('/weather')
+export async function fetchBtcPrice(): Promise<BtcPrice | null> {
+  const { data } = await api.get<BtcPrice | null>('/btc/price')
+  return data
+}
+
+export async function fetchBtcWindows(): Promise<BtcWindow[]> {
+  const { data } = await api.get<BtcWindow[]>('/btc/windows')
   return data
 }
 
@@ -62,24 +66,5 @@ export async function settleTradesApi(): Promise<{ settled_count: number }> {
 
 export async function resetBot(): Promise<{ status: string; trades_deleted: number; new_bankroll: number }> {
   const { data } = await api.post('/bot/reset')
-  return data
-}
-
-export interface AIStats {
-  today: {
-    total_calls: number
-    total_cost_usd: number
-    total_tokens: number
-    avg_latency_ms: number
-    by_provider: Record<string, { calls: number; cost: number; tokens: number }>
-  }
-  budget: {
-    daily_limit_usd: number
-    remaining_usd: number
-  }
-}
-
-export async function fetchAIStats(): Promise<AIStats> {
-  const { data } = await api.get<AIStats>('/ai/stats')
   return data
 }

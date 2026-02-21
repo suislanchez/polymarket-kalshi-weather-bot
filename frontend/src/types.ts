@@ -1,23 +1,30 @@
-export interface CityWeather {
-  city: string
-  lat: number
-  lon: number
-  high_temp: number
-  low_temp: number
-  ensemble_count: number
-  confidence: number
-  prob_above_40: number
-  prob_above_50: number
-  prob_above_60: number
+export interface BtcPrice {
+  price: number
+  change_24h: number
+  change_7d: number
+  market_cap: number
+  volume_24h: number
+  last_updated: string
 }
 
-export type MarketCategory = 'weather' | 'crypto' | 'politics' | 'economics' | 'other'
+export interface BtcWindow {
+  slug: string
+  market_id: string
+  up_price: number
+  down_price: number
+  window_start: string
+  window_end: string
+  volume: number
+  is_active: boolean
+  is_upcoming: boolean
+  time_until_end: number
+  spread: number
+}
 
 export interface Signal {
   market_ticker: string
   market_title: string
   platform: string
-  city: string | null
   direction: string
   model_probability: number
   market_probability: number
@@ -26,12 +33,11 @@ export interface Signal {
   suggested_size: number
   reasoning: string
   timestamp: string
-  // New fields
-  category: MarketCategory
-  subcategory?: string
-  event_slug?: string  // For Polymarket URL generation
-  ai_reasoning?: string
-  ai_confidence?: number
+  category: string
+  event_slug?: string
+  btc_price: number
+  btc_change_24h: number
+  window_end?: string
 }
 
 export interface Trade {
@@ -66,7 +72,8 @@ export interface EquityPoint {
 
 export interface DashboardData {
   stats: BotStats
-  cities: CityWeather[]
+  btc_price: BtcPrice | null
+  windows: BtcWindow[]
   active_signals: Signal[]
   recent_trades: Trade[]
   equity_curve: EquityPoint[]
