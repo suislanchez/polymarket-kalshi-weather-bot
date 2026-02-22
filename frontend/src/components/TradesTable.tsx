@@ -1,8 +1,7 @@
 import { formatDistanceToNow } from 'date-fns'
-import { ExternalLink, ArrowUpDown, ArrowUp, ArrowDown } from 'lucide-react'
+import { ArrowUpDown, ArrowUp, ArrowDown } from 'lucide-react'
 import { useState, useMemo } from 'react'
 import type { Trade } from '../types'
-import { getMarketUrl } from '../utils'
 
 interface Props {
   trades: Trade[]
@@ -57,136 +56,118 @@ export function TradesTable({ trades }: Props) {
   }, [trades, sortKey, sortDir])
 
   const SortIcon = ({ column }: { column: SortKey }) => {
-    if (sortKey !== column) return <ArrowUpDown className="w-3 h-3 text-neutral-600" />
+    if (sortKey !== column) return <ArrowUpDown className="w-2.5 h-2.5 text-neutral-600" />
     return sortDir === 'asc'
-      ? <ArrowUp className="w-3 h-3 text-orange-500" />
-      : <ArrowDown className="w-3 h-3 text-orange-500" />
+      ? <ArrowUp className="w-2.5 h-2.5 text-orange-500" />
+      : <ArrowDown className="w-2.5 h-2.5 text-orange-500" />
   }
 
   if (trades.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center py-12 text-neutral-600">
-        <div className="text-4xl mb-4 opacity-30">---</div>
-        <p className="text-sm">No trades yet</p>
-        <p className="text-xs mt-1">BTC trades will appear here</p>
+      <div className="flex flex-col items-center justify-center py-8 text-neutral-600">
+        <p className="text-xs">No trades yet</p>
+        <p className="text-[10px] mt-0.5">Trades will appear here</p>
       </div>
     )
   }
 
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full">
-        <thead>
-          <tr className="text-neutral-600 text-left text-xs border-b border-neutral-800">
-            <th
-              className="py-3 px-2 font-medium cursor-pointer hover:text-neutral-400 transition-colors"
-              onClick={() => handleSort('result')}
-            >
-              <div className="flex items-center gap-1">
-                Status <SortIcon column="result" />
-              </div>
-            </th>
-            <th className="py-3 px-2 font-medium">Window</th>
-            <th className="py-3 px-2 font-medium text-center">Direction</th>
-            <th
-              className="py-3 px-2 font-medium text-right cursor-pointer hover:text-neutral-400 transition-colors"
-              onClick={() => handleSort('size')}
-            >
-              <div className="flex items-center justify-end gap-1">
-                Size <SortIcon column="size" />
-              </div>
-            </th>
-            <th className="py-3 px-2 font-medium text-right">Entry</th>
-            <th
-              className="py-3 px-2 font-medium text-right cursor-pointer hover:text-neutral-400 transition-colors"
-              onClick={() => handleSort('pnl')}
-            >
-              <div className="flex items-center justify-end gap-1">
-                P&L <SortIcon column="pnl" />
-              </div>
-            </th>
-            <th
-              className="py-3 px-2 font-medium text-right cursor-pointer hover:text-neutral-400 transition-colors"
-              onClick={() => handleSort('timestamp')}
-            >
-              <div className="flex items-center justify-end gap-1">
-                Time <SortIcon column="timestamp" />
-              </div>
-            </th>
-          </tr>
-        </thead>
-        <tbody>
-          {sortedTrades.map((trade) => {
-            const isPending = trade.result === 'pending'
-            const isWin = trade.result === 'win'
-            const marketUrl = getMarketUrl('polymarket', trade.market_ticker, trade.event_slug ?? undefined)
-            const isUp = trade.direction === 'up'
+    <table className="w-full">
+      <thead className="sticky top-0 bg-neutral-900 z-10">
+        <tr className="text-neutral-600 text-left text-[10px] border-b border-neutral-800">
+          <th
+            className="py-1.5 px-2 font-medium cursor-pointer hover:text-neutral-400"
+            onClick={() => handleSort('result')}
+          >
+            <div className="flex items-center gap-0.5">
+              St <SortIcon column="result" />
+            </div>
+          </th>
+          <th className="py-1.5 px-2 font-medium">Window</th>
+          <th className="py-1.5 px-2 font-medium text-center">Dir</th>
+          <th
+            className="py-1.5 px-2 font-medium text-right cursor-pointer hover:text-neutral-400"
+            onClick={() => handleSort('size')}
+          >
+            <div className="flex items-center justify-end gap-0.5">
+              Size <SortIcon column="size" />
+            </div>
+          </th>
+          <th className="py-1.5 px-2 font-medium text-right">Entry</th>
+          <th
+            className="py-1.5 px-2 font-medium text-right cursor-pointer hover:text-neutral-400"
+            onClick={() => handleSort('pnl')}
+          >
+            <div className="flex items-center justify-end gap-0.5">
+              P&L <SortIcon column="pnl" />
+            </div>
+          </th>
+          <th
+            className="py-1.5 px-2 font-medium text-right cursor-pointer hover:text-neutral-400"
+            onClick={() => handleSort('timestamp')}
+          >
+            <div className="flex items-center justify-end gap-0.5">
+              Time <SortIcon column="timestamp" />
+            </div>
+          </th>
+        </tr>
+      </thead>
+      <tbody>
+        {sortedTrades.map((trade) => {
+          const isPending = trade.result === 'pending'
+          const isWin = trade.result === 'win'
+          const isUp = trade.direction === 'up'
 
-            return (
-              <tr
-                key={trade.id}
-                className="border-b border-neutral-800 hover:bg-neutral-900/50 transition-colors"
-              >
-                <td className="py-3 px-2">
-                  <span className={`px-2 py-1 text-[10px] font-medium uppercase ${
-                    isPending
-                      ? 'bg-amber-500/10 text-amber-500 border border-amber-500/20'
-                      : isWin
-                        ? 'bg-green-500/10 text-green-500 border border-green-500/20'
-                        : 'bg-red-500/10 text-red-500 border border-red-500/20'
+          return (
+            <tr
+              key={trade.id}
+              className="border-b border-neutral-800/50 hover:bg-neutral-800/30 text-[11px]"
+            >
+              <td className="py-1 px-2">
+                <span className={`text-[9px] font-medium uppercase ${
+                  isPending
+                    ? 'text-amber-500'
+                    : isWin
+                      ? 'text-green-500'
+                      : 'text-red-500'
+                }`}>
+                  {isPending ? 'PND' : isWin ? 'WIN' : 'LOSS'}
+                </span>
+              </td>
+              <td className="py-1 px-2">
+                <span className="text-neutral-400 truncate block max-w-[120px]" title={trade.event_slug || trade.market_ticker}>
+                  {(trade.event_slug || trade.market_ticker).replace('btc-updown-5m-', '')}
+                </span>
+              </td>
+              <td className="py-1 px-2 text-center">
+                <span className={`text-[10px] font-semibold uppercase ${isUp ? 'text-green-500' : 'text-red-500'}`}>
+                  {trade.direction}
+                </span>
+              </td>
+              <td className="py-1 px-2 text-right text-neutral-300 tabular-nums">
+                ${trade.size.toFixed(0)}
+              </td>
+              <td className="py-1 px-2 text-right text-neutral-500 tabular-nums">
+                {(trade.entry_price * 100).toFixed(0)}c
+              </td>
+              <td className="py-1 px-2 text-right">
+                {trade.pnl !== null ? (
+                  <span className={`font-semibold tabular-nums ${
+                    trade.pnl >= 0 ? 'text-green-500' : 'text-red-500'
                   }`}>
-                    {isPending ? 'Pending' : isWin ? 'Win' : 'Loss'}
+                    {trade.pnl >= 0 ? '+' : ''}${trade.pnl.toFixed(0)}
                   </span>
-                </td>
-                <td className="py-3 px-2">
-                  <div className="max-w-[200px]">
-                    <a
-                      href={marketUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="group inline-flex items-center gap-1 text-xs text-neutral-400 hover:text-neutral-200 transition-colors"
-                    >
-                      <span className="truncate" title={trade.event_slug || trade.market_ticker}>
-                        {trade.event_slug || trade.market_ticker}
-                      </span>
-                      <ExternalLink className="w-3 h-3 opacity-0 group-hover:opacity-100 shrink-0" />
-                    </a>
-                  </div>
-                </td>
-                <td className="py-3 px-2 text-center">
-                  <span className={`px-2 py-1 text-[10px] font-semibold uppercase ${
-                    isUp
-                      ? 'bg-green-500/10 text-green-500 border border-green-500/20'
-                      : 'bg-red-500/10 text-red-500 border border-red-500/20'
-                  }`}>
-                    {trade.direction}
-                  </span>
-                </td>
-                <td className="py-3 px-2 text-right text-sm text-neutral-300 tabular-nums">
-                  ${trade.size.toFixed(0)}
-                </td>
-                <td className="py-3 px-2 text-right text-sm text-neutral-500 tabular-nums">
-                  {(trade.entry_price * 100).toFixed(0)}c
-                </td>
-                <td className="py-3 px-2 text-right">
-                  {trade.pnl !== null ? (
-                    <span className={`text-sm font-semibold tabular-nums ${
-                      trade.pnl >= 0 ? 'text-green-500' : 'text-red-500'
-                    }`}>
-                      {trade.pnl >= 0 ? '+' : ''}${trade.pnl.toFixed(2)}
-                    </span>
-                  ) : (
-                    <span className="text-sm text-neutral-600">-</span>
-                  )}
-                </td>
-                <td className="py-3 px-2 text-right text-xs text-neutral-600">
-                  {formatDistanceToNow(new Date(trade.timestamp), { addSuffix: true })}
-                </td>
-              </tr>
-            )
-          })}
-        </tbody>
-      </table>
-    </div>
+                ) : (
+                  <span className="text-neutral-600">-</span>
+                )}
+              </td>
+              <td className="py-1 px-2 text-right text-[10px] text-neutral-600">
+                {formatDistanceToNow(new Date(trade.timestamp), { addSuffix: true }).replace(' ago', '').replace('about ', '')}
+              </td>
+            </tr>
+          )
+        })}
+      </tbody>
+    </table>
   )
 }

@@ -34,10 +34,9 @@ const CustomTooltip = ({ active, payload, label }: any) => {
 export function EquityChart({ data, initialBankroll }: Props) {
   if (data.length === 0) {
     return (
-      <div className="h-[220px] flex flex-col items-center justify-center text-neutral-600">
-        <div className="text-4xl mb-4 opacity-30">📈</div>
-        <p className="text-sm">No trade history</p>
-        <p className="text-xs mt-1">Equity curve will appear after settled trades</p>
+      <div className="h-full flex flex-col items-center justify-center text-neutral-600">
+        <p className="text-xs">No trade history</p>
+        <p className="text-[10px] mt-0.5">Chart appears after settled trades</p>
       </div>
     )
   }
@@ -58,7 +57,7 @@ export function EquityChart({ data, initialBankroll }: Props) {
   const padding = Math.max(Math.abs(minPnl), Math.abs(maxPnl)) * 0.2
 
   return (
-    <div className="h-[220px]">
+    <div className="h-full">
       <ResponsiveContainer width="100%" height="100%">
         <AreaChart data={chartData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
           <defs>
