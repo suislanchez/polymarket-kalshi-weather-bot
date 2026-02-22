@@ -7,7 +7,7 @@ import asyncio
 
 from backend.config import settings
 from backend.data.btc_markets import BtcMarket, fetch_active_btc_markets
-from backend.data.crypto import fetch_crypto_price
+from backend.data.crypto import fetch_crypto_price, compute_btc_microstructure
 
 logger = logging.getLogger("trading_bot")
 
@@ -118,62 +118,107 @@ async def generate_btc_signal(market: BtcMarket) -> Optional[TradingSignal]:
     """
     Generate a trading signal for a BTC 5-min Up/Down market.
 
-    AGGRESSIVE strategy:
-    - Momentum from 24h price trend
-    - Exploit any market price deviation from 50/50
-    - Contrarian when market is skewed without strong momentum
+    Uses real 1-minute candle data from Binance to compute:
+    - RSI (mean reversion), Momentum (trend), VWAP deviation,
+      SMA crossover, and market skew as a weighted composite.
+    - Convergence filter: requires 3/4 indicators to agree.
+    - Entry price filter: only enter when price ≤ MAX_ENTRY_PRICE.
     """
-    # Fetch BTC price data
     try:
-        btc = await fetch_crypto_price("BTC")
+        micro = await compute_btc_microstructure()
     except Exception as e:
-        logger.warning(f"Failed to fetch BTC price: {e}")
+        logger.warning(f"Failed to compute microstructure: {e}")
         return None
 
-    if not btc:
+    if not micro:
         return None
 
     market_up_prob = market.up_price
 
-    # Skip only truly resolved markets
+    # Skip resolved markets
     if market_up_prob < 0.02 or market_up_prob > 0.98:
         return None
 
-    change_24h = btc.change_24h
+    # --- Entry price filter: only trade when price ≤ 50c ---
+    entry_price = market_up_prob  # will be overridden per-direction below
+    # We check after direction is determined
 
-    # --- AGGRESSIVE MOMENTUM MODEL ---
-    # Start at 50/50, then layer on biases
+    # --- Individual indicator signals (each returns a bias from -1 to +1) ---
 
-    # 1) Momentum bias from recent price action (bigger effect)
-    momentum_bias = 0.0
-    if abs(change_24h) > 5:
-        momentum_bias = 0.08 if change_24h > 0 else -0.08
-    elif abs(change_24h) > 3:
-        momentum_bias = 0.06 if change_24h > 0 else -0.06
-    elif abs(change_24h) > 1.5:
-        momentum_bias = 0.04 if change_24h > 0 else -0.04
-    elif abs(change_24h) > 0.5:
-        momentum_bias = 0.03 if change_24h > 0 else -0.03
+    # 1) RSI: mean reversion — oversold (< 30) = UP, overbought (> 70) = DOWN
+    if micro.rsi < 30:
+        rsi_signal = 0.5 + (30 - micro.rsi) / 30  # 0.5 to 1.0
+    elif micro.rsi > 70:
+        rsi_signal = -0.5 - (micro.rsi - 70) / 30  # -0.5 to -1.0
+    elif micro.rsi < 45:
+        rsi_signal = (45 - micro.rsi) / 30  # slight UP lean
+    elif micro.rsi > 55:
+        rsi_signal = -(micro.rsi - 55) / 30  # slight DOWN lean
     else:
-        momentum_bias = 0.01 if change_24h > 0 else -0.01
+        rsi_signal = 0.0
+    rsi_signal = max(-1.0, min(1.0, rsi_signal))
 
-    # 2) Market mispricing - if market deviates from 50/50, lean contrarian
-    #    These 5-min markets should be ~50/50, so any skew is opportunity
+    # 2) Momentum: weighted blend of 1m, 5m, 15m changes
+    #    Positive momentum = UP bias
+    mom_blend = micro.momentum_1m * 0.5 + micro.momentum_5m * 0.35 + micro.momentum_15m * 0.15
+    # Normalise: ±0.1% is a strong 5-min signal for BTC
+    momentum_signal = max(-1.0, min(1.0, mom_blend / 0.10))
+
+    # 3) VWAP deviation: price above VWAP = UP momentum, below = DOWN
+    vwap_signal = max(-1.0, min(1.0, micro.vwap_deviation / 0.05))
+
+    # 4) SMA crossover: sma5 > sma15 = bullish
+    sma_signal = max(-1.0, min(1.0, micro.sma_crossover / 0.03))
+
+    # 5) Market skew: contrarian — if market says UP strongly, fade it
     market_skew = market_up_prob - 0.50
-    contrarian_bias = -market_skew * 0.5  # Fade the skew
+    skew_signal = max(-1.0, min(1.0, -market_skew * 4))
 
-    # 3) Combine biases
-    model_up_prob = 0.50 + momentum_bias + contrarian_bias
+    # --- Convergence filter: count how many indicators agree on direction ---
+    indicator_signs = [
+        rsi_signal,
+        momentum_signal,
+        vwap_signal,
+        sma_signal,
+    ]
+    up_votes = sum(1 for s in indicator_signs if s > 0.05)
+    down_votes = sum(1 for s in indicator_signs if s < -0.05)
 
-    # Clamp to wide range (be aggressive)
-    model_up_prob = max(0.25, min(0.75, model_up_prob))
+    # Require 3 of 4 technical indicators to agree
+    if up_votes < 3 and down_votes < 3:
+        return None
 
-    # Calculate edge
+    # --- Weighted composite ---
+    w = settings
+    composite = (
+        rsi_signal * w.WEIGHT_RSI
+        + momentum_signal * w.WEIGHT_MOMENTUM
+        + vwap_signal * w.WEIGHT_VWAP
+        + sma_signal * w.WEIGHT_SMA
+        + skew_signal * w.WEIGHT_MARKET_SKEW
+    )
+
+    # Convert composite (-1..+1) to probability (0.30..0.70)
+    model_up_prob = 0.50 + composite * 0.20
+    model_up_prob = max(0.30, min(0.70, model_up_prob))
+
+    # Calculate edge and direction
     edge, direction = calculate_edge(model_up_prob, market_up_prob)
 
-    # Confidence: higher when momentum is strong or market is skewed
-    signal_strength = abs(momentum_bias) + abs(market_skew)
-    confidence = min(0.8, 0.4 + signal_strength * 3)
+    # --- Entry price filter: only buy the cheap side (≤ MAX_ENTRY_PRICE) ---
+    if direction == "up":
+        entry_price = market_up_prob
+    else:
+        entry_price = market.down_price
+
+    if entry_price > settings.MAX_ENTRY_PRICE:
+        return None
+
+    # Confidence: based on convergence strength + volatility
+    #   Low volatility = lower confidence (less movement expected)
+    vol_factor = min(1.0, micro.volatility / 0.05) if micro.volatility > 0 else 0.5
+    convergence_strength = max(up_votes, down_votes) / 4.0
+    confidence = min(0.8, 0.3 + convergence_strength * 0.3 + abs(composite) * 0.2) * vol_factor
 
     # Kelly sizing
     bankroll = settings.INITIAL_BANKROLL
@@ -182,14 +227,17 @@ async def generate_btc_signal(market: BtcMarket) -> Optional[TradingSignal]:
         probability=model_up_prob,
         market_price=market_up_prob,
         direction=direction,
-        bankroll=bankroll
+        bankroll=bankroll,
     )
 
     # Build reasoning
     reasoning = (
-        f"BTC ${btc.current_price:,.0f} ({btc.change_24h:+.2f}% 24h) | "
-        f"Model UP: {model_up_prob:.0%} vs Market UP: {market_up_prob:.0%} | "
-        f"Edge: {edge:+.1%} -> {direction.upper()} | "
+        f"BTC ${micro.price:,.0f} | RSI:{micro.rsi:.0f} Mom1m:{micro.momentum_1m:+.3f}% "
+        f"Mom5m:{micro.momentum_5m:+.3f}% VWAP:{micro.vwap_deviation:+.3f}% "
+        f"SMA:{micro.sma_crossover:+.4f}% Vol:{micro.volatility:.4f}% | "
+        f"Composite:{composite:+.3f} -> Model UP:{model_up_prob:.0%} vs Mkt:{market_up_prob:.0%} | "
+        f"Edge:{edge:+.1%} -> {direction.upper()} @ {entry_price:.0%} | "
+        f"Convergence:{max(up_votes, down_votes)}/4 | "
         f"Window ends: {market.window_end.strftime('%H:%M UTC')}"
     )
 
@@ -202,11 +250,11 @@ async def generate_btc_signal(market: BtcMarket) -> Optional[TradingSignal]:
         confidence=confidence,
         kelly_fraction=suggested_size / bankroll if bankroll > 0 else 0,
         suggested_size=suggested_size,
-        sources=["coingecko_momentum"],
+        sources=[f"binance_microstructure_{micro.source}"],
         reasoning=reasoning,
-        btc_price=btc.current_price,
-        btc_change_1h=0,  # CoinGecko free doesn't give 1h easily
-        btc_change_24h=btc.change_24h,
+        btc_price=micro.price,
+        btc_change_1h=micro.momentum_5m * 12,  # rough annualisation for display
+        btc_change_24h=micro.momentum_15m * 96,  # rough extrapolation for display
     )
 
 

@@ -96,7 +96,7 @@ async def scan_and_trade_job():
             for signal in actionable[:MAX_TRADES_PER_SCAN]:
                 # Check if we already have a trade for this market window
                 existing = db.query(Trade).filter(
-                    Trade.market_ticker == signal.market.market_id,
+                    Trade.event_slug == signal.market.slug,
                     Trade.settled == False
                 ).first()
 

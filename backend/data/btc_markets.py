@@ -2,6 +2,7 @@
 import httpx
 import json
 import logging
+import re
 import time
 from datetime import datetime, timezone
 from typing import Optional, List
@@ -11,6 +12,14 @@ logger = logging.getLogger("trading_bot")
 
 GAMMA_API = "https://gamma-api.polymarket.com"
 SERIES_SLUG = "btc-up-or-down-5m"
+
+# Strict regex: only match real BTC 5-min window slugs (e.g. btc-updown-5m-1708531200)
+_BTC_SLUG_RE = re.compile(r"^btc-updown-5m-\d{10}$")
+
+
+def is_valid_btc_slug(slug: str) -> bool:
+    """Return True only if slug matches the exact BTC 5-min pattern."""
+    return bool(_BTC_SLUG_RE.match(slug))
 
 
 @dataclass
@@ -133,6 +142,10 @@ def _parse_event_to_btc_market(event: dict) -> Optional[BtcMarket]:
 
 async def fetch_btc_market_by_slug(slug: str) -> Optional[BtcMarket]:
     """Fetch a single BTC 5-min market by its event slug."""
+    if not is_valid_btc_slug(slug):
+        logger.debug(f"Rejected invalid BTC slug: {slug}")
+        return None
+
     url = f"{GAMMA_API}/events"
     params = {"slug": slug}
 
@@ -188,7 +201,7 @@ async def fetch_active_btc_markets() -> List[BtcMarket]:
 
             for event in events:
                 market = _parse_event_to_btc_market(event)
-                if market and market.slug not in seen_slugs:
+                if market and market.slug not in seen_slugs and is_valid_btc_slug(market.slug):
                     seen_slugs.add(market.slug)
                     markets.append(market)
 
