@@ -184,9 +184,8 @@ async def generate_btc_signal(market: BtcMarket) -> Optional[TradingSignal]:
     up_votes = sum(1 for s in indicator_signs if s > 0.05)
     down_votes = sum(1 for s in indicator_signs if s < -0.05)
 
-    # Require 3 of 4 technical indicators to agree
-    if up_votes < 3 and down_votes < 3:
-        return None
+    # Convergence: require 3/4 indicators to agree for actionable signal
+    has_convergence = up_votes >= 3 or down_votes >= 3
 
     # --- Weighted composite ---
     w = settings
@@ -211,8 +210,11 @@ async def generate_btc_signal(market: BtcMarket) -> Optional[TradingSignal]:
     else:
         entry_price = market.down_price
 
-    if entry_price > settings.MAX_ENTRY_PRICE:
-        return None
+    passes_filters = has_convergence and entry_price <= settings.MAX_ENTRY_PRICE
+
+    # Zero out edge if filters fail (signal still returned for UI visibility)
+    if not passes_filters:
+        edge = 0.0
 
     # Confidence: based on convergence strength + volatility
     #   Low volatility = lower confidence (less movement expected)
@@ -231,7 +233,16 @@ async def generate_btc_signal(market: BtcMarket) -> Optional[TradingSignal]:
     )
 
     # Build reasoning
+    filter_status = "ACTIONABLE" if passes_filters else "FILTERED"
+    filter_reasons = []
+    if not has_convergence:
+        filter_reasons.append(f"convergence {max(up_votes, down_votes)}/4 < 3")
+    if entry_price > settings.MAX_ENTRY_PRICE:
+        filter_reasons.append(f"entry {entry_price:.0%} > {settings.MAX_ENTRY_PRICE:.0%}")
+    filter_note = f" [{', '.join(filter_reasons)}]" if filter_reasons else ""
+
     reasoning = (
+        f"[{filter_status}]{filter_note} "
         f"BTC ${micro.price:,.0f} | RSI:{micro.rsi:.0f} Mom1m:{micro.momentum_1m:+.3f}% "
         f"Mom5m:{micro.momentum_5m:+.3f}% VWAP:{micro.vwap_deviation:+.3f}% "
         f"SMA:{micro.sma_crossover:+.4f}% Vol:{micro.volatility:.4f}% | "

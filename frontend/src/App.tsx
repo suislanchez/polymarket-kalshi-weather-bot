@@ -7,7 +7,7 @@ import { TradesTable } from './components/TradesTable'
 import { EquityChart } from './components/EquityChart'
 import { Terminal } from './components/Terminal'
 import { formatCountdown } from './utils'
-import type { BtcWindow } from './types'
+import type { BtcWindow, Microstructure } from './types'
 
 function WindowPill({ window: w }: { window: BtcWindow }) {
   const [countdown, setCountdown] = useState(w.time_until_end)
@@ -20,17 +20,55 @@ function WindowPill({ window: w }: { window: BtcWindow }) {
   }, [w.time_until_end])
 
   return (
-    <div className={`flex items-center gap-2 px-2 py-1 border ${w.is_active ? 'border-amber-500/30 bg-amber-500/5' : 'border-neutral-800 bg-neutral-900'}`}>
-      {w.is_active && (
-        <span className="text-[9px] font-bold text-amber-400 uppercase">Live</span>
-      )}
-      {w.is_upcoming && (
-        <span className="text-[9px] font-medium text-blue-400 uppercase">Next</span>
-      )}
+    <div className={`flex items-center gap-2 px-2 py-1 border shrink-0 ${w.is_active ? 'border-amber-500/30 bg-amber-500/5' : 'border-neutral-800 bg-neutral-900'}`}>
+      {w.is_active && <span className="text-[9px] font-bold text-amber-400 uppercase">Live</span>}
+      {w.is_upcoming && <span className="text-[9px] font-medium text-blue-400 uppercase">Next</span>}
       <span className="text-[10px] tabular-nums text-green-400">{(w.up_price * 100).toFixed(0)}c</span>
       <span className="text-neutral-600 text-[10px]">/</span>
       <span className="text-[10px] tabular-nums text-red-400">{(w.down_price * 100).toFixed(0)}c</span>
-      <span className="text-[10px] tabular-nums text-neutral-500 ml-auto">{formatCountdown(countdown)}</span>
+      <span className="text-[10px] tabular-nums text-neutral-500">{formatCountdown(countdown)}</span>
+    </div>
+  )
+}
+
+function IndicatorBar({ label, value, min, max, color }: { label: string; value: number; min: number; max: number; color: string }) {
+  const range = max - min
+  const pct = Math.max(0, Math.min(100, ((value - min) / range) * 100))
+  return (
+    <div className="flex items-center gap-2">
+      <span className="text-[10px] text-neutral-500 w-8 shrink-0 uppercase">{label}</span>
+      <div className="flex-1 h-1.5 bg-neutral-800 relative">
+        <div className={`absolute top-0 left-0 h-full ${color}`} style={{ width: `${pct}%` }} />
+        {label === 'RSI' && (
+          <>
+            <div className="absolute top-0 h-full w-px bg-neutral-600" style={{ left: '30%' }} />
+            <div className="absolute top-0 h-full w-px bg-neutral-600" style={{ left: '70%' }} />
+          </>
+        )}
+      </div>
+      <span className={`text-[10px] tabular-nums w-12 text-right ${color.replace('bg-', 'text-').replace('/80', '')}`}>
+        {value.toFixed(label === 'Vol' ? 4 : 2)}{label === 'RSI' ? '' : '%'}
+      </span>
+    </div>
+  )
+}
+
+function MicroPanel({ micro }: { micro: Microstructure }) {
+  const rsiColor = micro.rsi < 30 ? 'bg-green-500/80' : micro.rsi > 70 ? 'bg-red-500/80' : 'bg-neutral-400/80'
+  const momColor = micro.momentum_5m >= 0 ? 'bg-green-500/80' : 'bg-red-500/80'
+  const vwapColor = micro.vwap_deviation >= 0 ? 'bg-green-500/80' : 'bg-red-500/80'
+  const smaColor = micro.sma_crossover >= 0 ? 'bg-green-500/80' : 'bg-red-500/80'
+
+  return (
+    <div className="space-y-1">
+      <IndicatorBar label="RSI" value={micro.rsi} min={0} max={100} color={rsiColor} />
+      <IndicatorBar label="Mom" value={micro.momentum_5m} min={-0.2} max={0.2} color={momColor} />
+      <IndicatorBar label="VWAP" value={micro.vwap_deviation} min={-0.2} max={0.2} color={vwapColor} />
+      <IndicatorBar label="SMA" value={micro.sma_crossover} min={-0.1} max={0.1} color={smaColor} />
+      <IndicatorBar label="Vol" value={micro.volatility} min={0} max={0.1} color="bg-blue-500/80" />
+      <div className="text-[9px] text-neutral-600 pt-0.5">
+        Source: {micro.source} | Mom1m: {micro.momentum_1m >= 0 ? '+' : ''}{micro.momentum_1m.toFixed(4)}% | Mom15m: {micro.momentum_15m >= 0 ? '+' : ''}{micro.momentum_15m.toFixed(4)}%
+      </div>
     </div>
   )
 }
@@ -67,6 +105,7 @@ function App() {
   const activeSignals = data?.active_signals ?? []
   const recentTrades = data?.recent_trades ?? []
   const btcPrice = data?.btc_price
+  const micro = data?.microstructure
   const windows = data?.windows ?? []
 
   const stats = data?.stats ?? {
@@ -79,6 +118,8 @@ function App() {
     win_rate: 0
   }
   const equityCurve = data?.equity_curve ?? []
+
+  const actionableCount = activeSignals.filter(s => s.actionable).length
 
   if (isLoading) {
     return (
@@ -112,9 +153,9 @@ function App() {
 
   return (
     <div className="h-screen bg-black text-neutral-200 flex flex-col overflow-hidden">
-      {/* Top bar: title + BTC price + stats + controls */}
+      {/* Top bar */}
       <header className="shrink-0 border-b border-neutral-800 px-3 py-1.5 flex items-center gap-4">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 shrink-0">
           <h1 className="text-xs font-semibold text-neutral-100 uppercase tracking-wider whitespace-nowrap">BTC 5m Bot</h1>
           <span className={`px-1.5 py-0.5 text-[9px] font-medium uppercase ${
             stats.is_running
@@ -129,7 +170,7 @@ function App() {
         </div>
 
         {btcPrice && (
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 shrink-0">
             <span className="text-sm font-bold tabular-nums text-neutral-100">
               ${btcPrice.price.toLocaleString(undefined, { maximumFractionDigits: 0 })}
             </span>
@@ -146,15 +187,10 @@ function App() {
         <button
           onClick={() => scanMutation.mutate()}
           disabled={scanMutation.isPending}
-          className="px-2.5 py-1 bg-neutral-800 border border-neutral-700 hover:border-neutral-600 text-neutral-300 text-[10px] uppercase tracking-wider transition-colors disabled:opacity-50 whitespace-nowrap"
+          className="px-2.5 py-1 bg-neutral-800 border border-neutral-700 hover:border-neutral-600 text-neutral-300 text-[10px] uppercase tracking-wider transition-colors disabled:opacity-50 whitespace-nowrap shrink-0"
         >
           {scanMutation.isPending ? 'Scanning...' : 'Scan'}
         </button>
-        {stats.last_run && (
-          <span className="text-[10px] text-neutral-600 whitespace-nowrap">
-            {new Date(stats.last_run).toLocaleTimeString()}
-          </span>
-        )}
       </header>
 
       {/* Windows strip */}
@@ -169,12 +205,23 @@ function App() {
         )}
       </div>
 
-      {/* Main content: 3-column layout */}
-      <div className="flex-1 min-h-0 grid grid-cols-[1fr,1fr,1fr] gap-0">
-        {/* Col 1: Chart + Terminal */}
+      {/* Main content: 3 columns */}
+      <div className="flex-1 min-h-0 grid grid-cols-[minmax(280px,1fr),minmax(320px,1.2fr),minmax(320px,1.2fr)] gap-0">
+        {/* Col 1: Indicators + Chart + Terminal */}
         <div className="flex flex-col border-r border-neutral-800 min-h-0">
+          {/* Microstructure indicators */}
+          {micro && (
+            <div className="shrink-0 border-b border-neutral-800 px-2 py-2">
+              <div className="flex items-center justify-between mb-1.5">
+                <span className="text-[10px] text-neutral-500 uppercase tracking-wider">Indicators</span>
+                <span className="text-[9px] text-neutral-600">{micro.source}</span>
+              </div>
+              <MicroPanel micro={micro} />
+            </div>
+          )}
+
           {/* Equity chart */}
-          <div className="flex flex-col border-b border-neutral-800" style={{ height: '45%' }}>
+          <div className="flex flex-col border-b border-neutral-800" style={{ height: micro ? '30%' : '45%' }}>
             <div className="px-2 py-1 border-b border-neutral-800 flex items-center justify-between shrink-0">
               <span className="text-[10px] text-neutral-500 uppercase tracking-wider">Performance</span>
               <span className={`text-[10px] tabular-nums ${stats.total_pnl >= 0 ? 'text-green-500' : 'text-red-500'}`}>
@@ -188,6 +235,7 @@ function App() {
               />
             </div>
           </div>
+
           {/* Terminal */}
           <div className="flex-1 min-h-0">
             <Terminal
@@ -205,9 +253,12 @@ function App() {
         <div className="flex flex-col border-r border-neutral-800 min-h-0">
           <div className="px-2 py-1 border-b border-neutral-800 flex items-center justify-between shrink-0">
             <span className="text-[10px] text-neutral-500 uppercase tracking-wider">Signals</span>
-            <span className="px-1.5 py-0.5 text-[9px] font-medium bg-amber-500/10 text-amber-500 border border-amber-500/20">
-              {activeSignals.length}
-            </span>
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] text-neutral-600">{activeSignals.length} total</span>
+              <span className="px-1.5 py-0.5 text-[9px] font-medium bg-amber-500/10 text-amber-500 border border-amber-500/20">
+                {actionableCount} actionable
+              </span>
+            </div>
           </div>
           <div className="flex-1 overflow-y-auto min-h-0">
             <SignalsTable

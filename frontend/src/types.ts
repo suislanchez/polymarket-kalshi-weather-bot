@@ -7,6 +7,18 @@ export interface BtcPrice {
   last_updated: string
 }
 
+export interface Microstructure {
+  rsi: number
+  momentum_1m: number
+  momentum_5m: number
+  momentum_15m: number
+  vwap_deviation: number
+  sma_crossover: number
+  volatility: number
+  price: number
+  source: string
+}
+
 export interface BtcWindow {
   slug: string
   market_id: string
@@ -38,6 +50,7 @@ export interface Signal {
   btc_price: number
   btc_change_24h: number
   window_end?: string
+  actionable: boolean
 }
 
 export interface Trade {
@@ -73,6 +86,7 @@ export interface EquityPoint {
 export interface DashboardData {
   stats: BotStats
   btc_price: BtcPrice | null
+  microstructure: Microstructure | null
   windows: BtcWindow[]
   active_signals: Signal[]
   recent_trades: Trade[]

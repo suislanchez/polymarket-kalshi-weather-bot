@@ -15,7 +15,7 @@ from backend.models.database import (
 )
 from backend.core.signals import scan_for_signals, TradingSignal
 from backend.data.btc_markets import fetch_active_btc_markets, BtcMarket
-from backend.data.crypto import fetch_crypto_price
+from backend.data.crypto import fetch_crypto_price, compute_btc_microstructure
 
 from pydantic import BaseModel
 
@@ -82,6 +82,18 @@ class BtcWindowResponse(BaseModel):
     spread: float
 
 
+class MicrostructureResponse(BaseModel):
+    rsi: float = 50.0
+    momentum_1m: float = 0.0
+    momentum_5m: float = 0.0
+    momentum_15m: float = 0.0
+    vwap_deviation: float = 0.0
+    sma_crossover: float = 0.0
+    volatility: float = 0.0
+    price: float = 0.0
+    source: str = "unknown"
+
+
 class SignalResponse(BaseModel):
     market_ticker: str
     market_title: str
@@ -99,6 +111,7 @@ class SignalResponse(BaseModel):
     btc_price: float = 0.0
     btc_change_24h: float = 0.0
     window_end: Optional[datetime] = None
+    actionable: bool = False
 
 
 class TradeResponse(BaseModel):
@@ -128,6 +141,7 @@ class BotStats(BaseModel):
 class DashboardData(BaseModel):
     stats: BotStats
     btc_price: Optional[BtcPriceResponse]
+    microstructure: Optional[MicrostructureResponse] = None
     windows: List[BtcWindowResponse]
     active_signals: List[SignalResponse]
     recent_trades: List[TradeResponse]
@@ -295,7 +309,7 @@ async def get_actionable_signals():
         return []
 
 
-def _signal_to_response(s: TradingSignal) -> SignalResponse:
+def _signal_to_response(s: TradingSignal, actionable: bool = False) -> SignalResponse:
     return SignalResponse(
         market_ticker=s.market.market_id,
         market_title=f"BTC 5m - {s.market.slug}",
@@ -313,6 +327,7 @@ def _signal_to_response(s: TradingSignal) -> SignalResponse:
         btc_price=s.btc_price,
         btc_change_24h=s.btc_change_24h,
         window_end=s.market.window_end,
+        actionable=actionable,
     )
 
 
@@ -523,21 +538,47 @@ async def get_dashboard(db: Session = Depends(get_db)):
     """Get all dashboard data in one call."""
     stats = await get_stats(db)
 
-    # Fetch BTC price and windows concurrently
+    # Fetch BTC price from microstructure first, fallback to CoinGecko
     btc_price_data = None
+    micro_data = None
     try:
-        btc = await fetch_crypto_price("BTC")
-        if btc:
+        micro = await compute_btc_microstructure()
+        if micro:
+            micro_data = MicrostructureResponse(
+                rsi=micro.rsi,
+                momentum_1m=micro.momentum_1m,
+                momentum_5m=micro.momentum_5m,
+                momentum_15m=micro.momentum_15m,
+                vwap_deviation=micro.vwap_deviation,
+                sma_crossover=micro.sma_crossover,
+                volatility=micro.volatility,
+                price=micro.price,
+                source=micro.source,
+            )
             btc_price_data = BtcPriceResponse(
-                price=btc.current_price,
-                change_24h=btc.change_24h,
-                change_7d=btc.change_7d,
-                market_cap=btc.market_cap,
-                volume_24h=btc.volume_24h,
-                last_updated=btc.last_updated
+                price=micro.price,
+                change_24h=micro.momentum_15m * 96,  # rough extrapolation
+                change_7d=0,
+                market_cap=0,
+                volume_24h=0,
+                last_updated=datetime.utcnow(),
             )
     except Exception:
         pass
+    if not btc_price_data:
+        try:
+            btc = await fetch_crypto_price("BTC")
+            if btc:
+                btc_price_data = BtcPriceResponse(
+                    price=btc.current_price,
+                    change_24h=btc.change_24h,
+                    change_7d=btc.change_7d,
+                    market_cap=btc.market_cap,
+                    volume_24h=btc.volume_24h,
+                    last_updated=btc.last_updated
+                )
+        except Exception:
+            pass
 
     # Fetch windows
     windows = []
@@ -562,16 +603,16 @@ async def get_dashboard(db: Session = Depends(get_db)):
     except Exception:
         pass
 
-    # Signals
+    # Signals — return ALL signals, mark which are actionable
     signals = []
     try:
         raw_signals = await scan_for_signals()
-        signals = [_signal_to_response(s) for s in raw_signals if s.passes_threshold]
+        signals = [_signal_to_response(s, actionable=s.passes_threshold) for s in raw_signals]
     except Exception:
         pass
 
     # Recent trades
-    trades = db.query(Trade).order_by(Trade.timestamp.desc()).limit(20).all()
+    trades = db.query(Trade).order_by(Trade.timestamp.desc()).limit(50).all()
     recent_trades = [
         TradeResponse(
             id=t.id,
@@ -605,6 +646,7 @@ async def get_dashboard(db: Session = Depends(get_db)):
     return DashboardData(
         stats=stats,
         btc_price=btc_price_data,
+        microstructure=micro_data,
         windows=windows,
         active_signals=signals,
         recent_trades=recent_trades,
