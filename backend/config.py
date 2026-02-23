@@ -26,22 +26,22 @@ class Settings(BaseSettings):
     # Bot settings - BTC 5-MIN TRADING
     SIMULATION_MODE: bool = True
     INITIAL_BANKROLL: float = 10000.0
-    KELLY_FRACTION: float = 0.10  # 1/3 Kelly — conservative for noisy edges
+    KELLY_FRACTION: float = 0.15  # Fractional Kelly
 
     # BTC 5-min specific settings
-    SCAN_INTERVAL_SECONDS: int = 90  # Scan every 90s — slower = fewer trades
+    SCAN_INTERVAL_SECONDS: int = 60  # Scan every minute
     SETTLEMENT_INTERVAL_SECONDS: int = 120  # Check settlements every 2 min
-    BTC_PRICE_SOURCE: str = "binance"
-    MIN_EDGE_THRESHOLD: float = 0.05  # 5% edge required
-    MAX_ENTRY_PRICE: float = 0.48  # Need wider payout margin
-    MAX_TRADES_PER_WINDOW: int = 1  # One trade per window max
-    MAX_TOTAL_PENDING_TRADES: int = 8  # Hard cap on exposure
+    BTC_PRICE_SOURCE: str = "coinbase"
+    MIN_EDGE_THRESHOLD: float = 0.02  # 2% edge required — these are 50/50 markets
+    MAX_ENTRY_PRICE: float = 0.55  # Enter up to 55c
+    MAX_TRADES_PER_WINDOW: int = 1
+    MAX_TOTAL_PENDING_TRADES: int = 20
 
     # Risk management
-    DAILY_LOSS_LIMIT: float = 200.0  # Stop trading after $200 daily loss
-    MAX_TRADE_SIZE: float = 50.0  # Hard cap per trade in dollars
-    MIN_TIME_REMAINING: int = 90  # Don't trade windows closing in < 90s
-    MAX_TIME_REMAINING: int = 270  # Don't trade windows > 4.5min out
+    DAILY_LOSS_LIMIT: float = 300.0
+    MAX_TRADE_SIZE: float = 75.0
+    MIN_TIME_REMAINING: int = 60  # Don't trade windows closing in < 60s
+    MAX_TIME_REMAINING: int = 1800  # Trade windows up to 30min out
 
     # Indicator weights for composite signal (must sum to ~1.0)
     WEIGHT_RSI: float = 0.20

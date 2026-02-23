@@ -107,7 +107,7 @@ def calculate_kelly_size(
     kelly *= settings.KELLY_FRACTION
 
     # Cap at maximum per-trade limit
-    max_fraction = 0.03  # 3% max per trade — conservative
+    max_fraction = 0.05  # 5% max per trade
     kelly = min(kelly, max_fraction)
 
     kelly = max(kelly, 0)
@@ -190,8 +190,8 @@ async def generate_btc_signal(market: BtcMarket) -> Optional[TradingSignal]:
     up_votes = sum(1 for s in indicator_signs if s > 0.05)
     down_votes = sum(1 for s in indicator_signs if s < -0.05)
 
-    # Convergence: require 4/4 indicators to agree for actionable signal
-    has_convergence = up_votes >= 4 or down_votes >= 4
+    # Convergence: require 2/4 indicators to agree — these are noisy 50/50 markets
+    has_convergence = up_votes >= 2 or down_votes >= 2
 
     # --- Weighted composite ---
     w = settings
@@ -203,10 +203,10 @@ async def generate_btc_signal(market: BtcMarket) -> Optional[TradingSignal]:
         + skew_signal * w.WEIGHT_MARKET_SKEW
     )
 
-    # Convert composite (-1..+1) to probability (0.42..0.58)
-    # Shrunk range reflects reality: BTC 5-min markets are ~50/50
-    model_up_prob = 0.50 + composite * 0.08
-    model_up_prob = max(0.42, min(0.58, model_up_prob))
+    # Convert composite (-1..+1) to probability (0.35..0.65)
+    # Wider range lets us express real edge when indicators converge
+    model_up_prob = 0.50 + composite * 0.15
+    model_up_prob = max(0.35, min(0.65, model_up_prob))
 
     # Calculate edge and direction
     edge, direction = calculate_edge(model_up_prob, market_up_prob)
@@ -218,7 +218,12 @@ async def generate_btc_signal(market: BtcMarket) -> Optional[TradingSignal]:
         entry_price = market.down_price
 
     # Time-remaining filter: only trade windows in the sweet spot
-    time_remaining = (market.window_end - datetime.utcnow()).total_seconds()
+    now = datetime.utcnow()
+    # Handle timezone-aware window_end
+    window_end = market.window_end
+    if window_end.tzinfo is not None:
+        window_end = window_end.replace(tzinfo=None)
+    time_remaining = (window_end - now).total_seconds()
     time_ok = settings.MIN_TIME_REMAINING <= time_remaining <= settings.MAX_TIME_REMAINING
 
     passes_filters = has_convergence and entry_price <= settings.MAX_ENTRY_PRICE and time_ok
@@ -247,7 +252,7 @@ async def generate_btc_signal(market: BtcMarket) -> Optional[TradingSignal]:
     filter_status = "ACTIONABLE" if passes_filters else "FILTERED"
     filter_reasons = []
     if not has_convergence:
-        filter_reasons.append(f"convergence {max(up_votes, down_votes)}/4 < 4")
+        filter_reasons.append(f"convergence {max(up_votes, down_votes)}/4 < 2")
     if not time_ok:
         filter_reasons.append(f"time {time_remaining:.0f}s not in [{settings.MIN_TIME_REMAINING},{settings.MAX_TIME_REMAINING}]")
     if entry_price > settings.MAX_ENTRY_PRICE:

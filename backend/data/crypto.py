@@ -57,7 +57,59 @@ async def fetch_binance_klines(limit: int = 60) -> Optional[List[list]]:
         return _kline_cache["data"]
 
     async with httpx.AsyncClient(timeout=10.0) as client:
-        # Try Binance first
+        # Try Coinbase first (US-accessible, reliable)
+        try:
+            import datetime as _dt
+            end = _dt.datetime.now(_dt.timezone.utc)
+            start = end - _dt.timedelta(minutes=limit)
+            resp = await client.get(
+                f"{COINBASE_API}/products/BTC-USD/candles",
+                params={
+                    "start": start.isoformat(),
+                    "end": end.isoformat(),
+                    "granularity": 60,
+                },
+            )
+            resp.raise_for_status()
+            rows = resp.json()
+            # Coinbase returns [time, low, high, open, close, volume] newest-first
+            rows = list(reversed(rows))
+            candles = [
+                [int(r[0]) * 1000, str(r[3]), str(r[2]), str(r[1]), str(r[4]), str(r[5])]
+                for r in rows
+            ]
+            _kline_cache["data"] = candles
+            _kline_cache["ts"] = now
+            _kline_cache["_source"] = "coinbase"
+            return candles
+        except Exception as e:
+            logger.warning(f"Coinbase kline fetch failed, trying Kraken: {e}")
+
+        # Fallback 1: Kraken (US-accessible, free)
+        try:
+            resp = await client.get(
+                f"{KRAKEN_API}/OHLC",
+                params={"pair": "XBTUSD", "interval": 1},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            result = data.get("result", {})
+            ohlc_key = [k for k in result if k != "last"]
+            if ohlc_key:
+                rows = result[ohlc_key[0]]
+                rows = rows[-limit:]
+                candles = [
+                    [int(r[0]) * 1000, str(r[1]), str(r[2]), str(r[3]), str(r[4]), str(r[6])]
+                    for r in rows
+                ]
+                _kline_cache["data"] = candles
+                _kline_cache["ts"] = now
+                _kline_cache["_source"] = "kraken"
+                return candles
+        except Exception as e:
+            logger.warning(f"Kraken kline fetch failed, trying Binance: {e}")
+
+        # Fallback 2: Binance (geo-blocked in US)
         try:
             resp = await client.get(
                 f"{BINANCE_API}/klines",
@@ -72,7 +124,7 @@ async def fetch_binance_klines(limit: int = 60) -> Optional[List[list]]:
         except Exception as e:
             logger.warning(f"Binance kline fetch failed, trying Bybit: {e}")
 
-        # Fallback 1: Bybit
+        # Fallback 3: Bybit
         try:
             resp = await client.get(
                 f"{BYBIT_API}/kline",
@@ -96,63 +148,7 @@ async def fetch_binance_klines(limit: int = 60) -> Optional[List[list]]:
             _kline_cache["_source"] = "bybit"
             return candles
         except Exception as e:
-            logger.warning(f"Bybit kline fetch failed, trying Coinbase: {e}")
-
-        # Fallback 2: Coinbase (US-accessible, free)
-        try:
-            # Coinbase uses ISO time and granularity in seconds
-            import datetime as _dt
-            end = _dt.datetime.now(_dt.timezone.utc)
-            start = end - _dt.timedelta(minutes=limit)
-            resp = await client.get(
-                f"{COINBASE_API}/products/BTC-USD/candles",
-                params={
-                    "start": start.isoformat(),
-                    "end": end.isoformat(),
-                    "granularity": 60,  # 1-minute candles
-                },
-            )
-            resp.raise_for_status()
-            rows = resp.json()
-            # Coinbase returns [time, low, high, open, close, volume] newest-first
-            rows = list(reversed(rows))
-            candles = [
-                [int(r[0]) * 1000, str(r[3]), str(r[2]), str(r[1]), str(r[4]), str(r[5])]
-                for r in rows
-            ]
-            _kline_cache["data"] = candles
-            _kline_cache["ts"] = now
-            _kline_cache["_source"] = "coinbase"
-            return candles
-        except Exception as e:
-            logger.warning(f"Coinbase kline fetch failed, trying Kraken: {e}")
-
-        # Fallback 3: Kraken (US-accessible, free)
-        try:
-            resp = await client.get(
-                f"{KRAKEN_API}/OHLC",
-                params={"pair": "XBTUSD", "interval": 1},
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            result = data.get("result", {})
-            # Kraken key is usually XXBTZUSD
-            ohlc_key = [k for k in result if k != "last"]
-            if ohlc_key:
-                rows = result[ohlc_key[0]]
-                # Kraken: [time, open, high, low, close, vwap, volume, count]
-                # Take last `limit` candles
-                rows = rows[-limit:]
-                candles = [
-                    [int(r[0]) * 1000, str(r[1]), str(r[2]), str(r[3]), str(r[4]), str(r[6])]
-                    for r in rows
-                ]
-                _kline_cache["data"] = candles
-                _kline_cache["ts"] = now
-                _kline_cache["_source"] = "kraken"
-                return candles
-        except Exception as e:
-            logger.error(f"All kline sources failed (Binance/Bybit/Coinbase/Kraken): {e}")
+            logger.error(f"All kline sources failed: {e}")
 
         return None
 
