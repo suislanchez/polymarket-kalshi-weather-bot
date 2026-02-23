@@ -138,6 +138,22 @@ class BotStats(BaseModel):
     last_run: Optional[datetime]
 
 
+class CalibrationBucket(BaseModel):
+    bucket: str
+    predicted_avg: float
+    actual_rate: float
+    count: int
+
+
+class CalibrationSummary(BaseModel):
+    total_signals: int
+    total_with_outcome: int
+    accuracy: float
+    avg_predicted_edge: float
+    avg_actual_edge: float
+    brier_score: float
+
+
 class DashboardData(BaseModel):
     stats: BotStats
     btc_price: Optional[BtcPriceResponse]
@@ -146,6 +162,7 @@ class DashboardData(BaseModel):
     active_signals: List[SignalResponse]
     recent_trades: List[TradeResponse]
     equity_curve: List[dict]
+    calibration: Optional[CalibrationSummary] = None
 
 
 class EventResponse(BaseModel):
@@ -457,6 +474,91 @@ async def settle_trades_endpoint(db: Session = Depends(get_db)):
     }
 
 
+def _compute_calibration_summary(db: Session) -> Optional[CalibrationSummary]:
+    """Compute calibration summary from settled signals."""
+    total_signals = db.query(Signal).count()
+    settled_signals = db.query(Signal).filter(Signal.outcome_correct.isnot(None)).all()
+
+    if not settled_signals:
+        if total_signals == 0:
+            return None
+        return CalibrationSummary(
+            total_signals=total_signals,
+            total_with_outcome=0,
+            accuracy=0.0,
+            avg_predicted_edge=0.0,
+            avg_actual_edge=0.0,
+            brier_score=0.0,
+        )
+
+    total_with_outcome = len(settled_signals)
+    correct = sum(1 for s in settled_signals if s.outcome_correct)
+    accuracy = correct / total_with_outcome if total_with_outcome > 0 else 0.0
+
+    avg_predicted_edge = sum(abs(s.edge) for s in settled_signals) / total_with_outcome
+    # Actual edge: for correct predictions, edge was real; for incorrect, edge was negative
+    avg_actual_edge = sum(
+        abs(s.edge) if s.outcome_correct else -abs(s.edge)
+        for s in settled_signals
+    ) / total_with_outcome
+
+    # Brier score: mean squared error of probability forecasts
+    # For each signal: (predicted_prob - actual_outcome)^2
+    brier_sum = 0.0
+    for s in settled_signals:
+        # Model probability is for UP; actual is 1.0 if UP won, 0.0 if DOWN won
+        actual = s.settlement_value if s.settlement_value is not None else 0.5
+        brier_sum += (s.model_probability - actual) ** 2
+    brier_score = brier_sum / total_with_outcome
+
+    return CalibrationSummary(
+        total_signals=total_signals,
+        total_with_outcome=total_with_outcome,
+        accuracy=accuracy,
+        avg_predicted_edge=avg_predicted_edge,
+        avg_actual_edge=avg_actual_edge,
+        brier_score=brier_score,
+    )
+
+
+@app.get("/api/calibration")
+async def get_calibration(db: Session = Depends(get_db)):
+    """Return calibration data: predicted probability vs actual win rate."""
+    signals = db.query(Signal).filter(Signal.outcome_correct.isnot(None)).all()
+
+    if not signals:
+        return {"buckets": [], "summary": None}
+
+    # Bucket signals by model_probability into 5% bins
+    from collections import defaultdict
+    buckets_data = defaultdict(lambda: {"predicted_sum": 0.0, "correct": 0, "total": 0})
+
+    for s in signals:
+        # Bin by 5% increments
+        bin_start = int(s.model_probability * 100 // 5) * 5
+        bin_end = bin_start + 5
+        bucket_key = f"{bin_start}-{bin_end}%"
+
+        buckets_data[bucket_key]["predicted_sum"] += s.model_probability
+        buckets_data[bucket_key]["total"] += 1
+        if s.outcome_correct:
+            buckets_data[bucket_key]["correct"] += 1
+
+    buckets = []
+    for bucket_key in sorted(buckets_data.keys()):
+        d = buckets_data[bucket_key]
+        buckets.append(CalibrationBucket(
+            bucket=bucket_key,
+            predicted_avg=d["predicted_sum"] / d["total"],
+            actual_rate=d["correct"] / d["total"],
+            count=d["total"],
+        ))
+
+    summary = _compute_calibration_summary(db)
+
+    return {"buckets": buckets, "summary": summary}
+
+
 @app.get("/api/events", response_model=List[EventResponse])
 async def get_events(limit: int = 50):
     from backend.core.scheduler import get_recent_events
@@ -643,6 +745,9 @@ async def get_dashboard(db: Session = Depends(get_db)):
                 "bankroll": settings.INITIAL_BANKROLL + cumulative_pnl
             })
 
+    # Calibration summary
+    calibration = _compute_calibration_summary(db)
+
     return DashboardData(
         stats=stats,
         btc_price=btc_price_data,
@@ -650,7 +755,8 @@ async def get_dashboard(db: Session = Depends(get_db)):
         windows=windows,
         active_signals=signals,
         recent_trades=recent_trades,
-        equity_curve=equity_curve
+        equity_curve=equity_curve,
+        calibration=calibration,
     )
 
 

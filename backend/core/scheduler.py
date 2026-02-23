@@ -1,13 +1,14 @@
 """Background scheduler for BTC 5-min autonomous trading."""
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Optional
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
+from sqlalchemy import func
 import logging
 
 from backend.config import settings
-from backend.models.database import SessionLocal, Trade, BotState
+from backend.models.database import SessionLocal, Trade, BotState, Signal
 from backend.core.signals import scan_for_signals
 
 logging.basicConfig(level=logging.INFO)
@@ -82,10 +83,21 @@ async def scan_and_trade_job():
                 log_event("info", "Bot is paused, skipping trades")
                 return
 
-            MAX_TRADES_PER_SCAN = 10
+            MAX_TRADES_PER_SCAN = 2
             MIN_TRADE_SIZE = 10
-            MAX_TRADE_FRACTION = 0.08
+            MAX_TRADE_FRACTION = 0.03  # 3% max per trade
             MAX_TOTAL_PENDING = settings.MAX_TOTAL_PENDING_TRADES
+
+            # --- Daily loss circuit breaker ---
+            today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+            daily_pnl = db.query(func.coalesce(func.sum(Trade.pnl), 0.0)).filter(
+                Trade.settled == True,
+                Trade.settlement_time >= today_start
+            ).scalar()
+
+            if daily_pnl <= -settings.DAILY_LOSS_LIMIT:
+                log_event("warning", f"Daily loss limit hit: ${daily_pnl:.2f} (limit: -${settings.DAILY_LOSS_LIMIT:.0f}). Stopping trades.")
+                return
 
             total_pending = db.query(Trade).filter(Trade.settled == False).count()
             if total_pending >= MAX_TOTAL_PENDING:
@@ -129,6 +141,17 @@ async def scan_and_trade_job():
                 )
 
                 db.add(trade)
+                db.flush()  # get trade.id
+
+                # Link trade to the most recent matching Signal and mark it executed
+                matching_signal = db.query(Signal).filter(
+                    Signal.market_ticker == signal.market.market_id,
+                    Signal.executed == False,
+                ).order_by(Signal.timestamp.desc()).first()
+                if matching_signal:
+                    matching_signal.executed = True
+                    trade.signal_id = matching_signal.id
+
                 state.total_trades += 1
                 trades_executed += 1
 

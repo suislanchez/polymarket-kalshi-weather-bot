@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Optional, List, Tuple
 from sqlalchemy.orm import Session
 
-from backend.models.database import Trade, BotState
+from backend.models.database import Trade, BotState, Signal
 
 logger = logging.getLogger("trading_bot")
 
@@ -213,6 +213,16 @@ async def settle_pending_trades(db: Session) -> List[Trade]:
                     trade.result = "push"
 
                 settled_trades.append(trade)
+
+                # Update linked Signal with actual outcome for calibration
+                if trade.signal_id:
+                    linked_signal = db.query(Signal).filter(Signal.id == trade.signal_id).first()
+                    if linked_signal:
+                        actual_outcome = "up" if settlement_value == 1.0 else "down"
+                        linked_signal.actual_outcome = actual_outcome
+                        linked_signal.outcome_correct = (linked_signal.direction == actual_outcome)
+                        linked_signal.settlement_value = settlement_value
+                        linked_signal.settled_at = datetime.utcnow()
         except Exception as e:
             logger.error(f"Failed to settle trade {trade.id}: {e}")
             continue

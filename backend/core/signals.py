@@ -8,6 +8,7 @@ import asyncio
 from backend.config import settings
 from backend.data.btc_markets import BtcMarket, fetch_active_btc_markets
 from backend.data.crypto import fetch_crypto_price, compute_btc_microstructure
+from backend.models.database import SessionLocal, Signal
 
 logger = logging.getLogger("trading_bot")
 
@@ -106,12 +107,17 @@ def calculate_kelly_size(
     kelly *= settings.KELLY_FRACTION
 
     # Cap at maximum per-trade limit
-    max_fraction = 0.10  # 10% max per trade - aggressive
+    max_fraction = 0.03  # 3% max per trade — conservative
     kelly = min(kelly, max_fraction)
 
     kelly = max(kelly, 0)
 
-    return kelly * bankroll
+    size = kelly * bankroll
+
+    # Hard cap from config
+    size = min(size, settings.MAX_TRADE_SIZE)
+
+    return size
 
 
 async def generate_btc_signal(market: BtcMarket) -> Optional[TradingSignal]:
@@ -184,8 +190,8 @@ async def generate_btc_signal(market: BtcMarket) -> Optional[TradingSignal]:
     up_votes = sum(1 for s in indicator_signs if s > 0.05)
     down_votes = sum(1 for s in indicator_signs if s < -0.05)
 
-    # Convergence: require 3/4 indicators to agree for actionable signal
-    has_convergence = up_votes >= 3 or down_votes >= 3
+    # Convergence: require 4/4 indicators to agree for actionable signal
+    has_convergence = up_votes >= 4 or down_votes >= 4
 
     # --- Weighted composite ---
     w = settings
@@ -197,9 +203,10 @@ async def generate_btc_signal(market: BtcMarket) -> Optional[TradingSignal]:
         + skew_signal * w.WEIGHT_MARKET_SKEW
     )
 
-    # Convert composite (-1..+1) to probability (0.30..0.70)
-    model_up_prob = 0.50 + composite * 0.20
-    model_up_prob = max(0.30, min(0.70, model_up_prob))
+    # Convert composite (-1..+1) to probability (0.42..0.58)
+    # Shrunk range reflects reality: BTC 5-min markets are ~50/50
+    model_up_prob = 0.50 + composite * 0.08
+    model_up_prob = max(0.42, min(0.58, model_up_prob))
 
     # Calculate edge and direction
     edge, direction = calculate_edge(model_up_prob, market_up_prob)
@@ -210,7 +217,11 @@ async def generate_btc_signal(market: BtcMarket) -> Optional[TradingSignal]:
     else:
         entry_price = market.down_price
 
-    passes_filters = has_convergence and entry_price <= settings.MAX_ENTRY_PRICE
+    # Time-remaining filter: only trade windows in the sweet spot
+    time_remaining = (market.window_end - datetime.utcnow()).total_seconds()
+    time_ok = settings.MIN_TIME_REMAINING <= time_remaining <= settings.MAX_TIME_REMAINING
+
+    passes_filters = has_convergence and entry_price <= settings.MAX_ENTRY_PRICE and time_ok
 
     # Zero out edge if filters fail (signal still returned for UI visibility)
     if not passes_filters:
@@ -236,7 +247,9 @@ async def generate_btc_signal(market: BtcMarket) -> Optional[TradingSignal]:
     filter_status = "ACTIONABLE" if passes_filters else "FILTERED"
     filter_reasons = []
     if not has_convergence:
-        filter_reasons.append(f"convergence {max(up_votes, down_votes)}/4 < 3")
+        filter_reasons.append(f"convergence {max(up_votes, down_votes)}/4 < 4")
+    if not time_ok:
+        filter_reasons.append(f"time {time_remaining:.0f}s not in [{settings.MIN_TIME_REMAINING},{settings.MAX_TIME_REMAINING}]")
     if entry_price > settings.MAX_ENTRY_PRICE:
         filter_reasons.append(f"entry {entry_price:.0%} > {settings.MAX_ENTRY_PRICE:.0%}")
     filter_note = f" [{', '.join(filter_reasons)}]" if filter_reasons else ""
@@ -309,7 +322,52 @@ async def scan_for_signals() -> List[TradingSignal]:
         logger.info(f"  {signal.market.slug}")
         logger.info(f"    Edge: {signal.edge:+.1%} -> {signal.direction.upper()} @ ${signal.suggested_size:.2f}")
 
+    # Persist signals with non-zero edge to DB for calibration tracking
+    _persist_signals(signals)
+
     return signals
+
+
+def _persist_signals(signals: list):
+    """Save signals with non-zero edge to DB, deduplicating on (market_ticker, timestamp)."""
+    to_save = [s for s in signals if abs(s.edge) > 0]
+    if not to_save:
+        return
+
+    db = SessionLocal()
+    try:
+        for signal in to_save:
+            # Dedup: skip if we already logged this signal for this market window
+            existing = db.query(Signal).filter(
+                Signal.market_ticker == signal.market.market_id,
+                Signal.timestamp >= signal.timestamp.replace(second=0, microsecond=0),
+            ).first()
+            if existing:
+                continue
+
+            db_signal = Signal(
+                market_ticker=signal.market.market_id,
+                platform="polymarket",
+                timestamp=signal.timestamp,
+                direction=signal.direction,
+                model_probability=signal.model_probability,
+                market_price=signal.market_probability,
+                edge=signal.edge,
+                confidence=signal.confidence,
+                kelly_fraction=signal.kelly_fraction,
+                suggested_size=signal.suggested_size,
+                sources=signal.sources,
+                reasoning=signal.reasoning,
+                executed=False,
+            )
+            db.add(db_signal)
+
+        db.commit()
+    except Exception as e:
+        logger.warning(f"Failed to persist signals: {e}")
+        db.rollback()
+    finally:
+        db.close()
 
 
 async def get_actionable_signals() -> List[TradingSignal]:

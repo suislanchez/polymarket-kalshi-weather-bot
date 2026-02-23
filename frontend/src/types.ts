@@ -83,6 +83,15 @@ export interface EquityPoint {
   bankroll: number
 }
 
+export interface CalibrationSummary {
+  total_signals: number
+  total_with_outcome: number
+  accuracy: number
+  avg_predicted_edge: number
+  avg_actual_edge: number
+  brier_score: number
+}
+
 export interface DashboardData {
   stats: BotStats
   btc_price: BtcPrice | null
@@ -91,4 +100,5 @@ export interface DashboardData {
   active_signals: Signal[]
   recent_trades: Trade[]
   equity_curve: EquityPoint[]
+  calibration: CalibrationSummary | null
 }

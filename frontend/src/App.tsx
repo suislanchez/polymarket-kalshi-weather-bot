@@ -7,7 +7,7 @@ import { TradesTable } from './components/TradesTable'
 import { EquityChart } from './components/EquityChart'
 import { Terminal } from './components/Terminal'
 import { formatCountdown } from './utils'
-import type { BtcWindow, Microstructure } from './types'
+import type { BtcWindow, Microstructure, CalibrationSummary } from './types'
 
 function WindowPill({ window: w }: { window: BtcWindow }) {
   const [countdown, setCountdown] = useState(w.time_until_end)
@@ -73,6 +73,38 @@ function MicroPanel({ micro }: { micro: Microstructure }) {
   )
 }
 
+function CalibrationPanel({ calibration }: { calibration: CalibrationSummary }) {
+  const accuracyColor = calibration.accuracy >= 0.55 ? 'text-green-500' : calibration.accuracy < 0.50 ? 'text-red-500' : 'text-neutral-400'
+  const brierLabel = calibration.brier_score <= 0.20 ? 'Good' : calibration.brier_score <= 0.25 ? 'OK' : 'Poor'
+  const brierColor = calibration.brier_score <= 0.20 ? 'text-green-500' : calibration.brier_score <= 0.25 ? 'text-amber-500' : 'text-red-500'
+
+  return (
+    <div className="space-y-1 text-[10px]">
+      <div className="flex items-center justify-between">
+        <span className="text-neutral-500">Accuracy</span>
+        <span className={accuracyColor}>
+          {(calibration.accuracy * 100).toFixed(0)}% correct ({Math.round(calibration.accuracy * calibration.total_with_outcome)}/{calibration.total_with_outcome})
+        </span>
+      </div>
+      <div className="flex items-center justify-between">
+        <span className="text-neutral-500">Brier Score</span>
+        <span className={brierColor}>
+          {calibration.brier_score.toFixed(3)} ({brierLabel})
+        </span>
+      </div>
+      <div className="flex items-center justify-between">
+        <span className="text-neutral-500">Edge Reality</span>
+        <span className="text-neutral-300">
+          Pred: {(calibration.avg_predicted_edge * 100).toFixed(1)}% | Actual: <span className={calibration.avg_actual_edge >= 0 ? 'text-green-500' : 'text-red-500'}>{(calibration.avg_actual_edge * 100).toFixed(1)}%</span>
+        </span>
+      </div>
+      <div className="text-[9px] text-neutral-600">
+        {calibration.total_signals} signals tracked, {calibration.total_with_outcome} settled
+      </div>
+    </div>
+  )
+}
+
 function App() {
   const queryClient = useQueryClient()
 
@@ -118,6 +150,7 @@ function App() {
     win_rate: 0
   }
   const equityCurve = data?.equity_curve ?? []
+  const calibration = data?.calibration ?? null
 
   const actionableCount = activeSignals.filter(s => s.actionable).length
 
@@ -235,6 +268,17 @@ function App() {
               />
             </div>
           </div>
+
+          {/* Calibration */}
+          {calibration && calibration.total_with_outcome > 0 && (
+            <div className="shrink-0 border-b border-neutral-800 px-2 py-2">
+              <div className="flex items-center justify-between mb-1.5">
+                <span className="text-[10px] text-neutral-500 uppercase tracking-wider">Calibration</span>
+                <span className="text-[9px] text-neutral-600">{calibration.total_with_outcome} settled</span>
+              </div>
+              <CalibrationPanel calibration={calibration} />
+            </div>
+          )}
 
           {/* Terminal */}
           <div className="flex-1 min-h-0">

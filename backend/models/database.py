@@ -92,6 +92,12 @@ class Signal(Base):
 
     executed = Column(Boolean, default=False)
 
+    # Calibration tracking — filled after settlement
+    actual_outcome = Column(String, nullable=True)    # "up" or "down" — actual market result
+    outcome_correct = Column(Boolean, nullable=True)   # did our direction prediction match?
+    settlement_value = Column(Float, nullable=True)     # 1.0=UP won, 0.0=DOWN won
+    settled_at = Column(DateTime, nullable=True)        # when we recorded the outcome
+
 
 class AILog(Base):
     """Log of all AI API calls."""
@@ -160,6 +166,27 @@ def ensure_schema():
         with engine.connect() as conn:
             with conn.begin():
                 conn.execute(text(stmt))
+
+    # Add calibration columns to signals table
+    try:
+        signal_columns = [col["name"] for col in inspector.get_columns("signals")]
+    except Exception:
+        signal_columns = []
+
+    if signal_columns:
+        with engine.connect() as conn:
+            for col, coltype in [
+                ("actual_outcome", "TEXT"),
+                ("outcome_correct", "BOOLEAN"),
+                ("settlement_value", "FLOAT"),
+                ("settled_at", "DATETIME"),
+            ]:
+                if col not in signal_columns:
+                    try:
+                        with conn.begin():
+                            conn.execute(text(f"ALTER TABLE signals ADD COLUMN {col} {coltype}"))
+                    except Exception:
+                        pass  # column already exists
 
 
 def get_db():
