@@ -10,13 +10,24 @@ class Settings(BaseSettings):
     # Database (SQLite for Phase 1, PostgreSQL for production)
     DATABASE_URL: str = "sqlite:///./tradingbot.db"
 
-    # API Keys (optional)
+    # Polymarket CLOB trading (required for live orders)
+    # Get POLYMARKET_PRIVATE_KEY from MetaMask > Account Details > Export Private Key
+    # POLYMARKET_FUNDER_ADDRESS is your Polygon wallet address (checksummed)
+    # API credentials are auto-derived on first run and logged — copy them to .env
+    POLYMARKET_PRIVATE_KEY: Optional[str] = None
+    POLYMARKET_FUNDER_ADDRESS: Optional[str] = None
     POLYMARKET_API_KEY: Optional[str] = None
+    POLYMARKET_API_SECRET: Optional[str] = None
+    POLYMARKET_API_PASSPHRASE: Optional[str] = None
 
     # Kalshi API
     KALSHI_API_KEY_ID: Optional[str] = None
     KALSHI_PRIVATE_KEY_PATH: Optional[str] = None
     KALSHI_ENABLED: bool = True
+
+    # Telegram notifications (optional)
+    TELEGRAM_BOT_TOKEN: Optional[str] = None
+    TELEGRAM_CHAT_ID: Optional[str] = None
 
     # AI API Keys
     GROQ_API_KEY: Optional[str] = None
@@ -65,7 +76,7 @@ class Settings(BaseSettings):
     WEATHER_MIN_EDGE_THRESHOLD: float = 0.08  # 8% — weather has more signal than 5-min BTC
     WEATHER_MAX_ENTRY_PRICE: float = 0.70
     WEATHER_MAX_TRADE_SIZE: float = 100.0
-    WEATHER_CITIES: str = "nyc,chicago,miami,los_angeles,denver"
+    WEATHER_CITIES: str = "nyc,chicago,miami,los_angeles,denver,dallas,paris,london,tokyo,sao_paulo,singapore,wellington,buenos_aires,tel_aviv,sydney,toronto,berlin,dubai,amsterdam"
 
     class Config:
         env_file = ".env"

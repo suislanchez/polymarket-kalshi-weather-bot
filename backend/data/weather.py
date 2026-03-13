@@ -51,6 +51,76 @@ CITY_CONFIG: Dict[str, dict] = {
         "nws_office": "BOU",
         "nws_gridpoint": "BOU/62,60",
     },
+    "dallas": {
+        "name": "Dallas",
+        "lat": 32.7767,
+        "lon": -96.7970,
+    },
+    "paris": {
+        "name": "Paris",
+        "lat": 48.8566,
+        "lon": 2.3522,
+    },
+    "london": {
+        "name": "London",
+        "lat": 51.5074,
+        "lon": -0.1278,
+    },
+    "tokyo": {
+        "name": "Tokyo",
+        "lat": 35.6762,
+        "lon": 139.6503,
+    },
+    "sao_paulo": {
+        "name": "Sao Paulo",
+        "lat": -23.5505,
+        "lon": -46.6333,
+    },
+    "singapore": {
+        "name": "Singapore",
+        "lat": 1.3521,
+        "lon": 103.8198,
+    },
+    "wellington": {
+        "name": "Wellington",
+        "lat": -41.2865,
+        "lon": 174.7762,
+    },
+    "buenos_aires": {
+        "name": "Buenos Aires",
+        "lat": -34.6037,
+        "lon": -58.3816,
+    },
+    "tel_aviv": {
+        "name": "Tel Aviv",
+        "lat": 32.0853,
+        "lon": 34.7818,
+    },
+    "sydney": {
+        "name": "Sydney",
+        "lat": -33.8688,
+        "lon": 151.2093,
+    },
+    "toronto": {
+        "name": "Toronto",
+        "lat": 43.6532,
+        "lon": -79.3832,
+    },
+    "berlin": {
+        "name": "Berlin",
+        "lat": 52.5200,
+        "lon": 13.4050,
+    },
+    "dubai": {
+        "name": "Dubai",
+        "lat": 25.2048,
+        "lon": 55.2708,
+    },
+    "amsterdam": {
+        "name": "Amsterdam",
+        "lat": 52.3676,
+        "lon": 4.9041,
+    },
 }
 
 
@@ -99,6 +169,20 @@ class EnsembleForecast:
     def probability_low_below(self, threshold_f: float) -> float:
         """Fraction of ensemble members with daily low below threshold."""
         return 1.0 - self.probability_low_above(threshold_f)
+
+    def probability_high_in_range(self, low_f: float, high_f: float) -> float:
+        """Fraction of ensemble members with daily high between low_f and high_f (inclusive)."""
+        if not self.member_highs:
+            return 0.5
+        count = sum(1 for h in self.member_highs if low_f <= h <= high_f)
+        return count / len(self.member_highs)
+
+    def probability_low_in_range(self, low_f: float, high_f: float) -> float:
+        """Fraction of ensemble members with daily low between low_f and high_f (inclusive)."""
+        if not self.member_lows:
+            return 0.5
+        count = sum(1 for l in self.member_lows if low_f <= l <= high_f)
+        return count / len(self.member_lows)
 
     @property
     def ensemble_agreement(self) -> float:

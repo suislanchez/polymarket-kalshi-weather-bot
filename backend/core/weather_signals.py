@@ -60,12 +60,16 @@ async def generate_weather_signal(market: WeatherMarket) -> Optional[WeatherTrad
 
     # Calculate model probability based on market's question
     if market.metric == "high":
-        if market.direction == "above":
+        if market.direction == "range" and market.threshold_f_low is not None:
+            model_yes_prob = forecast.probability_high_in_range(market.threshold_f_low, market.threshold_f)
+        elif market.direction == "above":
             model_yes_prob = forecast.probability_high_above(market.threshold_f)
         else:
             model_yes_prob = forecast.probability_high_below(market.threshold_f)
     else:  # "low"
-        if market.direction == "above":
+        if market.direction == "range" and market.threshold_f_low is not None:
+            model_yes_prob = forecast.probability_low_in_range(market.threshold_f_low, market.threshold_f)
+        elif market.direction == "above":
             model_yes_prob = forecast.probability_low_above(market.threshold_f)
         else:
             model_yes_prob = forecast.probability_low_below(market.threshold_f)

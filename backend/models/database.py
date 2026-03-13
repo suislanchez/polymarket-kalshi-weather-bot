@@ -41,6 +41,9 @@ class Trade(Base):
     result = Column(String, default="pending")  # pending, win, loss
     pnl = Column(Float, nullable=True)
 
+    # Real order tracking (populated when SIMULATION_MODE=False)
+    order_id = Column(String, nullable=True)   # Polymarket CLOB order ID
+
     # Model performance tracking
     model_probability = Column(Float)
     market_price_at_entry = Column(Float)
@@ -173,6 +176,11 @@ def ensure_schema():
         with engine.connect() as conn:
             with conn.begin():
                 conn.execute(text("ALTER TABLE trades ADD COLUMN market_type VARCHAR DEFAULT 'btc'"))
+
+    if "order_id" not in columns:
+        with engine.connect() as conn:
+            with conn.begin():
+                conn.execute(text("ALTER TABLE trades ADD COLUMN order_id VARCHAR"))
 
     # Add calibration columns to signals table
     try:

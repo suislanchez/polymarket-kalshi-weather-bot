@@ -10,6 +10,10 @@ import logging
 from backend.config import settings
 from backend.models.database import SessionLocal, Trade, BotState, Signal
 from backend.core.signals import scan_for_signals
+from backend.core.telegram import (
+    notify_startup, notify_order_placed, notify_trade_settled,
+    notify_signal_found, notify_error,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("trading_bot")
@@ -183,6 +187,71 @@ async def scan_and_trade_job():
         logger.exception("Error in scan_and_trade_job")
 
 
+async def _place_polymarket_order(db, trade, signal, trade_size: float, entry_price: float):
+    """Place a real limit order on Polymarket CLOB and store the order ID."""
+    try:
+        from backend.data.polymarket_clob_client import (
+            polymarket_credentials_present,
+            place_limit_order,
+        )
+
+        if not polymarket_credentials_present():
+            log_event("warning", "Polymarket credentials not set — skipping live order")
+            return
+
+        # Choose YES or NO token based on signal direction
+        token_id = (
+            signal.market.yes_token_id
+            if signal.direction == "yes"
+            else signal.market.no_token_id
+        )
+        if not token_id:
+            log_event("warning",
+                f"No CLOB token ID for {signal.market.title} — skipping live order")
+            return
+
+        log_event("info",
+            f"Placing LIVE order: {signal.direction.upper()} "
+            f"${trade_size:.0f} @ {entry_price:.2f} | token {token_id[:12]}...")
+
+        response = await place_limit_order(
+            token_id=token_id,
+            price=entry_price,
+            size_usd=trade_size,
+            side="buy",
+        )
+
+        order_id = response.get("orderID") or response.get("id") or ""
+        order_status = response.get("status", "unknown")
+
+        if order_id:
+            trade.order_id = order_id
+            db.commit()
+            log_event("success",
+                f"LIVE ORDER submitted: {order_id[:16]}... status={order_status}",
+                {"order_id": order_id, "status": order_status, "response": response},
+            )
+            await notify_order_placed(
+                city=signal.market.city_name,
+                direction=signal.direction,
+                size_usd=trade_size,
+                price=entry_price,
+                edge=signal.edge,
+                order_id=order_id,
+                market_title=signal.market.title,
+            )
+        else:
+            log_event("warning",
+                f"Order submitted but no ID returned: {response}",
+                {"response": response},
+            )
+
+    except Exception as e:
+        log_event("error", f"Live order placement failed: {e}")
+        logger.exception("Error placing Polymarket live order")
+        await notify_error("Live order placement", str(e))
+
+
 async def weather_scan_and_trade_job():
     """
     Background job: Scan weather temperature markets, generate signals, execute trades.
@@ -296,6 +365,11 @@ async def weather_scan_and_trade_job():
                     }
                 )
 
+                # ── Live order placement ──────────────────────────────────
+                # When SIMULATION_MODE=False, send real orders to Polymarket
+                if not settings.SIMULATION_MODE and signal.market.platform == "polymarket":
+                    await _place_polymarket_order(db, trade, signal, trade_size, entry_price)
+
             state.last_run = datetime.utcnow()
             db.commit()
 
@@ -351,6 +425,15 @@ async def settlement_job():
                 for trade in settled:
                     result_prefix = "+" if trade.pnl and trade.pnl > 0 else ""
                     log_event("data", f"  {trade.event_slug}: {trade.result.upper()} {result_prefix}${trade.pnl:.2f}")
+                    if trade.market_type == "weather":
+                        await notify_trade_settled(
+                            city=trade.event_slug or "Unknown",
+                            direction=trade.direction,
+                            size_usd=trade.size,
+                            result=trade.result,
+                            pnl=trade.pnl or 0.0,
+                            market_title=trade.market_ticker or "",
+                        )
             else:
                 log_event("info", "No trades ready for settlement")
 
@@ -446,6 +529,14 @@ def start_scheduler():
         "min_edge": f"{settings.MIN_EDGE_THRESHOLD:.0%}",
         "weather_enabled": settings.WEATHER_ENABLED,
     })
+
+    db = SessionLocal()
+    try:
+        state = db.query(BotState).first()
+        bankroll = state.bankroll if state else settings.INITIAL_BANKROLL
+    finally:
+        db.close()
+    asyncio.create_task(notify_startup(settings.SIMULATION_MODE, bankroll))
 
     asyncio.create_task(scan_and_trade_job())
 

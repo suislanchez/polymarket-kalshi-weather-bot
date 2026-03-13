@@ -10,6 +10,9 @@ pydantic-settings==2.1.0
 httpx==0.26.0
 aiohttp==3.9.1
 
+# Polymarket CLOB order execution (live trading)
+py-clob-client>=0.17.0
+
 # Kalshi API auth (RSA-PSS signatures)
 cryptography>=42.0.0
 
