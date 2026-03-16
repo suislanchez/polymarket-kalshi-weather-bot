@@ -116,6 +116,13 @@ async def fetch_kalshi_weather_markets(
                 data = await client.get_markets(params)
                 raw_markets = data.get("markets", [])
 
+                # Log first market's raw fields for debugging
+                if raw_markets:
+                    sample = raw_markets[0]
+                    price_keys = [k for k in sample.keys() if any(w in k.lower() for w in ["price", "bid", "ask", "last", "dollar"])]
+                    logger.info(f"Kalshi sample market keys: {price_keys}")
+                    logger.info(f"Kalshi sample values: {({k: sample.get(k) for k in price_keys})}")
+
                 for m in raw_markets:
                     ticker = m.get("ticker", "")
                     parsed = _parse_kalshi_ticker(ticker, city_key)
