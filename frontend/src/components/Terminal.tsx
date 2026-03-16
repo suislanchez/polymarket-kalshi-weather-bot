@@ -20,7 +20,7 @@ interface Props {
   onScan?: () => void
 }
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+const API_URL = import.meta.env.VITE_API_URL || `${window.location.protocol}//${window.location.hostname}:8000`
 const WS_URL = API_URL.replace(/^http/, 'ws') + '/ws/events'
 
 export function Terminal({ isRunning, lastRun, onStart, onStop, onScan }: Props) {
