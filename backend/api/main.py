@@ -1,9 +1,12 @@
 """FastAPI backend for BTC 5-min trading bot dashboard."""
 from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
 from typing import List, Optional
+from pathlib import Path
 import asyncio
 import json
 import os
@@ -1033,6 +1036,20 @@ async def websocket_events(websocket: WebSocket):
         ws_manager.disconnect(websocket)
     except Exception:
         ws_manager.disconnect(websocket)
+
+
+# Serve frontend static files (enables single-port access via Cloudflare Tunnel)
+_frontend_dist = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
+if _frontend_dist.is_dir():
+    app.mount("/assets", StaticFiles(directory=_frontend_dist / "assets"), name="static-assets")
+
+    @app.get("/{path:path}")
+    async def serve_frontend(path: str):
+        """Serve frontend for any non-API route (SPA fallback)."""
+        file_path = _frontend_dist / path
+        if file_path.is_file():
+            return FileResponse(file_path)
+        return FileResponse(_frontend_dist / "index.html")
 
 
 if __name__ == "__main__":

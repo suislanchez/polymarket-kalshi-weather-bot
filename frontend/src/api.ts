@@ -1,7 +1,13 @@
 import axios from 'axios'
 import type { DashboardData, Signal, Trade, BotStats, BtcPrice, BtcWindow, WeatherForecast, WeatherSignal } from './types'
 
-const API_BASE = import.meta.env.VITE_API_URL || `${window.location.protocol}//${window.location.hostname}:8000`
+// When accessed via Cloudflare Tunnel or same-port serving, use same origin.
+// Only use :8000 when on localhost:3000 (separate frontend server).
+const isTunnel = window.location.hostname.includes('.trycloudflare.com') || window.location.hostname.includes('.cfargotunnel.com')
+const isSamePort = window.location.port === '8000' || window.location.port === ''
+const API_BASE = import.meta.env.VITE_API_URL || (isTunnel || isSamePort
+  ? window.location.origin
+  : `${window.location.protocol}//${window.location.hostname}:8000`)
 
 const api = axios.create({
   baseURL: `${API_BASE}/api`,
