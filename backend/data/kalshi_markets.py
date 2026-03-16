@@ -116,13 +116,6 @@ async def fetch_kalshi_weather_markets(
                 data = await client.get_markets(params)
                 raw_markets = data.get("markets", [])
 
-                # Log first market's raw fields for debugging
-                if raw_markets:
-                    sample = raw_markets[0]
-                    price_keys = [k for k in sample.keys() if any(w in k.lower() for w in ["price", "bid", "ask", "last", "dollar"])]
-                    logger.info(f"Kalshi sample market keys: {price_keys}")
-                    logger.info(f"Kalshi sample values: {({k: sample.get(k) for k in price_keys})}")
-
                 for m in raw_markets:
                     ticker = m.get("ticker", "")
                     parsed = _parse_kalshi_ticker(ticker, city_key)
@@ -132,25 +125,35 @@ async def fetch_kalshi_weather_markets(
                     if parsed["target_date"] < today:
                         continue
 
-                    # Kalshi API now uses dollar-denominated string fields
-                    yes_price = float(m.get("yes_ask_dollars") or 0)
-                    no_price = float(m.get("no_ask_dollars") or 0)
+                    # Kalshi API uses dollar-denominated string fields
+                    yes_bid = float(m.get("yes_bid_dollars") or 0)
+                    yes_ask = float(m.get("yes_ask_dollars") or 0)
 
-                    # Fallback to last_price_dollars, then yes_bid_dollars
-                    if yes_price <= 0:
+                    # Use mid-price for fair value (average of bid and ask)
+                    if yes_bid > 0 and yes_ask > 0:
+                        yes_price = (yes_bid + yes_ask) / 2.0
+                    elif yes_ask > 0:
+                        yes_price = yes_ask
+                    elif yes_bid > 0:
+                        yes_price = yes_bid
+                    else:
                         yes_price = float(m.get("last_price_dollars") or 0)
-                    if yes_price <= 0:
-                        yes_price = float(m.get("yes_bid_dollars") or 0)
-                    if no_price <= 0:
-                        no_price = 1.0 - yes_price
 
-                    # Skip markets with no price data at all
+                    no_price = 1.0 - yes_price
+
+                    # Skip markets with no price data
                     if yes_price <= 0:
                         continue
 
-                    # Skip fully resolved or illiquid
-                    if yes_price > 0.98 or yes_price < 0.02:
+                    # Skip extreme markets (tails where both model and market agree)
+                    if yes_price > 0.92 or yes_price < 0.08:
                         continue
+
+                    # Skip wide spreads (illiquid markets produce unreliable edges)
+                    if yes_bid > 0 and yes_ask > 0:
+                        spread = yes_ask - yes_bid
+                        if spread > 0.10:
+                            continue
 
                     volume = float(m.get("volume", 0) or 0)
 
