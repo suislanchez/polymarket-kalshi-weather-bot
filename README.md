@@ -263,3 +263,5 @@ This is a **simulation tool** for educational purposes. It does not place real t
 ## License
 
 MIT - do whatever you want with it.
+
+<!-- Auto-pull test: 2026-03-16 -->
