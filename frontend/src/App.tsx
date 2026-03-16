@@ -77,6 +77,8 @@ function App() {
     queryKey: ['dashboard'],
     queryFn: fetchDashboard,
     refetchInterval: 10000,
+    retry: 3,
+    retryDelay: 2000,
   })
 
   const scanMutation = useMutation({
@@ -135,11 +137,12 @@ function App() {
     )
   }
 
-  if (error || !data) {
+  if (error && !data) {
     return (
       <div className="h-screen bg-black flex items-center justify-center">
         <div className="text-center">
           <div className="text-red-500 text-xs uppercase mb-2 tracking-wider">Connection Error</div>
+          <div className="text-neutral-600 text-[10px] mb-3 max-w-xs">{String(error)}</div>
           <button
             onClick={() => refetch()}
             className="px-3 py-1.5 bg-neutral-900 border border-neutral-700 text-neutral-300 text-xs uppercase tracking-wider"
