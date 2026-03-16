@@ -2,7 +2,7 @@
  * Utility functions for the BTC 5-min trading bot dashboard
  */
 
-export function getMarketUrl(platform: string, ticker: string, eventSlug?: string): string {
+export function getMarketUrl(platform: string, ticker: string): string {
   const platformLower = platform.toLowerCase()
 
   if (platformLower === 'kalshi') {
