@@ -294,7 +294,7 @@ async def scan_for_signals() -> List[TradingSignal]:
     signals = []
 
     logger.info("=" * 50)
-    logger.info("BTC 5-MIN SCAN: Fetching markets from Polymarket...")
+    logger.info("BTC 5-MIN SCAN: Fetching markets...")
 
     try:
         markets = await fetch_active_btc_markets()
@@ -352,7 +352,7 @@ def _persist_signals(signals: list):
 
             db_signal = Signal(
                 market_ticker=signal.market.market_id,
-                platform="polymarket",
+                platform="kalshi",
                 timestamp=signal.timestamp,
                 direction=signal.direction,
                 model_probability=signal.model_probability,

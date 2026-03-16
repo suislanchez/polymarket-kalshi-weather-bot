@@ -67,7 +67,7 @@ export function SignalsTable({ signals, weatherSignals, onSimulateTrade, isSimul
       key: `btc-${s.market_ticker}`,
       ticker: s.market_ticker,
       title: (s.event_slug || s.market_ticker).replace('btc-updown-5m-', ''),
-      platform: s.platform || 'polymarket',
+      platform: s.platform || 'kalshi',
       category: 'BTC',
       direction: s.direction,
       edge: s.edge,

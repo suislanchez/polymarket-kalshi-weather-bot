@@ -367,7 +367,7 @@ function App() {
       {/* ===== FOOTER ===== */}
       <footer className="shrink-0 border-t border-neutral-800 px-3 py-0.5 flex items-center justify-between">
         <span className="text-[10px] text-neutral-700 font-mono">
-          Binance/Coinbase | Open-Meteo | Polymarket + Kalshi
+          Coinbase | Open-Meteo | Kalshi
         </span>
         <div className="flex items-center gap-3">
           <RefreshBar interval={10000} />

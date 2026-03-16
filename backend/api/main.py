@@ -21,7 +21,7 @@ from pydantic import BaseModel
 
 app = FastAPI(
     title="BTC 5-Min Trading Bot",
-    description="Polymarket BTC Up/Down 5-minute market trading bot",
+    description="Kalshi weather and BTC trading bot",
     version="3.0.0"
 )
 
@@ -169,7 +169,7 @@ class WeatherForecastResponse(BaseModel):
 class WeatherMarketResponse(BaseModel):
     slug: str
     market_id: str
-    platform: str = "polymarket"
+    platform: str = "kalshi"
     title: str
     city_key: str
     city_name: str
@@ -384,7 +384,7 @@ def _signal_to_response(s: TradingSignal, actionable: bool = False) -> SignalRes
     return SignalResponse(
         market_ticker=s.market.market_id,
         market_title=f"BTC 5m - {s.market.slug}",
-        platform="polymarket",
+        platform="kalshi",
         direction=s.direction,
         model_probability=s.model_probability,
         market_probability=s.market_probability,
@@ -470,7 +470,7 @@ async def simulate_trade(signal_ticker: str, db: Session = Depends(get_db)):
 
     trade = Trade(
         market_ticker=signal.market.market_id,
-        platform="polymarket",
+        platform="kalshi",
         event_slug=signal.market.slug,
         direction=signal.direction,
         entry_price=entry_price,
@@ -696,21 +696,14 @@ async def get_weather_markets():
         return []
 
     try:
-        from backend.data.weather_markets import fetch_polymarket_weather_markets
+        from backend.data.kalshi_client import kalshi_credentials_present
+        from backend.data.kalshi_markets import fetch_kalshi_weather_markets
 
         city_keys = [c.strip() for c in settings.WEATHER_CITIES.split(",") if c.strip()]
-        markets = await fetch_polymarket_weather_markets(city_keys)
+        markets = []
 
-        # Also fetch Kalshi markets if enabled
-        if settings.KALSHI_ENABLED:
-            try:
-                from backend.data.kalshi_client import kalshi_credentials_present
-                from backend.data.kalshi_markets import fetch_kalshi_weather_markets
-                if kalshi_credentials_present():
-                    kalshi_markets = await fetch_kalshi_weather_markets(city_keys)
-                    markets.extend(kalshi_markets)
-            except Exception:
-                pass
+        if kalshi_credentials_present():
+            markets = await fetch_kalshi_weather_markets(city_keys)
 
         return [
             WeatherMarketResponse(

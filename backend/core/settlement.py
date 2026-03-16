@@ -182,7 +182,7 @@ async def check_weather_settlement(trade: Trade) -> Tuple[bool, Optional[float],
     Check if a weather trade's market has settled.
     Routes to the correct platform's resolution method.
     """
-    platform = getattr(trade, 'platform', 'polymarket') or 'polymarket'
+    platform = getattr(trade, 'platform', 'kalshi') or 'kalshi'
 
     if platform == "kalshi":
         is_resolved, settlement_value = await _fetch_kalshi_resolution(trade.market_ticker)

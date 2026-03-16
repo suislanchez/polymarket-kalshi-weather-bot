@@ -5,13 +5,6 @@
 export function getMarketUrl(platform: string, ticker: string, eventSlug?: string): string {
   const platformLower = platform.toLowerCase()
 
-  if (platformLower === 'polymarket') {
-    if (eventSlug) {
-      return `https://polymarket.com/event/${eventSlug}`
-    }
-    return `https://polymarket.com/event/${ticker}`
-  }
-
   if (platformLower === 'kalshi') {
     return `https://kalshi.com/markets/${ticker}`
   }
@@ -38,11 +31,6 @@ export function formatPercent(value: number, decimals = 1): string {
 }
 
 export const platformStyles: Record<string, { badge: string; icon: string; name: string }> = {
-  polymarket: {
-    badge: 'bg-purple-500/10 text-purple-400 border-purple-500/20',
-    icon: 'P',
-    name: 'Polymarket'
-  },
   kalshi: {
     badge: 'bg-cyan-500/10 text-cyan-400 border-cyan-500/20',
     icon: 'K',

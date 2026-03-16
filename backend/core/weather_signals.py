@@ -7,7 +7,7 @@ from typing import List, Optional
 from backend.config import settings
 from backend.core.signals import calculate_edge, calculate_kelly_size
 from backend.data.weather import fetch_ensemble_forecast, EnsembleForecast, CITY_CONFIG
-from backend.data.weather_markets import WeatherMarket, fetch_polymarket_weather_markets
+from backend.data.weather_markets import WeatherMarket
 from backend.models.database import SessionLocal, Signal
 
 logger = logging.getLogger("trading_bot")
@@ -154,14 +154,6 @@ async def scan_for_weather_signals() -> List[WeatherTradingSignal]:
     logger.info("WEATHER SCAN: Fetching temperature markets...")
 
     markets = []
-
-    # Polymarket
-    try:
-        poly_markets = await fetch_polymarket_weather_markets(city_keys)
-        markets.extend(poly_markets)
-        logger.info(f"Polymarket: {len(poly_markets)} weather markets")
-    except Exception as e:
-        logger.error(f"Failed to fetch Polymarket weather markets: {e}")
 
     # Kalshi
     if settings.KALSHI_ENABLED:

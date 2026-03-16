@@ -130,7 +130,7 @@ async def scan_and_trade_job():
 
                 trade = Trade(
                     market_ticker=signal.market.market_id,
-                    platform="polymarket",
+                    platform=signal.market.platform if hasattr(signal.market, 'platform') else "kalshi",
                     event_slug=signal.market.slug,
                     direction=signal.direction,
                     entry_price=entry_price,
@@ -255,7 +255,7 @@ async def weather_scan_and_trade_job():
 
                 trade = Trade(
                     market_ticker=signal.market.market_id,
-                    platform="polymarket",
+                    platform=signal.market.platform if hasattr(signal.market, 'platform') else "kalshi",
                     event_slug=signal.market.slug,
                     market_type="weather",
                     direction=signal.direction,

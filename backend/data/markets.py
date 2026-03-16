@@ -34,7 +34,7 @@ class MarketData:
 def btc_market_to_market_data(btc: BtcMarket) -> MarketData:
     """Convert a BtcMarket to the generic MarketData format."""
     return MarketData(
-        platform="polymarket",
+        platform="kalshi",
         ticker=btc.market_id,
         title=f"BTC Up or Down 5m - {btc.slug}",
         category="crypto",
