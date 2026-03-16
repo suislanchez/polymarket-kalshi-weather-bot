@@ -9,6 +9,10 @@ PLIST_NAME="com.kalshi.weatherbot"
 PLIST_SRC="$SCRIPT_DIR/$PLIST_NAME.plist"
 PLIST_DEST="$HOME/Library/LaunchAgents/$PLIST_NAME.plist"
 
+FRONTEND_PLIST_NAME="com.kalshi.weatherbot-frontend"
+FRONTEND_PLIST_SRC="$SCRIPT_DIR/$FRONTEND_PLIST_NAME.plist"
+FRONTEND_PLIST_DEST="$HOME/Library/LaunchAgents/$FRONTEND_PLIST_NAME.plist"
+
 echo "=== Kalshi Weather Bot - macOS Service Setup ==="
 echo ""
 echo "Project directory: $SCRIPT_DIR"
@@ -28,28 +32,37 @@ if [ ! -f "$SCRIPT_DIR/.env" ]; then
     fi
 fi
 
-# 2. Install Python dependencies if needed
+# 2. Install dependencies
 echo ""
 echo "Installing Python dependencies..."
 pip3 install -r "$SCRIPT_DIR/requirements.txt" --quiet
 
+echo "Installing frontend dependencies..."
+cd "$SCRIPT_DIR/frontend" && npm install --silent && npm run build && cd "$SCRIPT_DIR"
+
 # 3. Create logs directory
 mkdir -p "$SCRIPT_DIR/logs"
 
-# 4. Unload existing service if running
+# 4. Unload existing services if running
 if launchctl list | grep -q "$PLIST_NAME" 2>/dev/null; then
-    echo "Stopping existing service..."
+    echo "Stopping existing backend service..."
     launchctl unload "$PLIST_DEST" 2>/dev/null || true
 fi
+if launchctl list | grep -q "$FRONTEND_PLIST_NAME" 2>/dev/null; then
+    echo "Stopping existing frontend service..."
+    launchctl unload "$FRONTEND_PLIST_DEST" 2>/dev/null || true
+fi
 
-# 5. Generate plist with correct paths
-echo "Installing LaunchAgent..."
+# 5. Generate plists with correct paths
+echo "Installing LaunchAgents..."
 mkdir -p "$HOME/Library/LaunchAgents"
 sed "s|__INSTALL_DIR__|$SCRIPT_DIR|g" "$PLIST_SRC" > "$PLIST_DEST"
+sed "s|__INSTALL_DIR__|$SCRIPT_DIR|g" "$FRONTEND_PLIST_SRC" > "$FRONTEND_PLIST_DEST"
 
-# 6. Load the service
-echo "Starting service..."
+# 6. Load services
+echo "Starting services..."
 launchctl load "$PLIST_DEST"
+launchctl load "$FRONTEND_PLIST_DEST"
 
 echo ""
 echo "=== Setup Complete ==="
@@ -60,12 +73,14 @@ echo "  - Restart automatically if it crashes"
 echo "  - Keep running after you close the terminal"
 echo ""
 echo "Useful commands:"
-echo "  View status:    launchctl list | grep kalshi"
-echo "  View logs:      tail -f $SCRIPT_DIR/logs/bot-stdout.log"
-echo "  View errors:    tail -f $SCRIPT_DIR/logs/bot-stderr.log"
-echo "  Stop service:   launchctl unload $PLIST_DEST"
-echo "  Start service:  launchctl load $PLIST_DEST"
-echo "  Restart:        launchctl unload $PLIST_DEST && launchctl load $PLIST_DEST"
+echo "  View status:      launchctl list | grep kalshi"
+echo "  Backend logs:     tail -f $SCRIPT_DIR/logs/bot-stdout.log"
+echo "  Frontend logs:    tail -f $SCRIPT_DIR/logs/frontend-stdout.log"
+echo "  Stop backend:     launchctl unload $PLIST_DEST"
+echo "  Stop frontend:    launchctl unload $FRONTEND_PLIST_DEST"
+echo "  Start backend:    launchctl load $PLIST_DEST"
+echo "  Start frontend:   launchctl load $FRONTEND_PLIST_DEST"
 echo ""
-echo "API will be available at: http://localhost:8000"
-echo "API docs at:              http://localhost:8000/docs"
+echo "Dashboard:  http://localhost:3000  (or your Tailscale IP:3000)"
+echo "API:        http://localhost:8000"
+echo "API docs:   http://localhost:8000/docs"

@@ -10,7 +10,7 @@
         <string>__INSTALL_DIR__/frontend/node_modules/.bin/serve</string>
         <string>__INSTALL_DIR__/frontend/dist</string>
         <string>-l</string>
-        <string>3000</string>
+        <string>tcp://0.0.0.0:3000</string>
     </array>
 
     <key>WorkingDirectory</key>
