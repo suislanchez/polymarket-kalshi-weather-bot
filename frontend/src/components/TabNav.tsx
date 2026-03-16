@@ -1,5 +1,4 @@
-import { motion } from 'framer-motion'
-import { BarChart3, CloudSun, Bitcoin, ArrowLeftRight, Settings } from 'lucide-react'
+import { Home, Newspaper, Globe2, Users, TrendingUp } from 'lucide-react'
 
 export type TabId = 'overview' | 'weather' | 'btc' | 'trades' | 'system'
 
@@ -11,12 +10,12 @@ interface Props {
   pendingTrades?: number
 }
 
-const tabs: { id: TabId; label: string; icon: typeof BarChart3 }[] = [
-  { id: 'overview', label: 'Overview', icon: BarChart3 },
-  { id: 'weather', label: 'Weather', icon: CloudSun },
-  { id: 'btc', label: 'BTC', icon: Bitcoin },
-  { id: 'trades', label: 'Trades', icon: ArrowLeftRight },
-  { id: 'system', label: 'System', icon: Settings },
+const tabs: { id: TabId; label: string; icon: typeof Home }[] = [
+  { id: 'overview', label: 'Home', icon: Home },
+  { id: 'weather', label: 'Weather', icon: Globe2 },
+  { id: 'btc', label: 'Markets', icon: TrendingUp },
+  { id: 'trades', label: 'Trades', icon: Newspaper },
+  { id: 'system', label: 'System', icon: Users },
 ]
 
 export function TabNav({ activeTab, onTabChange, weatherCount, btcCount, pendingTrades }: Props) {
@@ -28,7 +27,7 @@ export function TabNav({ activeTab, onTabChange, weatherCount, btcCount, pending
   }
 
   return (
-    <nav className="flex border-b border-neutral-800 bg-[#0a0a0a] overflow-x-auto">
+    <nav className="yf-bottom-nav">
       {tabs.map((tab) => {
         const Icon = tab.icon
         const isActive = activeTab === tab.id
@@ -38,26 +37,15 @@ export function TabNav({ activeTab, onTabChange, weatherCount, btcCount, pending
           <button
             key={tab.id}
             onClick={() => onTabChange(tab.id)}
-            className={`relative flex items-center gap-1.5 px-4 py-3 text-xs font-medium uppercase tracking-wider whitespace-nowrap transition-colors ${
-              isActive
-                ? 'text-white'
-                : 'text-neutral-500 hover:text-neutral-300'
-            }`}
+            className={`yf-nav-item ${isActive ? 'active' : ''}`}
           >
-            <Icon className="w-3.5 h-3.5" />
-            <span>{tab.label}</span>
-            {badge !== undefined && badge > 0 && (
-              <span className="ml-1 px-1.5 py-0.5 text-[9px] font-bold bg-green-500/20 text-green-400 rounded-full">
-                {badge}
-              </span>
-            )}
-            {isActive && (
-              <motion.div
-                layoutId="tab-indicator"
-                className="absolute bottom-0 left-0 right-0 h-0.5 bg-green-500"
-                transition={{ type: 'spring', stiffness: 500, damping: 30 }}
-              />
-            )}
+            <div className="relative">
+              <Icon className="w-5 h-5" strokeWidth={isActive ? 2.5 : 1.5} />
+              {badge !== undefined && badge > 0 && (
+                <span className="yf-nav-badge">{badge}</span>
+              )}
+            </div>
+            <span className="yf-nav-label">{tab.label}</span>
           </button>
         )
       })}

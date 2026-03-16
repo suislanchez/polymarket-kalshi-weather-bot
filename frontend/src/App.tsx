@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { fetchDashboard, runScan, simulateTrade, startBot, stopBot } from './api'
 import { TabNav, type TabId } from './components/TabNav'
@@ -7,12 +7,14 @@ import { WeatherTab } from './components/WeatherTab'
 import { BtcTab } from './components/BtcTab'
 import { TradesTab } from './components/TradesTab'
 import { SystemTab } from './components/SystemTab'
+import { Bell, User } from 'lucide-react'
 
 function App() {
   const queryClient = useQueryClient()
   const [activeTab, setActiveTab] = useState<TabId>('overview')
   const [weatherEnabled, setWeatherEnabled] = useState(true)
   const [btcEnabled, setBtcEnabled] = useState(true)
+  const [lastUpdated, setLastUpdated] = useState<Date>(new Date())
 
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['dashboard'],
@@ -21,6 +23,10 @@ function App() {
     retry: 3,
     retryDelay: 2000,
   })
+
+  useEffect(() => {
+    if (data) setLastUpdated(new Date())
+  }, [data])
 
   const scanMutation = useMutation({
     mutationFn: runScan,
@@ -45,28 +51,28 @@ function App() {
   // Loading state
   if (isLoading && !data) {
     return (
-      <div className="h-screen bg-black flex items-center justify-center">
+      <div className="h-screen bg-[#121216] flex items-center justify-center">
         <div className="text-center">
           <div className="relative w-10 h-10 mx-auto mb-4">
             <div className="absolute inset-0 border-2 border-neutral-800 rounded-full" />
-            <div className="absolute inset-0 border-2 border-transparent border-t-green-500 rounded-full animate-spin" />
+            <div className="absolute inset-0 border-2 border-transparent border-t-[#7B61FF] rounded-full animate-spin" />
           </div>
-          <div className="text-[10px] text-neutral-500 uppercase tracking-widest font-mono">Connecting...</div>
+          <div className="text-[11px] text-neutral-500 font-medium">Loading Dashboard...</div>
         </div>
       </div>
     )
   }
 
-  // Error state (only if we have no data at all)
+  // Error state
   if (error && !data) {
     return (
-      <div className="h-screen bg-black flex items-center justify-center">
+      <div className="h-screen bg-[#121216] flex items-center justify-center">
         <div className="text-center px-6">
-          <div className="text-red-500 text-sm uppercase mb-2 tracking-wider font-medium">Connection Error</div>
-          <div className="text-neutral-600 text-xs mb-4 max-w-xs mx-auto">{String(error)}</div>
+          <div className="text-red-500 text-sm font-semibold mb-2">Connection Error</div>
+          <div className="text-neutral-500 text-xs mb-4 max-w-xs mx-auto">{String(error)}</div>
           <button
             onClick={() => refetch()}
-            className="px-4 py-2 bg-neutral-900 border border-neutral-700 text-neutral-300 text-xs uppercase tracking-wider rounded hover:bg-neutral-800 transition-colors"
+            className="px-5 py-2.5 bg-[#7B61FF] text-white text-xs font-semibold rounded-full hover:bg-[#6B51EF] transition-colors"
           >
             Retry
           </button>
@@ -96,40 +102,36 @@ function App() {
   const btcActionable = btcSignals.filter(s => s.actionable).length
 
   return (
-    <div className="h-screen bg-black text-neutral-200 flex flex-col overflow-hidden">
+    <div className="h-screen bg-[#121216] text-white flex flex-col overflow-hidden">
+      {/* Status Bar */}
+      <div className="yf-status-bar">
+        <div className={`yf-status-dot ${stats.is_running ? 'running' : ''}`} />
+        <span>
+          {stats.is_running ? 'BOT RUNNING' : 'BOT IDLE'}
+          {stats.is_running && ' \u2022 Auto-refreshing every 10s'}
+        </span>
+      </div>
+
       {/* Header */}
-      <header className="shrink-0 border-b border-neutral-800 px-4 py-3 flex items-center justify-between bg-[#0a0a0a]">
-        <div className="flex items-center gap-3">
-          <h1 className="text-sm font-semibold tracking-wider uppercase">Kalshi Bot</h1>
-          <div className={`flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[9px] font-medium ${
-            stats.is_running
-              ? 'bg-green-500/10 text-green-400'
-              : 'bg-neutral-800 text-neutral-500'
-          }`}>
-            <div className={`w-1.5 h-1.5 rounded-full ${stats.is_running ? 'bg-green-500 animate-pulse' : 'bg-neutral-600'}`} />
-            {stats.is_running ? 'Live' : 'Idle'}
-          </div>
+      <header className="yf-header">
+        <div className="yf-search-bar">
+          <svg className="w-4 h-4 text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+          </svg>
+          <span className="text-neutral-500 text-sm">Search signals or markets</span>
         </div>
-        <div className="flex items-center gap-4">
-          <div className="text-right hidden sm:block">
-            <div className="text-xs font-mono text-neutral-300 tabular-nums">
-              ${stats.bankroll.toLocaleString('en-US', { minimumFractionDigits: 0 })}
-            </div>
-            <div className={`text-[10px] font-mono tabular-nums ${stats.total_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-              {stats.total_pnl >= 0 ? '+' : ''}${stats.total_pnl.toFixed(2)}
-            </div>
-          </div>
+        <div className="flex items-center gap-3">
+          <button className="yf-icon-btn relative">
+            <Bell className="w-5 h-5" />
+            {(wxActionable + btcActionable) > 0 && (
+              <span className="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 bg-red-500 rounded-full border-2 border-[#121216]" />
+            )}
+          </button>
+          <button className="yf-icon-btn">
+            <User className="w-5 h-5" />
+          </button>
         </div>
       </header>
-
-      {/* Tab Navigation */}
-      <TabNav
-        activeTab={activeTab}
-        onTabChange={setActiveTab}
-        weatherCount={wxActionable}
-        btcCount={btcActionable}
-        pendingTrades={pendingTrades}
-      />
 
       {/* Tab Content */}
       <main className="flex-1 min-h-0 overflow-hidden">
@@ -144,6 +146,8 @@ function App() {
             onStop={() => stopMutation.mutate()}
             onScan={() => scanMutation.mutate()}
             isScanning={scanMutation.isPending}
+            lastUpdated={lastUpdated}
+            btcPrice={data?.btc_price ?? null}
           />
         )}
         {activeTab === 'weather' && (
@@ -177,6 +181,15 @@ function App() {
           />
         )}
       </main>
+
+      {/* Bottom Tab Navigation */}
+      <TabNav
+        activeTab={activeTab}
+        onTabChange={setActiveTab}
+        weatherCount={wxActionable}
+        btcCount={btcActionable}
+        pendingTrades={pendingTrades}
+      />
     </div>
   )
 }

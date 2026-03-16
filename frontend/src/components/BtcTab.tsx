@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Bitcoin, ChevronDown, ChevronUp, TrendingUp, TrendingDown } from 'lucide-react'
+import { ChevronDown, ChevronUp, TrendingUp, TrendingDown } from 'lucide-react'
 import type { Signal, BtcPrice, Microstructure, BtcWindow } from '../types'
 import { formatCountdown } from '../utils'
 
@@ -18,38 +18,39 @@ interface Props {
 function PriceCard({ btcPrice, micro }: { btcPrice: BtcPrice | null; micro: Microstructure | null }) {
   const price = micro?.price || btcPrice?.price || 0
   const change = btcPrice?.change_24h || 0
+  const isUp = change >= 0
 
   return (
-    <div className="bg-[#111] border border-neutral-800 rounded-lg p-4">
+    <div className="yf-card p-4">
       <div className="flex items-center justify-between">
         <div>
-          <div className="text-[10px] text-neutral-500 uppercase tracking-wider mb-1">BTC Price</div>
-          <div className="text-2xl font-mono font-semibold text-white tabular-nums">
+          <div className="text-[12px] text-neutral-500 font-medium mb-1">Bitcoin</div>
+          <div className="text-[28px] font-bold text-white tabular-nums leading-none">
             ${price.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
           </div>
-        </div>
-        <div className={`flex items-center gap-1 text-sm font-mono ${change >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-          {change >= 0 ? <TrendingUp className="w-4 h-4" /> : <TrendingDown className="w-4 h-4" />}
-          {change >= 0 ? '+' : ''}{change.toFixed(2)}%
+          <div className={`text-[14px] font-medium tabular-nums mt-1 ${isUp ? 'text-[#00C805]' : 'text-[#FF3B30]'}`}>
+            {isUp ? <TrendingUp className="w-3.5 h-3.5 inline mr-1" /> : <TrendingDown className="w-3.5 h-3.5 inline mr-1" />}
+            {isUp ? '+' : ''}{change.toFixed(2)}%
+          </div>
         </div>
       </div>
       {micro && (
-        <div className="grid grid-cols-3 gap-3 mt-3 pt-3 border-t border-neutral-800">
+        <div className="grid grid-cols-3 gap-3 mt-4 pt-3 border-t border-[#2A2A2E]">
           <div>
-            <span className="text-[10px] text-neutral-600 block">RSI</span>
-            <span className={`text-xs font-mono ${micro.rsi > 70 ? 'text-red-400' : micro.rsi < 30 ? 'text-green-400' : 'text-neutral-300'}`}>
+            <span className="text-[11px] text-neutral-500 block">RSI</span>
+            <span className={`text-[14px] font-semibold tabular-nums ${micro.rsi > 70 ? 'text-[#FF3B30]' : micro.rsi < 30 ? 'text-[#00C805]' : 'text-white'}`}>
               {micro.rsi.toFixed(0)}
             </span>
           </div>
           <div>
-            <span className="text-[10px] text-neutral-600 block">Momentum</span>
-            <span className={`text-xs font-mono ${micro.momentum_5m >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+            <span className="text-[11px] text-neutral-500 block">Momentum</span>
+            <span className={`text-[14px] font-semibold tabular-nums ${micro.momentum_5m >= 0 ? 'text-[#00C805]' : 'text-[#FF3B30]'}`}>
               {micro.momentum_5m >= 0 ? '+' : ''}{(micro.momentum_5m * 100).toFixed(2)}%
             </span>
           </div>
           <div>
-            <span className="text-[10px] text-neutral-600 block">Volatility</span>
-            <span className="text-xs font-mono text-neutral-300">{(micro.volatility * 100).toFixed(3)}%</span>
+            <span className="text-[11px] text-neutral-500 block">Volatility</span>
+            <span className="text-[14px] font-semibold text-white tabular-nums">{(micro.volatility * 100).toFixed(3)}%</span>
           </div>
         </div>
       )}
@@ -57,26 +58,27 @@ function PriceCard({ btcPrice, micro }: { btcPrice: BtcPrice | null; micro: Micr
   )
 }
 
-function WindowPill({ window: w }: { window: BtcWindow }) {
-  const [countdown, setCountdown] = useState(w.time_until_end)
-
-  useState(() => {
-    const interval = setInterval(() => {
-      setCountdown(prev => Math.max(0, prev - 1))
-    }, 1000)
-    return () => clearInterval(interval)
-  })
-
+function WindowRow({ window: w }: { window: BtcWindow }) {
   return (
-    <div className={`flex items-center gap-3 px-3 py-2 border rounded-lg ${
-      w.is_active ? 'border-amber-500/30 bg-amber-500/5' : 'border-neutral-800 bg-[#111]'
-    }`}>
-      {w.is_active && <span className="text-[9px] font-bold text-amber-400 uppercase">Live</span>}
-      {w.is_upcoming && <span className="text-[9px] font-medium text-blue-400 uppercase">Next</span>}
-      <span className="text-xs tabular-nums text-green-400 font-mono">{(w.up_price * 100).toFixed(0)}c</span>
-      <span className="text-neutral-600 text-xs">/</span>
-      <span className="text-xs tabular-nums text-red-400 font-mono">{(w.down_price * 100).toFixed(0)}c</span>
-      <span className="text-xs tabular-nums text-neutral-500 font-mono ml-auto">{formatCountdown(countdown)}</span>
+    <div className="yf-market-row">
+      <div className="flex items-center gap-2.5">
+        <span className={`w-2 h-2 rounded-full ${w.is_active ? 'bg-amber-500' : 'bg-blue-500'}`} />
+        <div>
+          <div className="text-[13px] font-semibold text-white">
+            {w.is_active && <span className="text-amber-400 mr-1">LIVE</span>}
+            {w.is_upcoming && <span className="text-blue-400 mr-1">NEXT</span>}
+            Window
+          </div>
+        </div>
+      </div>
+      <div className="flex items-center gap-4">
+        <span className="text-[13px] tabular-nums">
+          <span className="text-[#00C805]">{(w.up_price * 100).toFixed(0)}c</span>
+          <span className="text-neutral-600 mx-1">/</span>
+          <span className="text-[#FF3B30]">{(w.down_price * 100).toFixed(0)}c</span>
+        </span>
+        <span className="text-[12px] tabular-nums text-neutral-500">{formatCountdown(w.time_until_end)}</span>
+      </div>
     </div>
   )
 }
@@ -86,37 +88,39 @@ function SignalRow({ signal, onTrade, isSimulating }: { signal: Signal; onTrade:
   const isUp = signal.direction === 'up'
 
   return (
-    <div className={`border-b border-neutral-800/50 ${signal.actionable ? '' : 'opacity-40'}`}>
+    <div className={signal.actionable ? '' : 'opacity-40'}>
       <div
-        className="flex items-center py-3 px-3 cursor-pointer hover:bg-neutral-800/20 transition-colors"
+        className="yf-trending-row cursor-pointer"
         onClick={() => setExpanded(!expanded)}
       >
         <div className="flex-1 min-w-0">
-          <div className="text-sm text-neutral-200 font-mono truncate">
+          <div className="text-[14px] font-bold text-white truncate">
             {(signal.event_slug || signal.market_ticker).replace('btc-updown-5m-', '')}
           </div>
         </div>
         <div className="flex items-center gap-3 shrink-0">
-          <span className={`text-[10px] font-semibold uppercase px-1.5 py-0.5 rounded ${
-            isUp ? 'text-green-400 bg-green-500/10' : 'text-red-400 bg-red-500/10'
+          <span className={`text-[11px] font-bold uppercase px-2 py-0.5 rounded ${
+            isUp ? 'text-[#00C805] bg-[#00C805]/10' : 'text-[#FF3B30] bg-[#FF3B30]/10'
           }`}>
             {signal.direction}
           </span>
-          <span className={`text-sm font-mono font-semibold w-14 text-right ${
-            signal.edge > 0.02 ? 'text-green-400' : 'text-neutral-400'
-          }`}>
-            {(Math.abs(signal.edge) * 100).toFixed(1)}%
-          </span>
+          <div className="text-right w-14">
+            <div className={`text-[14px] font-semibold tabular-nums ${
+              signal.edge > 0.02 ? 'text-[#00C805]' : 'text-neutral-400'
+            }`}>
+              {(Math.abs(signal.edge) * 100).toFixed(1)}%
+            </div>
+          </div>
           {signal.actionable && (
             <button
               onClick={(e) => { e.stopPropagation(); onTrade(signal.market_ticker) }}
               disabled={isSimulating}
-              className="px-2 py-1 text-[9px] font-medium uppercase bg-amber-500/10 text-amber-400 border border-amber-500/20 rounded hover:bg-amber-500/20 disabled:opacity-50"
+              className="px-3 py-1.5 text-[11px] font-bold bg-[#7B61FF] text-white rounded-full hover:bg-[#6B51EF] disabled:opacity-50 transition-colors"
             >
               Trade
             </button>
           )}
-          {expanded ? <ChevronUp className="w-3 h-3 text-neutral-600" /> : <ChevronDown className="w-3 h-3 text-neutral-600" />}
+          {expanded ? <ChevronUp className="w-4 h-4 text-neutral-500" /> : <ChevronDown className="w-4 h-4 text-neutral-500" />}
         </div>
       </div>
       <AnimatePresence>
@@ -127,8 +131,8 @@ function SignalRow({ signal, onTrade, isSimulating }: { signal: Signal; onTrade:
             exit={{ height: 0, opacity: 0 }}
             className="overflow-hidden"
           >
-            <div className="px-3 pb-3 text-[10px] text-neutral-500 font-mono bg-neutral-900 mx-3 mb-3 p-2 rounded leading-relaxed">
-              {signal.reasoning}
+            <div className="px-4 pb-3">
+              <div className="yf-reasoning">{signal.reasoning}</div>
             </div>
           </motion.div>
         )}
@@ -145,37 +149,32 @@ export function BtcTab({ signals, btcPrice, microstructure, windows, enabled, on
   })
 
   return (
-    <div className="overflow-y-auto max-h-[calc(100vh-120px)]">
+    <div className="overflow-y-auto h-full pb-4">
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-800">
-        <div className="flex items-center gap-2">
-          <Bitcoin className="w-4 h-4 text-amber-400" />
-          <span className="text-sm font-medium">BTC 5-Min Markets</span>
-          <span className="text-[10px] text-neutral-500">{actionable.length} actionable / {signals.length} total</span>
+      <div className="flex items-center justify-between px-4 py-3">
+        <div>
+          <h2 className="text-[18px] font-bold text-white">BTC 5-Min Markets</h2>
+          <p className="text-[12px] text-neutral-500">{actionable.length} actionable / {signals.length} total signals</p>
         </div>
         <button
           onClick={onToggle}
-          className={`px-3 py-1 text-[10px] font-medium uppercase rounded-full border transition-colors ${
-            enabled
-              ? 'bg-green-500/10 text-green-400 border-green-500/20 hover:bg-green-500/20'
-              : 'bg-neutral-800 text-neutral-500 border-neutral-700 hover:bg-neutral-700'
-          }`}
+          className={`yf-toggle ${enabled ? 'active' : ''}`}
         >
-          {enabled ? 'Enabled' : 'Disabled'}
+          {enabled ? 'ON' : 'OFF'}
         </button>
       </div>
 
-      <div className="p-4 space-y-4">
+      <div className="px-4 space-y-3">
         {/* Price Card */}
         <PriceCard btcPrice={btcPrice} micro={microstructure} />
 
         {/* Windows */}
         {windows.length > 0 && (
           <div>
-            <h3 className="text-[10px] text-neutral-500 uppercase tracking-wider font-medium mb-2">Active Windows</h3>
-            <div className="space-y-2">
+            <h3 className="text-xs font-bold text-neutral-400 uppercase tracking-wider mb-2 px-1">Active Windows</h3>
+            <div className="yf-card">
               {windows.slice(0, 6).map(w => (
-                <WindowPill key={w.slug} window={w} />
+                <WindowRow key={w.slug} window={w} />
               ))}
             </div>
           </div>
@@ -183,20 +182,20 @@ export function BtcTab({ signals, btcPrice, microstructure, windows, enabled, on
       </div>
 
       {/* Signals */}
-      <div className="px-4 pt-2 pb-1">
-        <h3 className="text-[10px] text-neutral-500 uppercase tracking-wider font-medium">Signals</h3>
+      <div className="mx-4 mt-3">
+        <h3 className="text-xs font-bold text-neutral-400 uppercase tracking-wider mb-2 px-1">Signals</h3>
+        <div className="yf-card">
+          {sorted.length > 0 ? (
+            sorted.map(s => (
+              <SignalRow key={s.market_ticker} signal={s} onTrade={onSimulateTrade} isSimulating={isSimulating} />
+            ))
+          ) : (
+            <div className="px-4 py-8 text-center text-neutral-500 text-sm">
+              No BTC signals found
+            </div>
+          )}
+        </div>
       </div>
-      {sorted.length > 0 ? (
-        <div>
-          {sorted.map(s => (
-            <SignalRow key={s.market_ticker} signal={s} onTrade={onSimulateTrade} isSimulating={isSimulating} />
-          ))}
-        </div>
-      ) : (
-        <div className="flex items-center justify-center py-12 text-neutral-600 text-xs">
-          No BTC signals found
-        </div>
-      )}
     </div>
   )
 }

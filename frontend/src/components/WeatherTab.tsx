@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { CloudSun, ChevronDown, ChevronUp, Thermometer } from 'lucide-react'
+import { ChevronDown, ChevronUp } from 'lucide-react'
 import type { WeatherSignal, WeatherForecast } from '../types'
 
 interface Props {
@@ -10,41 +10,29 @@ interface Props {
   onToggle: () => void
 }
 
-function ForecastCard({ forecast, signals }: { forecast: WeatherForecast; signals: WeatherSignal[] }) {
+function ForecastRow({ forecast, signals }: { forecast: WeatherForecast; signals: WeatherSignal[] }) {
   const citySignals = signals.filter(s => s.city_key === forecast.city_key)
   const actionable = citySignals.filter(s => s.actionable)
   const bestEdge = actionable.length > 0 ? Math.max(...actionable.map(s => Math.abs(s.edge))) : 0
 
   return (
-    <div className={`bg-[#111] border rounded-lg p-3 ${actionable.length > 0 ? 'border-green-500/30' : 'border-neutral-800'}`}>
-      <div className="flex items-center justify-between mb-2">
-        <div className="flex items-center gap-2">
-          <Thermometer className="w-3.5 h-3.5 text-cyan-400" />
-          <span className="text-sm font-medium text-neutral-200">{forecast.city_name}</span>
+    <div className="yf-market-row">
+      <div className="flex items-center gap-2.5 flex-1 min-w-0">
+        <span className={`w-2 h-2 rounded-full ${actionable.length > 0 ? 'bg-[#00C805]' : 'bg-neutral-600'}`} />
+        <div className="min-w-0">
+          <div className="text-[14px] font-semibold text-white truncate">{forecast.city_name}</div>
+          <div className="text-[11px] text-neutral-500">
+            {forecast.mean_high.toFixed(0)}F hi \u00B7 {forecast.mean_low.toFixed(0)}F lo \u00B7 {(forecast.ensemble_agreement * 100).toFixed(0)}% agree
+          </div>
         </div>
-        {actionable.length > 0 && (
-          <span className="px-2 py-0.5 text-[9px] font-bold bg-green-500/15 text-green-400 rounded-full border border-green-500/20">
-            {actionable.length} signal{actionable.length !== 1 ? 's' : ''}
-          </span>
-        )}
       </div>
-      <div className="grid grid-cols-3 gap-2 text-[11px]">
-        <div>
-          <span className="text-neutral-600 block">High</span>
-          <span className="text-neutral-200 font-mono">{forecast.mean_high.toFixed(0)}F <span className="text-neutral-500">+/-{forecast.std_high.toFixed(1)}</span></span>
-        </div>
-        <div>
-          <span className="text-neutral-600 block">Agreement</span>
-          <span className={`font-mono ${forecast.ensemble_agreement > 0.7 ? 'text-green-400' : 'text-amber-400'}`}>
-            {(forecast.ensemble_agreement * 100).toFixed(0)}%
-          </span>
-        </div>
-        <div>
-          <span className="text-neutral-600 block">Best Edge</span>
-          <span className={`font-mono ${bestEdge > 0.08 ? 'text-green-400' : 'text-neutral-500'}`}>
-            {bestEdge > 0 ? `${(bestEdge * 100).toFixed(1)}%` : '-'}
-          </span>
-        </div>
+      <div className="text-right shrink-0">
+        <div className="text-[14px] font-medium text-white tabular-nums">{forecast.mean_high.toFixed(1)}F</div>
+        {bestEdge > 0 ? (
+          <span className="text-[12px] font-medium text-[#00C805] tabular-nums">+{(bestEdge * 100).toFixed(1)}%</span>
+        ) : (
+          <span className="text-[12px] text-neutral-600">-</span>
+        )}
       </div>
     </div>
   )
@@ -55,32 +43,29 @@ function SignalRow({ signal }: { signal: WeatherSignal }) {
   const isUp = signal.direction === 'above' || signal.direction === 'yes'
 
   return (
-    <div className={`border-b border-neutral-800/50 ${signal.actionable ? '' : 'opacity-40'}`}>
+    <div className={signal.actionable ? '' : 'opacity-40'}>
       <div
-        className="flex items-center py-3 px-3 cursor-pointer hover:bg-neutral-800/20 transition-colors"
+        className="yf-trending-row cursor-pointer"
         onClick={() => setExpanded(!expanded)}
       >
         <div className="flex-1 min-w-0">
-          <div className="text-sm text-neutral-200 truncate">
-            {signal.city_name}: {signal.metric} {signal.direction} {signal.threshold_f.toFixed(0)}F
+          <div className="text-[14px] font-bold text-white truncate">
+            {signal.city_name}: {signal.threshold_f.toFixed(0)}F
           </div>
-          <div className="text-[10px] text-neutral-600 mt-0.5">{signal.target_date}</div>
+          <div className="text-[12px] text-neutral-500 truncate">
+            {signal.metric} {signal.direction} \u00B7 {signal.target_date}
+          </div>
         </div>
-        <div className="flex items-center gap-4 shrink-0">
-          <span className={`text-[10px] font-semibold uppercase px-1.5 py-0.5 rounded ${
-            isUp ? 'text-green-400 bg-green-500/10' : 'text-red-400 bg-red-500/10'
-          }`}>
-            {signal.direction}
-          </span>
-          <span className={`text-sm font-mono font-semibold w-14 text-right ${
-            signal.edge > 0.08 ? 'text-green-400' : signal.edge > 0 ? 'text-neutral-400' : 'text-red-400'
-          }`}>
-            {(Math.abs(signal.edge) * 100).toFixed(1)}%
-          </span>
-          <span className="text-blue-400 font-mono text-xs w-12 text-right">
-            {signal.suggested_size > 0 ? `$${signal.suggested_size.toFixed(0)}` : '-'}
-          </span>
-          {expanded ? <ChevronUp className="w-3 h-3 text-neutral-600" /> : <ChevronDown className="w-3 h-3 text-neutral-600" />}
+        <div className="flex items-center gap-3 shrink-0">
+          <div className="text-right">
+            <div className="text-[14px] font-semibold tabular-nums text-white">
+              {(Math.abs(signal.edge) * 100).toFixed(1)}%
+            </div>
+            <div className={`text-[12px] font-medium ${isUp ? 'text-[#00C805]' : 'text-[#FF3B30]'}`}>
+              {signal.suggested_size > 0 ? `$${signal.suggested_size.toFixed(0)}` : '-'}
+            </div>
+          </div>
+          {expanded ? <ChevronUp className="w-4 h-4 text-neutral-500" /> : <ChevronDown className="w-4 h-4 text-neutral-500" />}
         </div>
       </div>
       <AnimatePresence>
@@ -91,28 +76,26 @@ function SignalRow({ signal }: { signal: WeatherSignal }) {
             exit={{ height: 0, opacity: 0 }}
             className="overflow-hidden"
           >
-            <div className="px-3 pb-3 space-y-2">
-              <div className="grid grid-cols-2 gap-3 text-[11px]">
-                <div>
-                  <span className="text-neutral-600">Model probability</span>
-                  <span className="text-neutral-200 font-mono block">{(signal.model_probability * 100).toFixed(0)}%</span>
+            <div className="px-4 pb-3 space-y-2">
+              <div className="grid grid-cols-2 gap-3">
+                <div className="yf-detail-item">
+                  <span className="yf-detail-label">Model prob</span>
+                  <span className="yf-detail-value">{(signal.model_probability * 100).toFixed(0)}%</span>
                 </div>
-                <div>
-                  <span className="text-neutral-600">Market price</span>
-                  <span className="text-neutral-200 font-mono block">{(signal.market_probability * 100).toFixed(0)}%</span>
+                <div className="yf-detail-item">
+                  <span className="yf-detail-label">Market price</span>
+                  <span className="yf-detail-value">{(signal.market_probability * 100).toFixed(0)}%</span>
                 </div>
-                <div>
-                  <span className="text-neutral-600">Ensemble</span>
-                  <span className="text-neutral-200 font-mono block">{signal.ensemble_mean.toFixed(1)}F +/-{signal.ensemble_std.toFixed(1)} ({signal.ensemble_members}m)</span>
+                <div className="yf-detail-item">
+                  <span className="yf-detail-label">Ensemble</span>
+                  <span className="yf-detail-value">{signal.ensemble_mean.toFixed(1)}F +/-{signal.ensemble_std.toFixed(1)}</span>
                 </div>
-                <div>
-                  <span className="text-neutral-600">Confidence</span>
-                  <span className="text-neutral-200 font-mono block">{(signal.confidence * 100).toFixed(0)}%</span>
+                <div className="yf-detail-item">
+                  <span className="yf-detail-label">Confidence</span>
+                  <span className="yf-detail-value">{(signal.confidence * 100).toFixed(0)}%</span>
                 </div>
               </div>
-              <div className="text-[10px] text-neutral-500 font-mono bg-neutral-900 p-2 rounded leading-relaxed">
-                {signal.reasoning}
-              </div>
+              <div className="yf-reasoning">{signal.reasoning}</div>
             </div>
           </motion.div>
         )}
@@ -129,53 +112,46 @@ export function WeatherTab({ signals, forecasts, enabled, onToggle }: Props) {
   })
 
   return (
-    <div className="overflow-y-auto max-h-[calc(100vh-120px)]">
+    <div className="overflow-y-auto h-full pb-4">
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-800">
-        <div className="flex items-center gap-2">
-          <CloudSun className="w-4 h-4 text-cyan-400" />
-          <span className="text-sm font-medium">Weather Markets</span>
-          <span className="text-[10px] text-neutral-500">{actionable.length} actionable / {signals.length} total</span>
+      <div className="flex items-center justify-between px-4 py-3">
+        <div>
+          <h2 className="text-[18px] font-bold text-white">Weather Markets</h2>
+          <p className="text-[12px] text-neutral-500">{actionable.length} actionable / {signals.length} total signals</p>
         </div>
         <button
           onClick={onToggle}
-          className={`px-3 py-1 text-[10px] font-medium uppercase rounded-full border transition-colors ${
-            enabled
-              ? 'bg-green-500/10 text-green-400 border-green-500/20 hover:bg-green-500/20'
-              : 'bg-neutral-800 text-neutral-500 border-neutral-700 hover:bg-neutral-700'
-          }`}
+          className={`yf-toggle ${enabled ? 'active' : ''}`}
         >
-          {enabled ? 'Enabled' : 'Disabled'}
+          {enabled ? 'ON' : 'OFF'}
         </button>
       </div>
 
-      {/* Forecast Cards */}
+      {/* Forecasts */}
       {forecasts.length > 0 && (
-        <div className="p-4 space-y-2">
-          <h3 className="text-[10px] text-neutral-500 uppercase tracking-wider font-medium">Forecasts</h3>
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
+        <div className="mx-4 mb-3">
+          <h3 className="text-xs font-bold text-neutral-400 uppercase tracking-wider mb-2 px-1">Forecasts</h3>
+          <div className="yf-card">
             {forecasts.map(f => (
-              <ForecastCard key={f.city_key} forecast={f} signals={signals} />
+              <ForecastRow key={f.city_key} forecast={f} signals={signals} />
             ))}
           </div>
         </div>
       )}
 
-      {/* Signals List */}
-      <div className="px-4 pt-2 pb-1">
-        <h3 className="text-[10px] text-neutral-500 uppercase tracking-wider font-medium">Signals</h3>
+      {/* Signals */}
+      <div className="mx-4">
+        <h3 className="text-xs font-bold text-neutral-400 uppercase tracking-wider mb-2 px-1">Signals</h3>
+        <div className="yf-card">
+          {sorted.length > 0 ? (
+            sorted.map(s => <SignalRow key={s.market_id} signal={s} />)
+          ) : (
+            <div className="px-4 py-8 text-center text-neutral-500 text-sm">
+              No weather signals found
+            </div>
+          )}
+        </div>
       </div>
-      {sorted.length > 0 ? (
-        <div>
-          {sorted.map(s => (
-            <SignalRow key={s.market_id} signal={s} />
-          ))}
-        </div>
-      ) : (
-        <div className="flex items-center justify-center py-12 text-neutral-600 text-xs">
-          No weather signals found
-        </div>
-      )}
     </div>
   )
 }
