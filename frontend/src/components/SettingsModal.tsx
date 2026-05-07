@@ -265,7 +265,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                     <div>
                       <label className="text-[10px] text-neutral-400">Simulation Mode</label>
                       <p className="text-[9px] text-neutral-600 mt-0.5">
-                        {simulationMode ? 'No real orders placed' : 'Live trading — real fills via Kalshi API'}
+                        {simulationMode ? 'Paper mode — no real orders placed' : 'Unsupported — live Kalshi order execution is not implemented'}
                       </p>
                     </div>
                     <button

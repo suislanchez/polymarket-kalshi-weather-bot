@@ -84,7 +84,7 @@ def test_inv369_local_credential_write_preserves_env_content_uses_0600_and_redac
         json={
             "key_id": "local-key-id",
             "private_key_pem": pem,
-            "simulation_mode": False,
+            "simulation_mode": True,
             "initial_bankroll": 12345,
             "min_edge": 0.12,
             "max_trade_size": 77,

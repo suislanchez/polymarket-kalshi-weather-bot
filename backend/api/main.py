@@ -416,6 +416,8 @@ async def get_settings():
         "initial_bankroll": settings.INITIAL_BANKROLL,
         "weather_min_edge_threshold": settings.WEATHER_MIN_EDGE_THRESHOLD,
         "weather_max_trade_size": settings.WEATHER_MAX_TRADE_SIZE,
+        "weather_max_entry_price": settings.WEATHER_MAX_ENTRY_PRICE,
+        "live_trading_supported": False,
     }
 
 
@@ -462,6 +464,12 @@ async def update_settings(payload: dict, request: Request):
 
     key_id = payload.get("key_id")
     private_key_pem = payload.get("private_key_pem")
+
+    if payload.get("simulation_mode") is False:
+        raise HTTPException(
+            status_code=422,
+            detail="Weather Edge is paper-only: live Kalshi order execution is not implemented",
+        )
 
     numeric_updates = []
     for payload_key, setting_name, env_key, min_value, max_value in [

@@ -560,3 +560,85 @@ def test_scheduler_caps_new_weather_trades_against_remaining_allocation(monkeypa
     assert len(trades) == 1
     assert sum(t.size for t in trades) <= 50.0
     assert trades[0].size == 50.0
+
+
+def test_backend_rejects_unsupported_live_trading_mode(tmp_path, monkeypatch):
+    env_path = tmp_path / ".env"
+    api_dir = tmp_path / "backend" / "api"
+    api_dir.mkdir(parents=True)
+    fake_main = api_dir / "main.py"
+    fake_main.write_text("# fake module path for settings tests\n")
+    monkeypatch.setattr(api_main, "__file__", str(fake_main))
+    env_path.write_text("SIMULATION_MODE=True\n")
+
+    old_sim = api_main.settings.SIMULATION_MODE
+    client = TestClient(app, client=("127.0.0.1", 12345))
+
+    response = client.post("/api/settings", json={"simulation_mode": False})
+
+    assert response.status_code == 422
+    assert "paper-only" in response.json()["detail"]
+    assert env_path.read_text() == "SIMULATION_MODE=True\n"
+    assert api_main.settings.SIMULATION_MODE == old_sim
+
+
+def test_settings_endpoint_advertises_no_live_trading_support():
+    body = TestClient(app).get("/api/settings").json()
+
+    assert body["live_trading_supported"] is False
+
+
+def test_scheduler_skips_weather_signal_above_max_entry_price(monkeypatch):
+    from backend.core.weather_signals import WeatherTradingSignal, KalshiWeatherMarket
+
+    added = []
+    events = []
+    signal = WeatherTradingSignal(
+        market=KalshiWeatherMarket(market_id="KXPRICE", slug="kx-price", yes_price=0.95),
+        net_edge=0.30,
+        direction="yes",
+        suggested_size=50.0,
+    )
+
+    class FakeQuery:
+        def __init__(self, model):
+            self.model = model
+        def first(self):
+            if self.model is BotState:
+                return BotState(is_running=True, bankroll=1000.0)
+            return None
+        def filter(self, *args, **kwargs):
+            return self
+        def order_by(self, *args, **kwargs):
+            return self
+        def scalar(self):
+            return 0.0
+
+    class FakeSession:
+        def query(self, model):
+            return FakeQuery(model)
+        def add(self, obj):
+            added.append(obj)
+        def flush(self):
+            pass
+        def commit(self):
+            pass
+        def close(self):
+            pass
+
+    async def _fake_scan():
+        return [signal]
+
+    monkeypatch.setattr(scheduler_mod, "SessionLocal", lambda: FakeSession())
+    monkeypatch.setattr(
+        "backend.core.weather_signals.scan_for_weather_signals",
+        _fake_scan,
+    )
+    monkeypatch.setattr(scheduler_mod.settings, "WEATHER_MAX_ENTRY_PRICE", 0.70)
+    monkeypatch.setattr(scheduler_mod, "log_event", lambda *args, **kwargs: events.append(args))
+
+    import asyncio
+    asyncio.run(scheduler_mod.weather_scan_and_trade_job())
+
+    assert [obj for obj in added if isinstance(obj, Trade)] == []
+    assert any("entry price above max" in str(args) for args in events)

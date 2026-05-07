@@ -120,6 +120,12 @@ async def weather_scan_and_trade_job():
                     log_event("info", f"Skipping weather signal below min trade size or allocation headroom: {signal.market.market_id} size=${trade_size:.2f}")
                     continue
                 entry_price = signal.market.yes_price if signal.direction == "yes" else signal.market.no_price
+                if entry_price > settings.WEATHER_MAX_ENTRY_PRICE:
+                    log_event(
+                        "info",
+                        f"Skipping weather signal with entry price above max: {signal.market.market_id} price={entry_price:.2f} max={settings.WEATHER_MAX_ENTRY_PRICE:.2f}",
+                    )
+                    continue
                 trade = Trade(
                     market_ticker=signal.market.market_id,
                     platform="kalshi",
