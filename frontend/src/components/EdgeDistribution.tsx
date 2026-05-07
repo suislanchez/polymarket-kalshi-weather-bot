@@ -1,9 +1,8 @@
 import { useMemo } from 'react'
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts'
-import type { Signal, WeatherSignal } from '../types'
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
+import type { WeatherSignal } from '../types'
 
 interface Props {
-  btcSignals: Signal[]
   weatherSignals: WeatherSignal[]
 }
 
@@ -23,44 +22,25 @@ const CustomTooltip = ({ active, payload, label }: any) => {
   return (
     <div className="bg-neutral-900 border border-neutral-800 px-2 py-1.5">
       <p className="text-[10px] text-neutral-400 mb-1">{label}</p>
-      {payload.map((p: any) => (
-        <p key={p.name} className="text-[10px] tabular-nums" style={{ color: p.color }}>
-          {p.name}: {p.value}
-        </p>
-      ))}
+      {payload.map((p: any) => <p key={p.name} className="text-[10px] tabular-nums" style={{ color: p.color }}>{p.name}: {p.value}</p>)}
     </div>
   )
 }
 
-export function EdgeDistribution({ btcSignals, weatherSignals }: Props) {
+export function EdgeDistribution({ weatherSignals }: Props) {
   const data = useMemo(() => {
-    const counts: Record<string, { btc: number; weather: number }> = {}
-    BUCKETS.forEach(b => { counts[b] = { btc: 0, weather: 0 } })
-
-    btcSignals.forEach(s => {
-      const bucket = getBucket(s.edge)
-      counts[bucket].btc++
-    })
-
+    const counts: Record<string, { actionable: number; monitor: number }> = {}
+    BUCKETS.forEach(b => { counts[b] = { actionable: 0, monitor: 0 } })
     weatherSignals.forEach(s => {
       const bucket = getBucket(s.edge)
-      counts[bucket].weather++
+      if (s.actionable) counts[bucket].actionable++
+      else counts[bucket].monitor++
     })
+    return BUCKETS.map(bucket => ({ bucket, Actionable: counts[bucket].actionable, Monitor: counts[bucket].monitor }))
+  }, [weatherSignals])
 
-    return BUCKETS.map(bucket => ({
-      bucket,
-      BTC: counts[bucket].btc,
-      WX: counts[bucket].weather,
-    }))
-  }, [btcSignals, weatherSignals])
-
-  const total = btcSignals.length + weatherSignals.length
-  if (total === 0) {
-    return (
-      <div className="h-full flex items-center justify-center text-neutral-600 text-[10px]">
-        No signals for distribution
-      </div>
-    )
+  if (weatherSignals.length === 0) {
+    return <div className="h-full flex items-center justify-center text-neutral-600 text-[10px]">No weather signals for distribution</div>
   }
 
   return (
@@ -68,29 +48,11 @@ export function EdgeDistribution({ btcSignals, weatherSignals }: Props) {
       <ResponsiveContainer width="100%" height="100%">
         <BarChart data={data} margin={{ top: 8, right: 8, left: -10, bottom: 0 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="#1a1a1a" vertical={false} />
-          <XAxis
-            dataKey="bucket"
-            stroke="#525252"
-            fontSize={9}
-            tickLine={false}
-            axisLine={false}
-            fontFamily="JetBrains Mono"
-          />
-          <YAxis
-            stroke="#525252"
-            fontSize={9}
-            tickLine={false}
-            axisLine={false}
-            allowDecimals={false}
-            fontFamily="JetBrains Mono"
-          />
+          <XAxis dataKey="bucket" stroke="#525252" fontSize={9} tickLine={false} axisLine={false} fontFamily="JetBrains Mono" />
+          <YAxis stroke="#525252" fontSize={9} tickLine={false} axisLine={false} allowDecimals={false} fontFamily="JetBrains Mono" />
           <Tooltip content={<CustomTooltip />} />
-          <Legend
-            iconSize={8}
-            wrapperStyle={{ fontSize: '9px', fontFamily: 'JetBrains Mono' }}
-          />
-          <Bar dataKey="BTC" stackId="a" fill="#d97706" radius={[0, 0, 0, 0]} />
-          <Bar dataKey="WX" stackId="a" fill="#06b6d4" radius={[2, 2, 0, 0]} />
+          <Bar dataKey="Monitor" stackId="a" fill="#d97706" radius={[0, 0, 0, 0]} />
+          <Bar dataKey="Actionable" stackId="a" fill="#06b6d4" radius={[2, 2, 0, 0]} />
         </BarChart>
       </ResponsiveContainer>
     </div>

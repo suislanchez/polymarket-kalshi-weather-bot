@@ -7,7 +7,6 @@ const api = axios.create({ baseURL: `${API_BASE}/api` })
 interface SettingsData {
   simulation_mode: boolean
   kalshi_configured: boolean
-  kalshi_key_id: string
   initial_bankroll: number
   weather_min_edge_threshold: number
   weather_max_trade_size: number
@@ -36,7 +35,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
   useEffect(() => {
     api.get<SettingsData>('/settings')
       .then(({ data }) => {
-        setKeyId(data.kalshi_key_id || '')
+        setKeyId('')
         setSimulationMode(data.simulation_mode)
         setInitialBankroll(data.initial_bankroll)
         setMinEdge(Math.round(data.weather_min_edge_threshold * 100))

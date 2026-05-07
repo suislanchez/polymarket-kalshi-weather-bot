@@ -231,7 +231,7 @@ class WeatherTradingSignal:
 
     sources: List[str] = field(default_factory=list)
     reasoning: str = ""
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     ensemble_mean: float = 0.0
     ensemble_std: float = 0.0
@@ -243,7 +243,9 @@ class WeatherTradingSignal:
 
     @property
     def passes_threshold(self) -> bool:
-        return abs(self.net_edge) >= settings.WEATHER_MIN_EDGE_THRESHOLD
+        if self.signal_source == "METAR-early" or self.suggested_size <= 0:
+            return False
+        return self.net_edge >= settings.WEATHER_MIN_EDGE_THRESHOLD
 
 
 # ─── UTILITY FUNCTIONS ───────────────────────────────────────────────────────────
@@ -259,24 +261,29 @@ def fahrenheit_to_celsius(f: float) -> float:
 # ─── METAR FETCHING ─────────────────────────────────────────────────────────────
 
 def fetch_metar(icao: str) -> Optional[list]:
-    """Fetch last 12 hours of METAR obs for a given airport ICAO."""
-    if icao in _metar_cache:
-        return _metar_cache[icao]
+    """Fetch recent METAR observations for an airport, honoring the METAR TTL."""
+    now = time.time()
+    cached = _metar_cache.get(icao)
+    if cached is not None:
+        cached_ts, cached_data = cached
+        if now - cached_ts < _METAR_CACHE_TTL:
+            return cached_data
     try:
         params = {"ids": icao, "format": "json", "hours": 12}
         resp = requests.get(METAR_BASE, params=params, timeout=10)
         if resp.status_code != 200:
-            _metar_cache[icao] = None
+            # Cache failures briefly only; METAR freshness matters for locks.
+            _metar_cache[icao] = (now, None)
             return None
         data = resp.json()
         if not data:
-            _metar_cache[icao] = None
+            _metar_cache[icao] = (now, None)
             return None
-        _metar_cache[icao] = data
+        _metar_cache[icao] = (now, data)
         return data
     except Exception as e:
         logger.warning(f"METAR fetch error for {icao}: {e}")
-        _metar_cache[icao] = None
+        _metar_cache[icao] = (now, None)
         return None
 
 
@@ -342,15 +349,19 @@ def get_metar_temps(city: str, today: date) -> Optional[dict]:
 def metar_high_probability(max_observed_temp_f: float, current_temp_f: float,
                             threshold_f: float, local_hour: int) -> tuple:
     """
-    For KXHIGHT markets: "Will the max temp be <threshold_f?"
-    YES = temp stays below threshold. Returns P(YES), confidence, note.
+    For Kalshi KXHIGHT markets: YES wins when the day's high reaches the
+    listed threshold. Returns P(YES), confidence, note.
 
-    If max already EXCEEDED threshold → YES is impossible → P(YES) ≈ 0.01
-    If max is locked BELOW threshold late in day → YES is certain → P(YES) ≈ 0.99
+    If max already reaches threshold → YES is locked → P(YES) ≈ 0.99
+    If max is very unlikely to reach threshold late in day → P(YES) is low.
     """
     if max_observed_temp_f >= threshold_f:
-        # Threshold already exceeded — YES (below threshold) is impossible
-        return 0.01, "high", f"Max already {max_observed_temp_f}°F >= {threshold_f}°F — YES (below) locked out"
+        cooling_from_peak = max_observed_temp_f - current_temp_f
+        if cooling_from_peak >= 1.0:
+            # Threshold was reached and temperature has started falling, so the
+            # observed peak is no longer just an in-progress upward tick.
+            return 0.99, "high", f"Max already {max_observed_temp_f}°F >= {threshold_f}°F and cooling {cooling_from_peak:.1f}°F from peak — YES locked"
+        return 0.90, "medium", f"Max already {max_observed_temp_f}°F >= {threshold_f}°F, waiting for cooling before lock"
 
     if local_hour >= 17:
         headroom = 2
@@ -364,11 +375,11 @@ def metar_high_probability(max_observed_temp_f: float, current_temp_f: float,
     if headroom is not None:
         likely_max = current_temp_f + headroom
         if likely_max < threshold_f - 2:
-            # Very unlikely to reach threshold — YES (stays below) nearly certain
-            return 0.95, "high", f"Current {current_temp_f}°F + {headroom}°F buffer = {likely_max:.1f}°F < {threshold_f}°F — stays below"
+            # Very unlikely to reach threshold — YES unlikely.
+            return 0.05, "high", f"Current {current_temp_f}°F + {headroom}°F buffer = {likely_max:.1f}°F < {threshold_f}°F — YES unlikely"
         elif likely_max >= threshold_f:
-            # Likely to exceed threshold — YES (stays below) unlikely
-            return 0.10, "medium", f"Current {current_temp_f}°F + {headroom}°F buffer = {likely_max:.1f}°F may hit {threshold_f}°F"
+            # Likely to reach threshold — monitor until physical lock.
+            return 0.90, "medium", f"Current {current_temp_f}°F + {headroom}°F buffer = {likely_max:.1f}°F may hit {threshold_f}°F"
 
     return None, "low", "Too early for METAR lock"
 
@@ -513,12 +524,15 @@ _last_openmeteo_request = 0.0
 _OPENMETEO_MIN_INTERVAL = 1.5  # seconds between requests (slightly more conservative)
 
 def fetch_ensemble(lat: float, lon: float, target_date: date) -> Optional[dict]:
-    """Fetch 31-member GFS ensemble from open-meteo. Cached by (lat, lon) with disk persistence."""
+    """Fetch GFS ensemble from open-meteo with a cache keyed by required horizon."""
     global _last_openmeteo_request, _consecutive_429s
 
-    cache_key = (round(lat, 2), round(lon, 2))
+    today = date.today()
+    forecast_days = max(7, (target_date - today).days + 3)
+    forecast_days = min(forecast_days, 16)
+    cache_key = (round(lat, 2), round(lon, 2), forecast_days)
 
-    # Return from in-memory cache if fresh
+    # Return from in-memory cache if fresh and long enough for this target horizon.
     if cache_key in _ensemble_cache:
         cached_ts, cached_data = _ensemble_cache[cache_key]
         if time.time() - cached_ts < _ENSEMBLE_CACHE_TTL:
@@ -535,10 +549,6 @@ def fetch_ensemble(lat: float, lon: float, target_date: date) -> Optional[dict]:
     if wait > 0:
         time.sleep(wait)
     _last_openmeteo_request = time.time()
-
-    today = date.today()
-    forecast_days = max(7, (target_date - today).days + 3)
-    forecast_days = min(forecast_days, 16)
 
     params = {
         "latitude": lat,
@@ -820,15 +830,21 @@ def _build_signals_sync() -> List[WeatherTradingSignal]:
                     # (will still appear in dashboard as a "watch" signal)
 
         kalshi_prob = item["kalshi_prob"]
-        edge = p_final - kalshi_prob
-        net_edge = edge - FEE_ESTIMATE
+        yes_edge = p_final - kalshi_prob
+        no_edge = (1 - p_final) - (1 - kalshi_prob)
+        yes_net_edge = yes_edge - FEE_ESTIMATE
+        no_net_edge = no_edge - FEE_ESTIMATE
 
-        # Direction and suggested size
-        if net_edge > 0:
+        # Direction and suggested size use the selected side's edge after fees.
+        if yes_net_edge >= no_net_edge:
             direction = "yes"
+            edge = yes_edge
+            net_edge = yes_net_edge
             entry_price = kalshi_prob
         else:
             direction = "no"
+            edge = no_edge
+            net_edge = no_net_edge
             entry_price = 1 - kalshi_prob
 
         # METAR-early signals are never tradeable — GFS projection only, not a physical lock

@@ -15,7 +15,7 @@ Weather Edge uses a two-step process to find high-confidence trades:
 ### Step 1: METAR Lock Detection
 After 1pm local time, airport thermometers have already recorded the day's high temperature. If a Kalshi market is still pricing "Will Dallas reach 85°F?" at 40 cents when the airport already recorded 87°F — the outcome is physically confirmed. The market hasn't caught up yet.
 
-A METAR lock requires the current temperature to already be **5°F past the threshold** — not close, not trending toward it. Past it. That's a near-certain outcome.
+A high-temperature METAR lock requires the observed high to have crossed the threshold and the current reading to be cooling from that peak. Weather Edge intentionally locks on the way down, not on the way up, to avoid premature locks while heating is still in progress.
 
 ### Step 2: GFS Confirmation
 Every METAR lock signal is validated against the GFS weather forecast before being flagged. This catches anomalous METAR readings — if the airport reads 87°F but the GFS forecast expects a cold front to drop temps to 80°F, the signal is suppressed. Only signals where METAR and GFS agree are shown as actionable.
@@ -23,7 +23,7 @@ Every METAR lock signal is validated against the GFS weather forecast before bei
 ### Signal Tiers
 | Tier | Description | Trade? |
 |---|---|---|
-| **METAR-lock** | Current temp already past threshold + GFS confirms | ✅ Yes |
+| **METAR-lock** | Threshold reached and current temp cooling from observed peak + GFS context | ✅ Yes |
 | **GFS-ensemble** | Model probability vs Kalshi price, future days | 👀 Monitor only |
 
 **Never bet on GFS-only signals for same-day markets.** GFS is a probabilistic forecast. METAR is a physical measurement. The edge comes from confirmed readings, not projections.

@@ -19,7 +19,7 @@ def test_frontend_default_ports_align_to_backend_8765():
     for path in files:
         text = path.read_text()
         assert "localhost:8765" in text or 'PORT", 8765' in text or 'PORT", "8765"' in text
-        assert "localhost:8000" not in text
+        assert "localhost:" + "8000" not in text
         assert 'PORT", 8000' not in text
         assert 'PORT", "8000"' not in text
 

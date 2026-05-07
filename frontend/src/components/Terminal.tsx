@@ -37,13 +37,7 @@ export function Terminal({ isRunning, lastRun, onStart, onStop, onScan }: Props)
       const res = await fetch(`${API_URL}/api/events?limit=30`)
       if (res.ok) {
         const events = await res.json()
-        setLogs(events.filter((e: LogEntry) => {
-          if (e.type === 'heartbeat') return false
-          const msg = (e.message || '').toLowerCase()
-          if (msg.includes('btc') || msg.includes('bankroll') || msg.includes('5-min') ||
-              msg.includes('pending trades') || msg.includes('settlement') || msg.includes('allocation limit')) return false
-          return true
-        }))
+        setLogs(events.filter((e: LogEntry) => e.type !== 'heartbeat'))
       }
     } catch (err) {
       console.error('Failed to fetch events:', err)
@@ -70,10 +64,6 @@ export function Terminal({ isRunning, lastRun, onStart, onStop, onScan }: Props)
           try {
             const data = JSON.parse(event.data)
             if (data.type === 'heartbeat') return
-            // Filter out BTC/bankroll/trade noise
-            const msg = (data.message || '').toLowerCase()
-            if (msg.includes('btc') || msg.includes('bankroll') || msg.includes('5-min') ||
-                msg.includes('pending trades') || msg.includes('settlement') || msg.includes('allocation limit')) return
             setLogs(prev => [...prev.slice(-100), data])
           } catch (e) {
             console.error('Failed to parse WebSocket message:', e)

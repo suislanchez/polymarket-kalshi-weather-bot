@@ -58,7 +58,6 @@ def _isolated_client(tmp_path, monkeypatch):
 
 def test_frontend_live_data_contract_endpoint_exists(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "WEATHER_ENABLED", False)
-    monkeypatch.setattr(settings, "BTC_ENABLED", False)
     client, _ = _isolated_client(tmp_path, monkeypatch)
 
     response = client.get("/api/data")
@@ -68,15 +67,15 @@ def test_frontend_live_data_contract_endpoint_exists(monkeypatch, tmp_path):
     assert set(payload) >= {
         "ts",
         "kalshi",
-        "polymarket",
         "lifetime",
-        "metar_lines",
-        "metar_poly_lines",
-        "metar_v2_signals",
+        "weather_signals",
+        "weather_forecasts",
         "system",
     }
+    assert "weather_signals" in payload
+    assert "weather_forecasts" in payload
     assert isinstance(payload["system"]["services"], list)
-    assert isinstance(payload["system"]["socks_up"], bool)
+    assert "signal_cache_age_seconds" in payload["system"]
 
 
 def test_frontend_market_contract_endpoints_exist(monkeypatch, tmp_path):
@@ -84,7 +83,7 @@ def test_frontend_market_contract_endpoints_exist(monkeypatch, tmp_path):
 
     client, _ = _isolated_client(tmp_path, monkeypatch)
     kalshi_response = client.get("/api/kalshi/markets")
-    poly_response = client.get("/api/polymarket/markets")
+    removed_response = client.get("/api/removed-markets")
 
     assert kalshi_response.status_code == 200
     assert kalshi_response.json() == {
@@ -92,8 +91,7 @@ def test_frontend_market_contract_endpoints_exist(monkeypatch, tmp_path):
         "count": 0,
         "traded_today_count": 0,
     }
-    assert poly_response.status_code == 200
-    assert poly_response.json() == {"markets": [], "count": 0}
+    assert removed_response.status_code == 404
 
 
 def test_bot_start_stop_controls_toggle_state(monkeypatch, tmp_path):

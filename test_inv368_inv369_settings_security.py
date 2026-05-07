@@ -10,17 +10,15 @@ from backend.api.main import app
 
 
 def test_inv368_credentials_use_documented_env_var_names(monkeypatch):
-    monkeypatch.setenv("POLYMARKET_API_KEY", "poly-secret")
     monkeypatch.setenv("KALSHI_API_KEY_ID", "kalshi-key-id")
-    monkeypatch.setenv("GROQ_API_KEY", "groq-secret")
-    monkeypatch.delenv("...EY", raising=False)
-    monkeypatch.delenv("...ID", raising=False)
+    monkeypatch.setenv("KALSHI_PRIVATE_KEY_PATH", "/tmp/kalshi.pem")
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
 
     loaded = Settings()
 
-    assert loaded.POLYMARKET_API_KEY == "poly-secret"
     assert loaded.KALSHI_API_KEY_ID == "kalshi-key-id"
-    assert loaded.GROQ_API_KEY == "groq-secret"
+    assert loaded.KALSHI_PRIVATE_KEY_PATH == "/tmp/kalshi.pem"
+    assert not hasattr(loaded, "GROQ_API_KEY")
 
 
 def _point_settings_endpoint_at_tmp_env(monkeypatch, tmp_path: Path) -> Path:

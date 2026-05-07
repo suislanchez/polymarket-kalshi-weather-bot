@@ -19,7 +19,7 @@ Spot mispriced Kalshi weather contracts the moment the airport thermometer locks
 
 **Kalshi weather markets don't close until midnight. Airport thermometers lock the day's high by mid-afternoon. Weather Edge finds the window in between.**
 
-This is a local dashboard that scans Kalshi's active high-temp and low-temp contracts every 5 minutes, computes a model probability from the GFS 31-member ensemble, and flags markets where the observed temperature already determines the outcome. Those are METAR locks — and the dashboard now pops a browser notification + plays a chime the instant a new one appears.
+This is a local dashboard that scans Kalshi's active high-temp and low-temp contracts every 5 minutes, computes a model probability from the GFS 31-member ensemble, and flags markets where the observed temperature has reached the threshold and started cooling from the peak, avoiding premature locks while the day is still heating.
 
 Everything runs on your machine. No accounts. No cloud. No telemetry.
 
@@ -27,15 +27,13 @@ Everything runs on your machine. No accounts. No cloud. No telemetry.
 
 ### What you get
 
-✅ **Live signal dashboard** — React + FastAPI web app on localhost:8000. Scans Kalshi + GFS + METAR every 5 minutes when armed.
+✅ **Live signal dashboard** — React + FastAPI web app on localhost:8765. Scans Kalshi + GFS + METAR every 5 minutes when armed.
 
 ✅ **20 US cities** — NYC, Chicago, LA, Houston, Dallas, Miami, Seattle, Denver, Phoenix, Boston, DC, SF, Atlanta, Minneapolis, OKC, Austin, San Antonio, New Orleans, Philadelphia, Las Vegas.
 
 ✅ **GFS 31-member ensemble** via Open-Meteo — fraction of members satisfying the market condition → model probability.
 
-✅ **METAR real-time lock detection** via aviationweather.gov — after 1pm local, observed temperatures are checked for same-day high-temp markets. If the high is already guaranteed above or mathematically capped below the threshold, that row shows a gold `🔒 LOCK` badge.
-
-✅ **🔔 Browser notifications + sound alert** — one-click toggle in the header. The moment a new METAR lock is detected, you get a desktop notification and a chime. Close the dashboard tab and you still get the pop-up when the next lock hits.
+✅ **METAR real-time lock detection** via aviationweather.gov — after 1pm local, observed temperatures are checked for same-day high-temp markets. For high-temperature markets, Weather Edge waits until the observed high has crossed the threshold and the current reading has started cooling from that peak before treating it as a lock, so it does not lock prematurely on the way up.
 
 ✅ **Edge calculation** — `|model_prob − kalshi_prob| − 7% fee`. Signals only flag as actionable above your configurable threshold (default 8%).
 
@@ -47,19 +45,17 @@ Everything runs on your machine. No accounts. No cloud. No telemetry.
 
 ✅ **100% free data** — Open-Meteo (GFS), aviationweather.gov (METAR), Kalshi public market endpoints. No paid API keys required.
 
-✅ **FastAPI `/docs`** — full OpenAPI schema at `localhost:8000/docs` if you want to script against it.
+✅ **FastAPI `/docs`** — full OpenAPI schema at `localhost:8765/docs` if you want to script against it.
 
 ---
 
 ### What's new in v2.2 (2026-04-19)
 
-**🔔 Lock alerts** — browser notification + two-tone chime the instant a new METAR lock is detected. One click in the header to enable. Works in the background.
-
 **No auto-scan on startup.** Earlier builds fetched from Open-Meteo the moment you launched. Now the app boots paused and waits for you to press Start. Zero outbound requests until you're in the driver's seat.
 
 **Weather-only codebase.** Stripped ~2,000 lines of unrelated modules that had leaked in from other prototypes. The code you install is the code that runs — no dead paths, no surprise dependencies.
 
-**Localhost-only CORS.** Bound to `127.0.0.1` with a CORS allowlist of `localhost:8000` / `:5173`. Nothing else on your network can poke the API.
+**Localhost-only CORS.** Bound to `127.0.0.1` with a CORS allowlist of `localhost:8765` / `:5173`. Nothing else on your network can poke the API.
 
 **Gold-highlighted locks.** METAR-lock rows get an amber row background and a `🔒 LOCK` pill so they don't blend in with GFS-only informational signals.
 
@@ -73,13 +69,13 @@ Everything runs on your machine. No accounts. No cloud. No telemetry.
 
 Kalshi's `KXHIGHT*` contracts settle against the day's peak temperature. Every major US airport (NYC, ORD, DFW, etc.) publishes METAR observations every hour. By mid-afternoon, the day's high is either already above the threshold (YES is a sure thing) or mathematically capped below it (NO is a sure thing). The market knows this — but not always instantly, and not always efficiently, especially on thinly-traded city/threshold combinations.
 
-Weather Edge watches for those moments and tells you about them — now with a notification, so you don't have to have the tab open.
+Weather Edge watches for those moments and tells you about them — in the local dashboard.
 
 ---
 
 ### How it behaves on your machine
 
-- Binds to `127.0.0.1:8000` only. No LAN exposure unless you change that yourself.
+- Binds to `127.0.0.1:8765` by default. No LAN exposure unless you change that yourself.
 - Boots **paused**. Zero API calls to Kalshi or Open-Meteo until you press Start in the UI.
 - One SQLite file (`tradingbot.db`) in the app directory. Holds simulated trades only. No credentials.
 - No installer, no service, no autostart hook. When you close the terminal, the app is gone.

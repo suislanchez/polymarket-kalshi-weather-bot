@@ -9,12 +9,13 @@ if __name__ == "__main__":
     init_db()
 
     port = int(os.environ.get("PORT", 8765))
-    print(f"Starting server on http://0.0.0.0:{port}")
+    host = os.environ.get("HOST", "127.0.0.1")
+    print(f"Starting server on http://{host}:{port}")
     print(f"API docs available at http://localhost:{port}/docs")
 
     uvicorn.run(
         "backend.api.main:app",
-        host="0.0.0.0",
+        host=host,
         port=port,
         reload=os.environ.get("RAILWAY_ENVIRONMENT") is None
     )

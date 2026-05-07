@@ -1,6 +1,6 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "name": "polymarket-kalshi-weather-bot",
+  "name": "weather-edge-kalshi",
   "version": 2,
   "builds": [
     {
