@@ -66,8 +66,8 @@ export function SignalsTable({ signals, weatherSignals, onSimulateTrade, isSimul
     const btc: UnifiedSignal[] = signals.map(s => ({
       key: `btc-${s.market_ticker}`,
       ticker: s.market_ticker,
-      title: (s.event_slug || s.market_ticker).replace('btc-updown-5m-', ''),
-      platform: s.platform || 'polymarket',
+      title: s.event_slug || s.market_ticker,
+      platform: s.platform || 'kalshi',
       category: 'BTC',
       direction: s.direction,
       edge: s.edge,

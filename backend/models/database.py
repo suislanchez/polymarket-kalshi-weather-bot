@@ -1,7 +1,7 @@
 """Database models and connection for BTC 5-min trading bot."""
 from datetime import datetime
 from typing import Optional
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, JSON, text
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, JSON, text, UniqueConstraint
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy import inspect
@@ -99,6 +99,29 @@ class Signal(Base):
     outcome_correct = Column(Boolean, nullable=True)   # did our direction prediction match?
     settlement_value = Column(Float, nullable=True)     # 1.0=UP won, 0.0=DOWN won
     settled_at = Column(DateTime, nullable=True)        # when we recorded the outcome
+
+
+class WeatherObservationRecord(Base):
+    """Raw weather observations used to derive weather signals."""
+    __tablename__ = "weather_observations"
+    __table_args__ = (
+        UniqueConstraint("source", "station_id", "raw_hash", name="uq_weather_observation_source_station_hash"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    source = Column(String, index=True, nullable=False)
+    station_id = Column(String, index=True, nullable=False)
+    market_ticker = Column(String, index=True, nullable=True)
+    observed_at = Column(DateTime, index=True, nullable=False)
+    fetched_at = Column(DateTime, index=True, nullable=False)
+    signal_at = Column(DateTime, index=True, nullable=True)
+    temp_f = Column(Float, nullable=True)
+    qc = Column(String, nullable=True)
+    raw_hash = Column(String, index=True, nullable=False)
+    source_url = Column(String, nullable=False)
+    raw_payload = Column(JSON, nullable=False)
+    observation_latency_seconds = Column(Float, nullable=True)
+    signal_latency_seconds = Column(Float, nullable=True)
 
 
 class AILog(Base):

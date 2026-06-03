@@ -56,3 +56,6 @@ logs/
 htmlcov/
 .pytest_cache/
 *.pem
+
+# Runtime forecast history
+data/forecast_run_history.json

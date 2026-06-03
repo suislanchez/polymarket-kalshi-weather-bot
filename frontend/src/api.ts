@@ -1,7 +1,7 @@
 import axios from 'axios'
-import type { DashboardData, Signal, Trade, BotStats, BtcPrice, BtcWindow, WeatherForecast, WeatherSignal } from './types'
+import type { DashboardData, Signal, Trade, BotStats, BtcPrice, BtcWindow, WeatherForecast, WeatherSignal, WeatherStatus, KalshiMarket, PolyMarket } from './types'
 
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8765'
 
 const api = axios.create({
   baseURL: `${API_BASE}/api`,
@@ -76,5 +76,49 @@ export async function fetchWeatherForecasts(): Promise<WeatherForecast[]> {
 
 export async function fetchWeatherSignals(): Promise<WeatherSignal[]> {
   const { data } = await api.get<WeatherSignal[]>('/weather/signals')
+  return data
+}
+
+export async function fetchWeatherStatus(): Promise<WeatherStatus> {
+  const { data } = await api.get<WeatherStatus>('/weather/status')
+  return data
+}
+
+export async function fetchKalshiMarkets(): Promise<{ markets: KalshiMarket[], count: number, traded_today_count: number }> {
+  const { data } = await api.get('/kalshi/markets')
+  return data
+}
+
+export async function fetchPolyMarkets(): Promise<{ markets: PolyMarket[], count: number }> {
+  const { data } = await api.get('/polymarket/markets')
+  return data
+}
+
+export async function fetchLiveData(): Promise<import('./types').LiveData> {
+  const { data } = await axios.get(`${API_BASE}/api/data`)
+  return data
+}
+
+export interface SettingsData {
+  simulation_mode: boolean
+  kalshi_configured: boolean
+  kalshi_key_id: string
+  initial_bankroll: number
+  weather_min_edge_threshold: number
+  weather_max_trade_size: number
+}
+
+export async function fetchSettings(): Promise<SettingsData> {
+  const { data } = await api.get<SettingsData>('/settings')
+  return data
+}
+
+export async function updateSettings(payload: Record<string, any>): Promise<{ ok: boolean; kalshi_configured: boolean; simulation_mode: boolean }> {
+  const { data } = await api.post('/settings', payload)
+  return data
+}
+
+export async function testKalshiConnection(): Promise<{ ok: boolean; balance?: any; error?: string }> {
+  const { data } = await api.post('/settings/test-connection')
   return data
 }

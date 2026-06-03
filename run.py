@@ -8,7 +8,7 @@ if __name__ == "__main__":
     print("Initializing database...")
     init_db()
 
-    port = int(os.environ.get("PORT", 8000))
+    port = int(os.environ.get("PORT", 8765))
     print(f"Starting server on http://0.0.0.0:{port}")
     print(f"API docs available at http://localhost:{port}/docs")
 

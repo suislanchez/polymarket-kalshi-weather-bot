@@ -16,6 +16,12 @@ function AgreementBar({ value }: { value: number }) {
   )
 }
 
+function formatLatency(seconds?: number) {
+  if (seconds === undefined || seconds === null) return '—'
+  if (seconds < 60) return `${seconds.toFixed(0)}s`
+  return `${(seconds / 60).toFixed(1)}m`
+}
+
 export function WeatherPanel({ forecasts, signals }: Props) {
   if (forecasts.length === 0 && signals.length === 0) {
     return (
@@ -63,9 +69,21 @@ export function WeatherPanel({ forecasts, signals }: Props) {
             </div>
             <div className="flex items-center gap-1 shrink-0">
               {bestEdge && (
-                <span className={`text-[10px] tabular-nums ${bestEdge.edge > 0 ? 'text-green-500' : 'text-red-500'}`}>
-                  {bestEdge.edge > 0 ? '+' : ''}{(bestEdge.edge * 100).toFixed(1)}%
-                </span>
+                <div className="flex flex-col items-end gap-0.5">
+                  <span className={`text-[10px] tabular-nums ${bestEdge.edge > 0 ? 'text-green-500' : 'text-red-500'}`}>
+                    {bestEdge.edge > 0 ? '+' : ''}{(bestEdge.edge * 100).toFixed(1)}%
+                  </span>
+                  {(bestEdge.signal_source || bestEdge.station_id || bestEdge.observation_latency_seconds !== undefined) && (
+                    <span className="text-[8px] text-neutral-500 tabular-nums" title={bestEdge.metar_note || bestEdge.source_url || undefined}>
+                      {bestEdge.signal_source || 'METAR'} · {bestEdge.station_id || 'station?'} · obs {formatLatency(bestEdge.observation_latency_seconds)}
+                    </span>
+                  )}
+                  {(bestEdge.fusion_lock_state || (bestEdge.fusion_conflicts && bestEdge.fusion_conflicts.length > 0)) && (
+                    <span className="text-[8px] text-neutral-500 tabular-nums" title={(bestEdge.fusion_conflicts || []).join('; ') || bestEdge.fusion_skip_reason || undefined}>
+                      fusion {bestEdge.fusion_lock_state || 'unknown'} · authority {bestEdge.fusion_authority_source || 'missing'}
+                    </span>
+                  )}
+                </div>
               )}
               {citySignals.length > 0 && citySignals[0].platform && (
                 <span className={`platform-badge ${

@@ -139,7 +139,7 @@ export function TradesTable({ trades }: Props) {
                 </td>
                 <td className="py-1 px-1.5">
                   <span className="text-neutral-400 truncate block max-w-[100px]" title={trade.event_slug || trade.market_ticker}>
-                    {(trade.event_slug || trade.market_ticker).replace('btc-updown-5m-', '')}
+                    {trade.event_slug || trade.market_ticker}
                   </span>
                 </td>
                 <td className="py-1 px-1.5 text-center">

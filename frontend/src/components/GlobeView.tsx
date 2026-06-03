@@ -54,9 +54,12 @@ export function GlobeView({ forecasts, signals }: Props) {
   useEffect(() => {
     if (globeRef.current) {
       globeRef.current.pointOfView({ lat: 39.5, lng: -98.35, altitude: 2.2 }, 1000)
-      globeRef.current.controls().autoRotate = true
-      globeRef.current.controls().autoRotateSpeed = 0.3
-      globeRef.current.controls().enableZoom = false
+      const controls = globeRef.current.controls()
+      controls.autoRotate = true
+      controls.autoRotateSpeed = 0.3
+      controls.enableZoom = true
+      controls.enableRotate = true
+      controls.enablePan = false
     }
   }, [])
 
@@ -113,8 +116,10 @@ export function GlobeView({ forecasts, signals }: Props) {
     return el
   }, [])
 
+  const containerRef = useRef<HTMLDivElement>(null)
+
   return (
-    <div className="globe-container w-full h-full">
+    <div ref={containerRef} className="globe-container w-full h-full flex items-center justify-center overflow-hidden">
       <Globe
         ref={globeRef}
         globeImageUrl="//unpkg.com/three-globe/example/img/earth-night.jpg"
@@ -125,8 +130,7 @@ export function GlobeView({ forecasts, signals }: Props) {
         htmlElement={markerElement}
         htmlAltitude={0.01}
         onGlobeClick={handleInteraction}
-        width={undefined}
-        height={undefined}
+        onGlobeRightClick={handleInteraction}
       />
     </div>
   )

@@ -20,7 +20,7 @@ interface Props {
   onScan?: () => void
 }
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8765'
 const WS_URL = API_URL.replace(/^http/, 'ws') + '/ws/events'
 
 export function Terminal({ isRunning, lastRun, onStart, onStop, onScan }: Props) {
@@ -37,7 +37,13 @@ export function Terminal({ isRunning, lastRun, onStart, onStop, onScan }: Props)
       const res = await fetch(`${API_URL}/api/events?limit=30`)
       if (res.ok) {
         const events = await res.json()
-        setLogs(events.filter((e: LogEntry) => e.type !== 'heartbeat'))
+        setLogs(events.filter((e: LogEntry) => {
+          if (e.type === 'heartbeat') return false
+          const msg = (e.message || '').toLowerCase()
+          if (msg.includes('btc') || msg.includes('bankroll') || msg.includes('5-min') ||
+              msg.includes('pending trades') || msg.includes('settlement') || msg.includes('allocation limit')) return false
+          return true
+        }))
       }
     } catch (err) {
       console.error('Failed to fetch events:', err)
@@ -63,7 +69,11 @@ export function Terminal({ isRunning, lastRun, onStart, onStop, onScan }: Props)
         ws.onmessage = (event) => {
           try {
             const data = JSON.parse(event.data)
-            if (data.type === 'heartbeat') return // Skip heartbeats
+            if (data.type === 'heartbeat') return
+            // Filter out BTC/bankroll/trade noise
+            const msg = (data.message || '').toLowerCase()
+            if (msg.includes('btc') || msg.includes('bankroll') || msg.includes('5-min') ||
+                msg.includes('pending trades') || msg.includes('settlement') || msg.includes('allocation limit')) return
             setLogs(prev => [...prev.slice(-100), data])
           } catch (e) {
             console.error('Failed to parse WebSocket message:', e)
@@ -125,7 +135,9 @@ export function Terminal({ isRunning, lastRun, onStart, onStop, onScan }: Props)
 
   const formatTime = (timestamp: string) => {
     try {
-      return new Date(timestamp).toLocaleTimeString('en-US', { hour12: false })
+      // Ensure UTC timestamps are parsed correctly (add Z if no timezone info)
+      const ts = timestamp && !timestamp.endsWith('Z') && !timestamp.includes('+') ? timestamp + 'Z' : timestamp
+      return new Date(ts).toLocaleTimeString('en-US', { hour12: false })
     } catch {
       return '--:--:--'
     }
