@@ -44,6 +44,22 @@ pip install -r requirements.txt
 # Run the backend
 uvicorn backend.api.main:app --reload --port 8000
 ```
+### Database Configuration
+
+By default, the project uses SQLite and will automatically create a local database file:
+
+```env
+DATABASE_URL=sqlite:///./tradingbot.db
+```
+
+For PostgreSQL deployments, set a PostgreSQL database URL:
+
+```env
+DATABASE_URL=postgresql://user:password@host/database
+```
+
+Note: PostgreSQL deployments require PostgreSQL-compatible dependencies such as `psycopg2-binary`.
+
 
 Backend will be at: http://localhost:8000
 API docs at: http://localhost:8000/docs
