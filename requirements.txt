@@ -31,3 +31,6 @@ structlog>=24.1.0
 # Utils
 python-dotenv==1.0.0
 orjson==3.9.10
+
+# Unified prediction-market SDK (optional integration layer)
+pmxt==2.46.14

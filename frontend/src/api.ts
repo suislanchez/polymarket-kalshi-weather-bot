@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { DashboardData, Signal, Trade, BotStats, BtcPrice, BtcWindow, WeatherForecast, WeatherSignal } from './types'
+import type { DashboardData, Signal, Trade, BotStats, BtcPrice, BtcWindow, WeatherForecast, WeatherSignal, PolymarketWeatherSourceState } from './types'
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
@@ -76,5 +76,24 @@ export async function fetchWeatherForecasts(): Promise<WeatherForecast[]> {
 
 export async function fetchWeatherSignals(): Promise<WeatherSignal[]> {
   const { data } = await api.get<WeatherSignal[]>('/weather/signals')
+  return data
+}
+
+export async function fetchPolymarketWeatherSourceStates({
+  category = 'all',
+  marketState = 'all',
+  limit = 25,
+}: {
+  category?: string
+  marketState?: string
+  limit?: number
+} = {}): Promise<PolymarketWeatherSourceState[]> {
+  const { data } = await api.get<PolymarketWeatherSourceState[]>('/weather/polymarket-source-states', {
+    params: {
+      category,
+      market_state: marketState,
+      limit,
+    },
+  })
   return data
 }

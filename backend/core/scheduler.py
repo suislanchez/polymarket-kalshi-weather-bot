@@ -52,6 +52,57 @@ def get_recent_events(limit: int = 50) -> List[dict]:
     return event_log[-limit:]
 
 
+def _weather_daily_settled_pnl(db, today_start: datetime) -> float:
+    return db.query(func.coalesce(func.sum(Trade.pnl), 0.0)).filter(
+        Trade.settled == True,
+        Trade.market_type == "weather",
+        Trade.settlement_time >= today_start,
+    ).scalar()
+
+
+def _open_weather_positions_by_city(db, signals) -> dict[str, int]:
+    """Count open weather positions by city key for markets in current scan."""
+    ticker_to_city = {
+        s.market.market_id: s.market.city_key
+        for s in signals
+        if getattr(s, "market", None) and getattr(s.market, "market_id", None) and getattr(s.market, "city_key", None)
+    }
+    if not ticker_to_city:
+        return {}
+
+    rows = db.query(Trade.market_ticker).filter(
+        Trade.settled == False,
+        Trade.market_type == "weather",
+        Trade.market_ticker.in_(list(ticker_to_city.keys())),
+    ).all()
+
+    counts: dict[str, int] = {}
+    for (market_ticker,) in rows:
+        city = ticker_to_city.get(market_ticker)
+        if city:
+            counts[city] = counts.get(city, 0) + 1
+    return counts
+
+
+def _weather_paper_execution_blockers(signal) -> list[str]:
+    """Final paper-execution blockers for weather signals.
+
+    Signal generation can still label a row `[ACTIONABLE]` for research review,
+    but the paper ledger has an additional execution boundary. This keeps
+    venue-level safety toggles and persistence/sizing safeguards in one place
+    immediately before a Trade row would be created.
+    """
+    blockers: list[str] = []
+    platform = str(getattr(getattr(signal, "market", None), "platform", "") or "").lower()
+    if platform == "kalshi" and not settings.WEATHER_KALSHI_PAPER_EXECUTION_ENABLED:
+        blockers.append("Kalshi weather paper execution is monitor-only until venue calibration improves")
+    if float(getattr(signal, "suggested_size", 0.0) or 0.0) <= 0.0:
+        blockers.append("weather signal suggested size is zero")
+    no_trade_reasons = list(getattr(signal, "no_trade_reasons", []) or [])
+    blockers.extend(str(reason) for reason in no_trade_reasons if reason)
+    return blockers
+
+
 async def scan_and_trade_job():
     """
     Background job: Scan BTC 5-min markets, generate signals, execute trades.
@@ -220,6 +271,15 @@ async def weather_scan_and_trade_job():
             MIN_TRADE_SIZE = 10
             MAX_WEATHER_ALLOCATION = 500.0  # Max total exposure to weather markets
 
+            today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+            weather_daily_pnl = _weather_daily_settled_pnl(db, today_start)
+            if weather_daily_pnl <= -settings.WEATHER_DAILY_LOSS_LIMIT:
+                log_event(
+                    "warning",
+                    f"Weather daily loss limit hit: ${weather_daily_pnl:.2f} (limit: -${settings.WEATHER_DAILY_LOSS_LIMIT:.0f}). Stopping weather trades.",
+                )
+                return
+
             # Check weather allocation limit
             weather_pending = db.query(func.coalesce(func.sum(Trade.size), 0.0)).filter(
                 Trade.settled == False,
@@ -229,6 +289,8 @@ async def weather_scan_and_trade_job():
             if weather_pending >= MAX_WEATHER_ALLOCATION:
                 log_event("info", f"Weather allocation limit reached: ${weather_pending:.0f}/${MAX_WEATHER_ALLOCATION:.0f}")
                 return
+
+            open_by_city = _open_weather_positions_by_city(db, actionable)
 
             trades_executed = 0
             for signal in actionable[:MAX_TRADES_PER_SCAN]:
@@ -241,6 +303,29 @@ async def weather_scan_and_trade_job():
                 if existing:
                     continue
 
+                execution_blockers = _weather_paper_execution_blockers(signal)
+                if execution_blockers:
+                    log_event(
+                        "info",
+                        f"Weather paper execution blocked for {signal.market.market_id}: {execution_blockers[0]}",
+                        {
+                            "market_id": signal.market.market_id,
+                            "platform": getattr(signal.market, "platform", None),
+                            "blockers": execution_blockers,
+                        },
+                    )
+                    continue
+
+                city_key = getattr(signal.market, "city_key", None)
+                if city_key:
+                    city_open = open_by_city.get(city_key, 0)
+                    if city_open >= settings.WEATHER_MAX_OPEN_POSITIONS_PER_CITY:
+                        log_event(
+                            "info",
+                            f"Weather city cap reached for {city_key}: {city_open}/{settings.WEATHER_MAX_OPEN_POSITIONS_PER_CITY}",
+                        )
+                        continue
+
                 trade_size = min(signal.suggested_size, settings.WEATHER_MAX_TRADE_SIZE)
                 trade_size = max(trade_size, MIN_TRADE_SIZE)
 
@@ -251,11 +336,14 @@ async def weather_scan_and_trade_job():
                 if trades_executed >= MAX_TRADES_PER_SCAN:
                     break
 
-                entry_price = signal.market.yes_price if signal.direction == "yes" else signal.market.no_price
+                if signal.direction == "yes":
+                    entry_price = signal.market.best_ask if signal.market.best_ask is not None else signal.market.yes_price
+                else:
+                    entry_price = signal.market.no_best_ask if signal.market.no_best_ask is not None else signal.market.no_price
 
                 trade = Trade(
                     market_ticker=signal.market.market_id,
-                    platform="polymarket",
+                    platform=getattr(signal.market, "platform", "polymarket") or "polymarket",
                     event_slug=signal.market.slug,
                     market_type="weather",
                     direction=signal.direction,
@@ -281,6 +369,8 @@ async def weather_scan_and_trade_job():
 
                 state.total_trades += 1
                 trades_executed += 1
+                if city_key:
+                    open_by_city[city_key] = open_by_city.get(city_key, 0) + 1
 
                 log_event("trade",
                     f"WX {signal.market.city_name}: {signal.direction.upper()} "
@@ -362,6 +452,37 @@ async def settlement_job():
         logger.exception("Error in settlement_job")
 
 
+async def open_position_risk_job():
+    """Background job: mark open paper positions to market and record risk recommendations."""
+    if not settings.PAPER_POSITION_RISK_ENABLED:
+        return
+
+    log_event("info", "Checking open-position paper risk...")
+    db = None
+    try:
+        from backend.core.open_position_monitor import run_open_position_risk_scan
+        from backend.core.weather_exit_quotes import PublicWeatherExitQuoteProvider
+
+        db = SessionLocal()
+        summary = run_open_position_risk_scan(
+            db,
+            weather_quote_provider=PublicWeatherExitQuoteProvider(),
+        )
+        log_event("data", "Open-position risk scan complete", {
+            "open_positions": summary.total_open_positions,
+            "actions": summary.action_counts,
+            "paper_exits": summary.exited_count,
+            "auto_exit_enabled": settings.PAPER_AUTO_EXIT_ENABLED,
+        })
+        return summary
+    except Exception as e:
+        log_event("error", f"Open-position risk error: {str(e)}")
+        logger.exception("Error in open_position_risk_job")
+    finally:
+        if db:
+            db.close()
+
+
 async def heartbeat_job():
     """Periodic heartbeat. Runs every minute."""
     db = None
@@ -386,8 +507,34 @@ async def heartbeat_job():
             db.close()
 
 
+def planned_scheduler_jobs() -> List[str]:
+    """Return the job ids ``start_scheduler`` would register for current settings.
+
+    Pure/side-effect-free so the lane configuration can be unit-tested without a
+    running event loop or any network. The legacy BTC ``market_scan`` job is only
+    included when ``BTC_LANE_ENABLED`` is true (the canonical off-switch), and
+    ``weather_scan`` only when ``WEATHER_ENABLED`` is true.
+    """
+    jobs: List[str] = []
+    if settings.BTC_LANE_ENABLED:
+        jobs.append("market_scan")
+    jobs.append("settlement_check")
+    if settings.PAPER_POSITION_RISK_ENABLED:
+        jobs.append("open_position_risk")
+    jobs.append("heartbeat")
+    if settings.WEATHER_ENABLED:
+        jobs.append("weather_scan")
+    return jobs
+
+
 def start_scheduler():
-    """Start the background scheduler for BTC 5-min trading."""
+    """Start the background scheduler.
+
+    Lanes are gated by explicit flags: the legacy BTC scan only runs when
+    ``BTC_LANE_ENABLED`` is true, weather only when ``WEATHER_ENABLED`` is true.
+    Settlement and heartbeat always run so any existing pending paper trades
+    (across lanes) can still settle.
+    """
     global scheduler
 
     if scheduler is not None and scheduler.running:
@@ -399,14 +546,15 @@ def start_scheduler():
     scan_seconds = settings.SCAN_INTERVAL_SECONDS
     settle_seconds = settings.SETTLEMENT_INTERVAL_SECONDS
 
-    # Scan BTC markets every minute
-    scheduler.add_job(
-        scan_and_trade_job,
-        IntervalTrigger(seconds=scan_seconds),
-        id="market_scan",
-        replace_existing=True,
-        max_instances=1
-    )
+    # Legacy BTC 5-min scan — only when the lane is explicitly enabled.
+    if settings.BTC_LANE_ENABLED:
+        scheduler.add_job(
+            scan_and_trade_job,
+            IntervalTrigger(seconds=scan_seconds),
+            id="market_scan",
+            replace_existing=True,
+            max_instances=1
+        )
 
     # Check settlements every 2 minutes
     scheduler.add_job(
@@ -416,6 +564,15 @@ def start_scheduler():
         replace_existing=True,
         max_instances=1
     )
+
+    if settings.PAPER_POSITION_RISK_ENABLED:
+        scheduler.add_job(
+            open_position_risk_job,
+            IntervalTrigger(seconds=settings.POSITION_RISK_SCAN_INTERVAL_SECONDS),
+            id="open_position_risk",
+            replace_existing=True,
+            max_instances=1,
+        )
 
     # Heartbeat every minute
     scheduler.add_job(
@@ -429,7 +586,6 @@ def start_scheduler():
     # Weather trading jobs (gated by WEATHER_ENABLED)
     if settings.WEATHER_ENABLED:
         weather_scan_seconds = settings.WEATHER_SCAN_INTERVAL_SECONDS
-        weather_settle_seconds = settings.WEATHER_SETTLEMENT_INTERVAL_SECONDS
 
         scheduler.add_job(
             weather_scan_and_trade_job,
@@ -440,14 +596,18 @@ def start_scheduler():
         )
 
     scheduler.start()
-    log_event("success", "BTC 5-min trading scheduler started", {
+    log_event("success", "Trading scheduler started", {
         "scan_interval": f"{scan_seconds}s",
         "settlement_interval": f"{settle_seconds}s",
-        "min_edge": f"{settings.MIN_EDGE_THRESHOLD:.0%}",
+        "btc_lane_enabled": settings.BTC_LANE_ENABLED,
         "weather_enabled": settings.WEATHER_ENABLED,
+        "jobs": planned_scheduler_jobs(),
     })
 
-    asyncio.create_task(scan_and_trade_job())
+    if settings.BTC_LANE_ENABLED:
+        asyncio.create_task(scan_and_trade_job())
+    if settings.PAPER_POSITION_RISK_ENABLED:
+        asyncio.create_task(open_position_risk_job())
 
     if settings.WEATHER_ENABLED:
         asyncio.create_task(weather_scan_and_trade_job())
@@ -472,9 +632,11 @@ def is_scheduler_running() -> bool:
 
 
 async def run_manual_scan():
-    """Trigger a manual market scan."""
+    """Trigger a manual market scan for all enabled lanes."""
     log_event("info", "Manual scan triggered")
     await scan_and_trade_job()
+    if settings.WEATHER_ENABLED:
+        await weather_scan_and_trade_job()
 
 
 async def run_manual_settlement():

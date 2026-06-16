@@ -38,8 +38,24 @@ class Trade(Base):
     settled = Column(Boolean, default=False)
     settlement_time = Column(DateTime, nullable=True)
     settlement_value = Column(Float, nullable=True)  # 1.0=Up won, 0.0=Down won
-    result = Column(String, default="pending")  # pending, win, loss
+    result = Column(String, default="pending")  # pending, win, loss, push, exited
     pnl = Column(Float, nullable=True)
+
+    # Open-position exit / cash-out tracking
+    closed_early = Column(Boolean, default=False, index=True)
+    exit_time = Column(DateTime, nullable=True)
+    exit_price = Column(Float, nullable=True)
+    exit_size = Column(Float, nullable=True)
+    exit_reason = Column(String, nullable=True)
+    exit_policy = Column(String, nullable=True)
+    exit_evidence = Column(JSON, nullable=True)
+    unrealized_pnl = Column(Float, nullable=True)
+    last_mark_price = Column(Float, nullable=True)
+    last_mark_time = Column(DateTime, nullable=True)
+    last_risk_action = Column(String, nullable=True)
+    last_risk_reasons = Column(JSON, nullable=True)
+    last_risk_source_status = Column(String, nullable=True)
+    last_risk_evidence = Column(JSON, nullable=True)
 
     # Model performance tracking
     model_probability = Column(Float)
@@ -55,6 +71,23 @@ class BtcPriceSnapshot(Base):
     timestamp = Column(DateTime, default=datetime.utcnow, index=True)
     price = Column(Float)
     source = Column(String, default="coingecko")
+
+
+class RottenTomatoesSourceState(Base):
+    """Direct public Rotten Tomatoes source snapshots for RT market calibration."""
+    __tablename__ = "rotten_tomatoes_source_states"
+
+    id = Column(Integer, primary_key=True, index=True)
+    captured_at = Column(DateTime, default=datetime.utcnow, index=True)
+    title = Column(String, index=True)
+    event_slug = Column(String, nullable=True, index=True)
+    source_url = Column(String)
+    source_method = Column(String)
+    tomatometer_score = Column(Integer, nullable=True)
+    review_count = Column(Integer, nullable=True)
+    direct_source_status = Column(String, index=True)
+    timing_risk_label = Column(String)
+    cutoff_time = Column(String, nullable=True)
 
 
 class BotState(Base):
@@ -173,6 +206,31 @@ def ensure_schema():
         with engine.connect() as conn:
             with conn.begin():
                 conn.execute(text("ALTER TABLE trades ADD COLUMN market_type VARCHAR DEFAULT 'btc'"))
+
+    trade_exit_columns = [
+        ("closed_early", "BOOLEAN DEFAULT 0"),
+        ("exit_time", "DATETIME"),
+        ("exit_price", "FLOAT"),
+        ("exit_size", "FLOAT"),
+        ("exit_reason", "VARCHAR"),
+        ("exit_policy", "VARCHAR"),
+        ("exit_evidence", "JSON"),
+        ("unrealized_pnl", "FLOAT"),
+        ("last_mark_price", "FLOAT"),
+        ("last_mark_time", "DATETIME"),
+        ("last_risk_action", "VARCHAR"),
+        ("last_risk_reasons", "JSON"),
+        ("last_risk_source_status", "VARCHAR"),
+        ("last_risk_evidence", "JSON"),
+    ]
+    with engine.connect() as conn:
+        for col, coltype in trade_exit_columns:
+            if col not in columns:
+                try:
+                    with conn.begin():
+                        conn.execute(text(f"ALTER TABLE trades ADD COLUMN {col} {coltype}"))
+                except Exception:
+                    pass  # column already exists
 
     # Add calibration columns to signals table
     try:

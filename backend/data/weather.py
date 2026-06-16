@@ -9,48 +9,29 @@ import time
 
 logger = logging.getLogger("trading_bot")
 
-# City configurations with lat/lon and NWS station identifiers
+from backend.data.weather_station_map import KALSHI_WEATHER_STATION_MAP, city_config_from_mapping
+
+# City configurations with lat/lon and NWS station identifiers. US Kalshi cities
+# are generated from exact settlement station metadata so model inputs target
+# the station used for market resolution rather than a broad metro centroid.
 CITY_CONFIG: Dict[str, dict] = {
-    "nyc": {
-        "name": "New York City",
-        "lat": 40.7128,
-        "lon": -74.0060,
-        "nws_station": "KNYC",
-        "nws_office": "OKX",
-        "nws_gridpoint": "OKX/33,37",
+    **{
+        city_key: city_config_from_mapping(mapping)
+        for city_key, mapping in KALSHI_WEATHER_STATION_MAP.items()
     },
-    "chicago": {
-        "name": "Chicago",
-        "lat": 41.8781,
-        "lon": -87.6298,
-        "nws_station": "KORD",
-        "nws_office": "LOT",
-        "nws_gridpoint": "LOT/75,72",
-    },
-    "miami": {
-        "name": "Miami",
-        "lat": 25.7617,
-        "lon": -80.1918,
-        "nws_station": "KMIA",
-        "nws_office": "MFL",
-        "nws_gridpoint": "MFL/75,53",
-    },
-    "los_angeles": {
-        "name": "Los Angeles",
-        "lat": 34.0522,
-        "lon": -118.2437,
-        "nws_station": "KLAX",
-        "nws_office": "LOX",
-        "nws_gridpoint": "LOX/154,44",
-    },
-    "denver": {
-        "name": "Denver",
-        "lat": 39.7392,
-        "lon": -104.9903,
-        "nws_station": "KDEN",
-        "nws_office": "BOU",
-        "nws_gridpoint": "BOU/62,60",
-    },
+    # International Polymarket weather cities. These are usable for Open-Meteo
+    # forecast context, but settlement still depends on each market's exact
+    # Wunderground/HKO/source station parsed from rules.
+    "seoul": {"name": "Seoul", "lat": 37.5665, "lon": 126.9780},
+    "tokyo": {"name": "Tokyo", "lat": 35.6762, "lon": 139.6503},
+    "beijing": {"name": "Beijing", "lat": 39.9042, "lon": 116.4074},
+    "shanghai": {"name": "Shanghai", "lat": 31.2304, "lon": 121.4737},
+    "london": {"name": "London", "lat": 51.5072, "lon": -0.1276},
+    "paris": {"name": "Paris", "lat": 48.8566, "lon": 2.3522},
+    "singapore": {"name": "Singapore", "lat": 1.3521, "lon": 103.8198},
+    "hong_kong": {"name": "Hong Kong", "lat": 22.3193, "lon": 114.1694},
+    "austin": {"name": "Austin", "lat": 30.2672, "lon": -97.7431},
+    "houston": {"name": "Houston", "lat": 29.7604, "lon": -95.3698},
 }
 
 

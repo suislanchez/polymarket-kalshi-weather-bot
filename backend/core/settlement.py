@@ -7,6 +7,7 @@ from typing import Optional, List, Tuple
 from sqlalchemy.orm import Session
 
 from backend.models.database import Trade, BotState, Signal
+from backend.core.position_risk import calculate_final_settlement_pnl
 
 logger = logging.getLogger("trading_bot")
 
@@ -34,8 +35,17 @@ async def fetch_polymarket_resolution(market_id: str, event_slug: Optional[str] 
                 if events:
                     event = events[0] if isinstance(events, list) else events
                     markets = event.get("markets", [])
+                    market = _select_polymarket_market_for_resolution(markets, market_id)
+                    if market is not None:
+                        return _parse_market_resolution(market)
                     if markets:
-                        return _parse_market_resolution(markets[0])
+                        logger.warning(
+                            "Event slug %s returned %s markets but none matched market id %s; "
+                            "falling back to direct market lookup",
+                            event_slug,
+                            len(markets),
+                            market_id,
+                        )
 
             # Fallback: try market ID directly
             url = f"https://gamma-api.polymarket.com/markets/{market_id}"
@@ -79,6 +89,30 @@ async def _search_market_in_events(market_id: str) -> Tuple[bool, Optional[float
     except Exception as e:
         logger.warning(f"Failed to search for market {market_id}: {e}")
         return False, None
+
+
+def _select_polymarket_market_for_resolution(markets: list[dict], market_id: str) -> Optional[dict]:
+    """Return the exact Polymarket market to resolve from an event market list.
+
+    Gamma event slugs often represent a whole weather bucket slate. The first
+    market in the event is not necessarily the paper trade's held market, so a
+    multi-market event must match the stored market id/condition id before
+    parsing outcomePrices. Only single-market events may fall back to their sole
+    market when the id is absent or stale.
+    """
+    target = str(market_id or "").strip().lower()
+    for market in markets or []:
+        candidate_ids = {
+            str(market.get("id") or "").strip().lower(),
+            str(market.get("conditionId") or "").strip().lower(),
+            str(market.get("condition_id") or "").strip().lower(),
+        }
+        if target and target in candidate_ids:
+            return market
+
+    if len(markets or []) == 1:
+        return markets[0]
+    return None
 
 
 def _parse_market_resolution(market: dict) -> Tuple[bool, Optional[float]]:
@@ -138,17 +172,15 @@ def calculate_pnl(trade: Trade, settlement_value: float) -> float:
         direction = "no"
 
     if direction == "yes":
-        if settlement_value == 1.0:
-            pnl = trade.size * (1.0 - trade.entry_price)
-        else:
-            pnl = -trade.size * trade.entry_price
+        won = settlement_value == 1.0
     else:  # NO / DOWN position
-        if settlement_value == 0.0:
-            pnl = trade.size * (1.0 - trade.entry_price)
-        else:
-            pnl = -trade.size * trade.entry_price
+        won = settlement_value == 0.0
 
-    return round(pnl, 2)
+    return calculate_final_settlement_pnl(
+        entry_price=trade.entry_price,
+        size=trade.size,
+        won=won,
+    )
 
 
 async def check_market_settlement(trade: Trade) -> Tuple[bool, Optional[float], Optional[float]]:
@@ -200,7 +232,30 @@ async def check_weather_settlement(trade: Trade) -> Tuple[bool, Optional[float],
 
 
 async def _fetch_kalshi_resolution(ticker: str) -> Tuple[bool, Optional[float]]:
-    """Fetch resolution status for a Kalshi market."""
+    """Fetch resolution status for a Kalshi market using public market data first."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0, headers={"User-Agent": "Hermes paper trading bot"}) as client:
+            response = await client.get(
+                f"https://api.elections.kalshi.com/trade-api/v2/markets/{ticker}"
+            )
+            response.raise_for_status()
+            data = response.json()
+            market = data.get("market", data)
+
+        status = (market.get("status") or "").lower()
+        result = (market.get("result") or "").lower()
+
+        if status in ("finalized", "determined", "settled") and result:
+            if result == "yes":
+                return True, 1.0
+            if result == "no":
+                return True, 0.0
+
+        return False, None
+
+    except Exception as public_error:
+        logger.warning(f"Failed public Kalshi resolution fetch for {ticker}: {public_error}")
+
     try:
         from backend.data.kalshi_client import KalshiClient, kalshi_credentials_present
 
@@ -211,10 +266,10 @@ async def _fetch_kalshi_resolution(ticker: str) -> Tuple[bool, Optional[float]]:
         data = await client.get_market(ticker)
         market = data.get("market", data)
 
-        status = market.get("status", "")
-        result = market.get("result", "")
+        status = (market.get("status") or "").lower()
+        result = (market.get("result") or "").lower()
 
-        if status in ("finalized", "determined") and result:
+        if status in ("finalized", "determined", "settled") and result:
             if result == "yes":
                 return True, 1.0
             elif result == "no":
@@ -225,6 +280,14 @@ async def _fetch_kalshi_resolution(ticker: str) -> Tuple[bool, Optional[float]]:
     except Exception as e:
         logger.warning(f"Failed to fetch Kalshi resolution for {ticker}: {e}")
         return False, None
+
+
+def _actual_outcome_label_for_direction(direction: str | None, settlement_value: float) -> str:
+    """Return the actual outcome label in the same vocabulary as a signal direction."""
+    normalized = (direction or "").lower()
+    if normalized in {"yes", "no"}:
+        return "yes" if settlement_value == 1.0 else "no"
+    return "up" if settlement_value == 1.0 else "down"
 
 
 async def settle_pending_trades(db: Session) -> List[Trade]:
@@ -273,7 +336,10 @@ async def settle_pending_trades(db: Session) -> List[Trade]:
                 if trade.signal_id:
                     linked_signal = db.query(Signal).filter(Signal.id == trade.signal_id).first()
                     if linked_signal:
-                        actual_outcome = "up" if settlement_value == 1.0 else "down"
+                        actual_outcome = _actual_outcome_label_for_direction(
+                            linked_signal.direction,
+                            settlement_value,
+                        )
                         linked_signal.actual_outcome = actual_outcome
                         linked_signal.outcome_correct = (linked_signal.direction == actual_outcome)
                         linked_signal.settlement_value = settlement_value

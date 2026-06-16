@@ -18,7 +18,13 @@ BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
 
 
 class KalshiClient:
-    """Async Kalshi API client using RSA-PSS signature auth."""
+    """Async Kalshi API client.
+
+    Public market-data endpoints such as ``/markets`` and
+    ``/markets/{ticker}/orderbook`` can be queried without credentials.  Keep
+    signing optional so simulation-only weather research can refresh public
+    orderbooks without touching portfolio/trading credentials.
+    """
 
     def __init__(self):
         self._private_key = None
@@ -73,7 +79,9 @@ class KalshiClient:
         """
         full_path = f"/trade-api/v2{path}"
         url = f"{BASE_URL}{path}"
-        headers = self._sign_request("GET", full_path)
+        headers = {"Content-Type": "application/json"}
+        if kalshi_credentials_present():
+            headers = self._sign_request("GET", full_path)
 
         async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.get(url, headers=headers, params=params)
@@ -87,6 +95,10 @@ class KalshiClient:
     async def get_market(self, ticker: str) -> dict:
         """Fetch a single market by ticker."""
         return await self.get(f"/markets/{ticker}")
+
+    async def get_orderbook(self, ticker: str) -> dict:
+        """Fetch a market orderbook by ticker."""
+        return await self.get(f"/markets/{ticker}/orderbook")
 
     async def get_balance(self) -> dict:
         """Get portfolio balance (useful for auth test)."""

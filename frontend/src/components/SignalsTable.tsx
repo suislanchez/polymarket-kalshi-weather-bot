@@ -1,5 +1,5 @@
 import { ArrowUpDown, ArrowUp, ArrowDown } from 'lucide-react'
-import { useState, useMemo } from 'react'
+import { Fragment, useState, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import type { Signal, WeatherSignal } from '../types'
 import { platformStyles } from '../utils'
@@ -28,6 +28,12 @@ interface UnifiedSignal {
   suggestedSize: number
   reasoning: string
   actionable: boolean
+  noTradeReasons: string[]
+  executionSpread?: number | null
+  topAskSize?: number | null
+  settlementSource?: string
+  settlementUrl?: string | null
+  modelPriceSource?: string
 }
 
 function PlatformBadge({ platform }: { platform: string }) {
@@ -77,6 +83,12 @@ export function SignalsTable({ signals, weatherSignals, onSimulateTrade, isSimul
       suggestedSize: s.suggested_size,
       reasoning: s.reasoning,
       actionable: s.actionable,
+      noTradeReasons: s.no_trade_reasons || [],
+      executionSpread: s.execution_spread,
+      topAskSize: s.top_ask_size,
+      settlementSource: s.settlement_source,
+      settlementUrl: s.settlement_url,
+      modelPriceSource: s.model_price_source,
     }))
 
     const wx: UnifiedSignal[] = weatherSignals.map(s => ({
@@ -93,6 +105,9 @@ export function SignalsTable({ signals, weatherSignals, onSimulateTrade, isSimul
       suggestedSize: s.suggested_size,
       reasoning: s.reasoning,
       actionable: s.actionable,
+      noTradeReasons: s.no_trade_reasons || [],
+      executionSpread: s.execution_spread,
+      topAskSize: s.top_ask_size,
     }))
 
     return [...btc, ...wx]
@@ -183,60 +198,118 @@ export function SignalsTable({ signals, weatherSignals, onSimulateTrade, isSimul
             const isUp = sig.direction === 'up' || sig.direction === 'above'
 
             return (
-              <motion.tr
-                key={sig.key}
-                initial={{ opacity: 0, y: 4 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: i * 0.02 }}
-                className={`border-b border-neutral-800/50 hover:bg-neutral-800/30 text-[11px] cursor-pointer ${
-                  sig.actionable ? '' : 'opacity-40'
-                }`}
-                onClick={() => setExpandedKey(isExpanded ? null : sig.key)}
-              >
-                <td className="py-1 px-1.5">
-                  <PlatformBadge platform={sig.platform} />
-                </td>
-                <td className="py-1 px-1.5">
-                  <CategoryBadge category={sig.category} />
-                </td>
-                <td className="py-1 px-1.5">
-                  <span className="text-neutral-400 truncate block max-w-[110px]" title={sig.title}>
-                    {sig.title}
-                  </span>
-                </td>
-                <td className="py-1 px-1.5 text-center">
-                  <span className={`text-[10px] font-semibold uppercase ${isUp ? 'text-green-500' : 'text-red-500'}`}>
-                    {sig.direction}
-                  </span>
-                </td>
-                <td className="py-1 px-1.5 text-right">
-                  <span className={`font-semibold tabular-nums ${
-                    sig.edge > 0 ? 'text-green-500' : sig.edge < 0 ? 'text-red-500' : 'text-neutral-600'
-                  }`}>
-                    {sig.edge === 0 ? '-' : `${Math.abs(sig.edge * 100).toFixed(1)}%`}
-                  </span>
-                </td>
-                <td className="py-1 px-1.5">
-                  <EdgeBar edge={sig.edge} />
-                </td>
-                <td className="py-1 px-1.5 text-right text-neutral-300 tabular-nums">
-                  {(sig.modelProb * 100).toFixed(0)}%
-                </td>
-                <td className="py-1 px-1.5 text-right text-blue-400 tabular-nums">
-                  {sig.suggestedSize > 0 ? `$${sig.suggestedSize.toFixed(0)}` : '-'}
-                </td>
-                <td className="py-1 px-1.5 text-right">
-                  {sig.actionable && sig.category === 'BTC' && (
-                    <button
-                      onClick={(e) => { e.stopPropagation(); onSimulateTrade(sig.ticker) }}
-                      disabled={isSimulating}
-                      className="px-1.5 py-0.5 text-[8px] font-medium uppercase bg-amber-500/10 text-amber-400 border border-amber-500/20 hover:bg-amber-500/20 disabled:opacity-50"
-                    >
-                      Trade
-                    </button>
-                  )}
-                </td>
-              </motion.tr>
+              <Fragment key={sig.key}>
+                <motion.tr
+                  initial={{ opacity: 0, y: 4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ delay: i * 0.02 }}
+                  className={`border-b border-neutral-800/50 hover:bg-neutral-800/30 text-[11px] cursor-pointer ${
+                    sig.actionable ? '' : 'opacity-40'
+                  }`}
+                  onClick={() => setExpandedKey(isExpanded ? null : sig.key)}
+                >
+                  <td className="py-1 px-1.5">
+                    <PlatformBadge platform={sig.platform} />
+                  </td>
+                  <td className="py-1 px-1.5">
+                    <CategoryBadge category={sig.category} />
+                  </td>
+                  <td className="py-1 px-1.5">
+                    <span className="text-neutral-400 truncate block max-w-[110px]" title={sig.title}>
+                      {sig.title}
+                    </span>
+                  </td>
+                  <td className="py-1 px-1.5 text-center">
+                    <span className={`text-[10px] font-semibold uppercase ${isUp ? 'text-green-500' : 'text-red-500'}`}>
+                      {sig.direction}
+                    </span>
+                  </td>
+                  <td className="py-1 px-1.5 text-right">
+                    <span className={`font-semibold tabular-nums ${
+                      sig.edge > 0 ? 'text-green-500' : sig.edge < 0 ? 'text-red-500' : 'text-neutral-600'
+                    }`}>
+                      {sig.edge === 0 ? '-' : `${Math.abs(sig.edge * 100).toFixed(1)}%`}
+                    </span>
+                  </td>
+                  <td className="py-1 px-1.5">
+                    <EdgeBar edge={sig.edge} />
+                  </td>
+                  <td className="py-1 px-1.5 text-right text-neutral-300 tabular-nums">
+                    {(sig.modelProb * 100).toFixed(0)}%
+                  </td>
+                  <td className="py-1 px-1.5 text-right text-blue-400 tabular-nums">
+                    {sig.suggestedSize > 0 ? `$${sig.suggestedSize.toFixed(0)}` : '-'}
+                  </td>
+                  <td className="py-1 px-1.5 text-right">
+                    {sig.actionable && sig.category === 'BTC' && (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); onSimulateTrade(sig.ticker) }}
+                        disabled={isSimulating}
+                        className="px-1.5 py-0.5 text-[8px] font-medium uppercase bg-amber-500/10 text-amber-400 border border-amber-500/20 hover:bg-amber-500/20 disabled:opacity-50"
+                      >
+                        Trade
+                      </button>
+                    )}
+                  </td>
+                </motion.tr>
+                {isExpanded && (
+                  <motion.tr
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    className="border-b border-neutral-800 bg-neutral-950/70 text-[10px]"
+                  >
+                    <td colSpan={9} className="px-3 py-2">
+                      <div className="grid gap-2 text-neutral-400 sm:grid-cols-3">
+                        <div>
+                          <div className="uppercase tracking-wide text-neutral-600">Market</div>
+                          <div className="tabular-nums">Mkt {(sig.marketProb * 100).toFixed(1)}% · Model {(sig.modelProb * 100).toFixed(1)}% · Conf {(sig.confidence * 100).toFixed(0)}%</div>
+                        </div>
+                        <div>
+                          <div className="uppercase tracking-wide text-neutral-600">Execution depth</div>
+                          <div className="tabular-nums">
+                            Spread {sig.executionSpread == null ? 'n/a' : `${(sig.executionSpread * 100).toFixed(1)}%`} · Top ask {sig.topAskSize == null ? 'n/a' : sig.topAskSize.toFixed(1)}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="uppercase tracking-wide text-neutral-600">Gate</div>
+                          <div className={sig.actionable ? 'text-green-500' : 'text-amber-500'}>
+                            {sig.actionable ? 'Paper-actionable' : 'No paper trade'}
+                          </div>
+                        </div>
+                        {sig.category === 'BTC' && (
+                          <div>
+                            <div className="uppercase tracking-wide text-neutral-600">Source mapping</div>
+                            <div className="tabular-nums">
+                              Settle {sig.settlementSource || 'unknown'} · Model {sig.modelPriceSource || 'unknown'}
+                            </div>
+                            {sig.settlementUrl && (
+                              <a className="text-amber-500 hover:text-amber-400" href={sig.settlementUrl} target="_blank" rel="noreferrer">
+                                settlement source
+                              </a>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                      {sig.noTradeReasons.length > 0 && (
+                        <div className="mt-2 rounded border border-amber-500/20 bg-amber-500/5 p-2 text-amber-300">
+                          <div className="mb-1 uppercase tracking-wide text-amber-500/80">No-trade reasons</div>
+                          <ul className="list-disc space-y-0.5 pl-4">
+                            {sig.noTradeReasons.map((reason) => (
+                              <li key={reason}>{reason}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                      {sig.reasoning && (
+                        <div className="mt-2 text-neutral-500">
+                          <span className="uppercase tracking-wide text-neutral-600">Reasoning</span> {sig.reasoning}
+                        </div>
+                      )}
+                    </td>
+                  </motion.tr>
+                )}
+              </Fragment>
             )
           })}
         </AnimatePresence>

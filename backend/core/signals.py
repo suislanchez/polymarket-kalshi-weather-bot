@@ -8,6 +8,12 @@ import asyncio
 from backend.config import settings
 from backend.data.btc_markets import BtcMarket, fetch_active_btc_markets
 from backend.data.crypto import fetch_crypto_price, compute_btc_microstructure
+from backend.core.btc_methodology import (
+    derive_btc_window_boundary_timestamps,
+    evaluate_btc_no_trade_gate,
+    persist_btc_price_snapshot,
+)
+from backend.core.btc_signal_persistence import btc_signal_to_db_kwargs
 from backend.models.database import SessionLocal, Signal
 
 logger = logging.getLogger("trading_bot")
@@ -33,6 +39,22 @@ class TradingSignal:
     sources: List[str] = field(default_factory=list)
     reasoning: str = ""
     timestamp: datetime = field(default_factory=datetime.utcnow)
+    actionable: bool = False
+    no_trade_reasons: List[str] = field(default_factory=list)
+    execution_spread: Optional[float] = None
+    top_ask_size: Optional[float] = None
+    settlement_source: str = "unknown"
+    settlement_url: Optional[str] = None
+    model_price_source: str = "unknown"
+    chainlink_feed_id: Optional[str] = None
+    chainlink_capture_method: Optional[str] = None
+    chainlink_source_url: Optional[str] = None
+    chainlink_start_price: Optional[float] = None
+    chainlink_end_price: Optional[float] = None
+    chainlink_start_observed_at: Optional[int] = None
+    chainlink_end_observed_at: Optional[int] = None
+    chainlink_start_source_snapshot_path: Optional[str] = None
+    chainlink_end_source_snapshot_path: Optional[str] = None
 
     # BTC price context
     btc_price: float = 0.0
@@ -42,7 +64,7 @@ class TradingSignal:
     @property
     def passes_threshold(self) -> bool:
         """Check if signal passes minimum edge threshold."""
-        return abs(self.edge) >= settings.MIN_EDGE_THRESHOLD
+        return self.actionable and abs(self.edge) >= settings.MIN_EDGE_THRESHOLD
 
 
 def calculate_edge(
@@ -139,6 +161,8 @@ async def generate_btc_signal(market: BtcMarket) -> Optional[TradingSignal]:
     if not micro:
         return None
 
+    persist_btc_price_snapshot(micro)
+
     market_up_prob = market.up_price
 
     # Skip resolved markets
@@ -226,7 +250,31 @@ async def generate_btc_signal(market: BtcMarket) -> Optional[TradingSignal]:
     time_remaining = (window_end - now).total_seconds()
     time_ok = settings.MIN_TIME_REMAINING <= time_remaining <= settings.MAX_TIME_REMAINING
 
-    passes_filters = has_convergence and entry_price <= settings.MAX_ENTRY_PRICE and time_ok
+    expected_start_ts, expected_end_ts = derive_btc_window_boundary_timestamps(market)
+    gate = evaluate_btc_no_trade_gate(
+        direction=direction,
+        settlement_source=market.settlement_source,
+        model_price_source=micro.source,
+        up_bid=market.up_bid,
+        up_ask=market.up_ask,
+        up_ask_size=market.up_ask_size,
+        down_bid=market.down_bid,
+        down_ask=market.down_ask,
+        down_ask_size=market.down_ask_size,
+        max_entry_price=settings.MAX_ENTRY_PRICE,
+        chainlink_start_price=market.chainlink_start_price,
+        chainlink_end_price=market.chainlink_end_price,
+        chainlink_start_observed_at=market.chainlink_start_observed_at,
+        chainlink_end_observed_at=market.chainlink_end_observed_at,
+        chainlink_feed_id=market.chainlink_feed_id,
+        chainlink_capture_method=market.chainlink_capture_method,
+        chainlink_start_source_snapshot_path=market.chainlink_start_source_snapshot_path,
+        chainlink_end_source_snapshot_path=market.chainlink_end_source_snapshot_path,
+        expected_window_start_ts=expected_start_ts,
+        expected_window_end_ts=expected_end_ts,
+    )
+
+    passes_filters = has_convergence and entry_price <= settings.MAX_ENTRY_PRICE and time_ok and gate.actionable
 
     # Zero out edge if filters fail (signal still returned for UI visibility)
     if not passes_filters:
@@ -257,6 +305,7 @@ async def generate_btc_signal(market: BtcMarket) -> Optional[TradingSignal]:
         filter_reasons.append(f"time {time_remaining:.0f}s not in [{settings.MIN_TIME_REMAINING},{settings.MAX_TIME_REMAINING}]")
     if entry_price > settings.MAX_ENTRY_PRICE:
         filter_reasons.append(f"entry {entry_price:.0%} > {settings.MAX_ENTRY_PRICE:.0%}")
+    filter_reasons.extend(gate.reasons)
     filter_note = f" [{', '.join(filter_reasons)}]" if filter_reasons else ""
 
     reasoning = (
@@ -281,6 +330,22 @@ async def generate_btc_signal(market: BtcMarket) -> Optional[TradingSignal]:
         suggested_size=suggested_size,
         sources=[f"binance_microstructure_{micro.source}"],
         reasoning=reasoning,
+        actionable=passes_filters,
+        no_trade_reasons=filter_reasons,
+        execution_spread=gate.spread,
+        top_ask_size=gate.top_ask_size,
+        settlement_source=market.settlement_source,
+        settlement_url=market.settlement_url,
+        model_price_source=micro.source,
+        chainlink_feed_id=market.chainlink_feed_id,
+        chainlink_capture_method=market.chainlink_capture_method,
+        chainlink_source_url=market.chainlink_source_url,
+        chainlink_start_price=market.chainlink_start_price,
+        chainlink_end_price=market.chainlink_end_price,
+        chainlink_start_observed_at=market.chainlink_start_observed_at,
+        chainlink_end_observed_at=market.chainlink_end_observed_at,
+        chainlink_start_source_snapshot_path=market.chainlink_start_source_snapshot_path,
+        chainlink_end_source_snapshot_path=market.chainlink_end_source_snapshot_path,
         btc_price=micro.price,
         btc_change_1h=micro.momentum_5m * 12,  # rough annualisation for display
         btc_change_24h=micro.momentum_15m * 96,  # rough extrapolation for display
@@ -350,21 +415,7 @@ def _persist_signals(signals: list):
             if existing:
                 continue
 
-            db_signal = Signal(
-                market_ticker=signal.market.market_id,
-                platform="polymarket",
-                timestamp=signal.timestamp,
-                direction=signal.direction,
-                model_probability=signal.model_probability,
-                market_price=signal.market_probability,
-                edge=signal.edge,
-                confidence=signal.confidence,
-                kelly_fraction=signal.kelly_fraction,
-                suggested_size=signal.suggested_size,
-                sources=signal.sources,
-                reasoning=signal.reasoning,
-                executed=False,
-            )
+            db_signal = Signal(**btc_signal_to_db_kwargs(signal))
             db.add(db_signal)
 
         db.commit()

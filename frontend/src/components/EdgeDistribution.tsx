@@ -5,6 +5,7 @@ import type { Signal, WeatherSignal } from '../types'
 interface Props {
   btcSignals: Signal[]
   weatherSignals: WeatherSignal[]
+  showLegacySections?: boolean
 }
 
 const BUCKETS = ['0-2%', '2-5%', '5-10%', '10-20%', '20%+']
@@ -32,15 +33,17 @@ const CustomTooltip = ({ active, payload, label }: any) => {
   )
 }
 
-export function EdgeDistribution({ btcSignals, weatherSignals }: Props) {
+export function EdgeDistribution({ btcSignals, weatherSignals, showLegacySections = false }: Props) {
   const data = useMemo(() => {
     const counts: Record<string, { btc: number; weather: number }> = {}
     BUCKETS.forEach(b => { counts[b] = { btc: 0, weather: 0 } })
 
-    btcSignals.forEach(s => {
-      const bucket = getBucket(s.edge)
-      counts[bucket].btc++
-    })
+    if (showLegacySections) {
+      btcSignals.forEach(s => {
+        const bucket = getBucket(s.edge)
+        counts[bucket].btc++
+      })
+    }
 
     weatherSignals.forEach(s => {
       const bucket = getBucket(s.edge)
@@ -49,12 +52,12 @@ export function EdgeDistribution({ btcSignals, weatherSignals }: Props) {
 
     return BUCKETS.map(bucket => ({
       bucket,
-      BTC: counts[bucket].btc,
+      ...(showLegacySections ? { BTC: counts[bucket].btc } : {}),
       WX: counts[bucket].weather,
     }))
-  }, [btcSignals, weatherSignals])
+  }, [btcSignals, weatherSignals, showLegacySections])
 
-  const total = btcSignals.length + weatherSignals.length
+  const total = (showLegacySections ? btcSignals.length : 0) + weatherSignals.length
   if (total === 0) {
     return (
       <div className="h-full flex items-center justify-center text-neutral-600 text-[10px]">
@@ -89,7 +92,7 @@ export function EdgeDistribution({ btcSignals, weatherSignals }: Props) {
             iconSize={8}
             wrapperStyle={{ fontSize: '9px', fontFamily: 'JetBrains Mono' }}
           />
-          <Bar dataKey="BTC" stackId="a" fill="#d97706" radius={[0, 0, 0, 0]} />
+          {showLegacySections && <Bar dataKey="BTC" stackId="a" fill="#d97706" radius={[0, 0, 0, 0]} />}
           <Bar dataKey="WX" stackId="a" fill="#06b6d4" radius={[2, 2, 0, 0]} />
         </BarChart>
       </ResponsiveContainer>

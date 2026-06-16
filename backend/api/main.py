@@ -1,5 +1,5 @@
-"""FastAPI backend for BTC 5-min trading bot dashboard."""
-from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect
+"""FastAPI backend for weather paper-trading dashboard."""
+from fastapi import FastAPI, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
@@ -11,17 +11,71 @@ import os
 from backend.config import settings
 from backend.models.database import (
     get_db, init_db, SessionLocal,
-    Signal, Trade, BotState, AILog, ScanLog
+    Signal, Trade, BotState, AILog, ScanLog, RottenTomatoesSourceState
 )
 from backend.core.signals import scan_for_signals, TradingSignal
+from backend.core.btc_methodology import validate_btc_signal_for_simulation
+from backend.core.btc_paper_account import (
+    load_latest_btc_calibration_rows_from_sqlite,
+    load_latest_btc_calibration_summary_from_sqlite,
+    summarize_btc_paper_account,
+)
+from backend.core.entertainment_paper_account import (
+    load_latest_entertainment_calibration_summary_from_sqlite,
+    summarize_entertainment_paper_account,
+)
+from backend.core.entertainment_signals import (
+    build_rotten_tomatoes_review_rows,
+    load_latest_rotten_tomatoes_market_rows,
+    summarize_latest_rotten_tomatoes_source_states,
+)
+from backend.core.signal_review import summarize_signal_review_queue
+from backend.core.weather_paper_account import (
+    load_bot_weather_signal_calibration_rows_from_sqlite,
+    load_latest_polymarket_weather_source_state_rows_from_sqlite,
+    load_latest_polymarket_weather_source_state_summary_from_sqlite,
+    load_latest_weather_bot_signal_calibration_rows_from_sqlite,
+    load_latest_weather_bot_signal_calibration_summary_from_sqlite,
+    load_latest_weather_calibration_rows_from_sqlite,
+    load_latest_weather_calibration_summary_from_sqlite,
+    load_latest_weather_signal_review_candidate_rows_from_sqlite,
+    summarize_weather_paper_account,
+)
 from backend.data.btc_markets import fetch_active_btc_markets, BtcMarket
 from backend.data.crypto import fetch_crypto_price, compute_btc_microstructure
-
-from pydantic import BaseModel
+from backend.api.schemas import (
+    BtcCalibrationRowResponse,
+    BtcCalibrationSummaryResponse,
+    BtcPriceResponse,
+    BtcWindowResponse,
+    BotStats,
+    CalibrationBucket,
+    CalibrationSummary,
+    DashboardData,
+    EntertainmentCalibrationSummaryResponse,
+    EventResponse,
+    MicrostructureResponse,
+    OpenPositionRiskRowResponse,
+    OpenPositionRiskSummaryResponse,
+    PolymarketWeatherSourceStateResponse,
+    PolymarketWeatherSourceStateSummaryResponse,
+    RottenTomatoesSourceStateResponse,
+    SignalResponse,
+    SignalReviewQueueResponse,
+    TradeResponse,
+    WeatherBotCalibrationRowResponse,
+    WeatherCalibrationRowResponse,
+    WeatherCalibrationSummaryResponse,
+    WeatherDivergenceResponse,
+    WeatherForecastResponse,
+    WeatherMarketResponse,
+    WeatherSignalResponse,
+    WeatherSignalReviewCandidateResponse,
+)
 
 app = FastAPI(
-    title="BTC 5-Min Trading Bot",
-    description="Polymarket BTC Up/Down 5-minute market trading bot",
+    title="Weather Paper Trading Dashboard",
+    description="Simulation-only weather prediction-market paper-trading dashboard",
     version="3.0.0"
 )
 
@@ -32,6 +86,34 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _redact_address(address: Optional[str]) -> Optional[str]:
+    """Shorten an account/wallet address for status display.
+
+    Never returns the full value. Short inputs collapse to a single ellipsis so
+    we don't accidentally reveal a whole short identifier.
+    """
+    if not address:
+        return None
+    text = str(address)
+    if len(text) <= 12:
+        return "…"
+    return f"{text[:6]}…{text[-4:]}"
+
+
+def _summarize_account_balance(balance_data: object) -> bool:
+    """Reduce a raw private balance payload to a non-sensitive presence flag.
+
+    Returns True when the payload looks like it carries balance information, so
+    the dashboard can show "funded/connected" without ever exposing the value.
+    """
+    if isinstance(balance_data, dict):
+        return any(
+            key in balance_data
+            for key in ("balance", "available_balance", "portfolio_value", "cash")
+        )
+    return bool(balance_data)
 
 
 # WebSocket connection manager
@@ -58,171 +140,220 @@ class ConnectionManager:
 ws_manager = ConnectionManager()
 
 
-# Pydantic response models
-class BtcPriceResponse(BaseModel):
-    price: float
-    change_24h: float
-    change_7d: float
-    market_cap: float
-    volume_24h: float
-    last_updated: datetime
+# Pydantic response models are imported from backend.api.schemas so dashboard
+# serialization stays dependency-light and covered without importing FastAPI or
+# SQLAlchemy route modules.
 
 
-class BtcWindowResponse(BaseModel):
-    slug: str
-    market_id: str
-    up_price: float
-    down_price: float
-    window_start: datetime
-    window_end: datetime
-    volume: float
-    is_active: bool
-    is_upcoming: bool
-    time_until_end: float
-    spread: float
+WEATHER_ONLY_LEGACY_NOTE = "Legacy BTC and RT/entertainment dashboard sections paused in weather-only scope"
+WEATHER_MARKET_TYPES = ("weather", "kalshi_weather", "polymarket_weather", "temperature", "rain")
+ENTERTAINMENT_MARKET_TYPES = ("entertainment", "rt", "rotten_tomatoes", "box_office")
 
 
-class MicrostructureResponse(BaseModel):
-    rsi: float = 50.0
-    momentum_1m: float = 0.0
-    momentum_5m: float = 0.0
-    momentum_15m: float = 0.0
-    vwap_deviation: float = 0.0
-    sma_crossover: float = 0.0
-    volatility: float = 0.0
-    price: float = 0.0
-    source: str = "unknown"
+def _legacy_dashboard_sections_enabled() -> bool:
+    """Return whether /api/dashboard should include legacy BTC/RT sections.
+
+    Direct BTC and RT endpoints remain available for historical/debug access, but
+    Kayvon's active dashboard scope is weather-only unless explicitly overridden.
+    """
+    scope = (getattr(settings, "ACTIVE_PRODUCT_SCOPE", "weather") or "weather").strip().lower()
+    explicit_legacy = bool(getattr(settings, "DASHBOARD_LEGACY_SECTIONS_ENABLED", False))
+    return explicit_legacy or scope not in {"weather", "weather_only", "weather-only"}
 
 
-class SignalResponse(BaseModel):
-    market_ticker: str
-    market_title: str
-    platform: str
-    direction: str
-    model_probability: float
-    market_probability: float
-    edge: float
-    confidence: float
-    suggested_size: float
-    reasoning: str
-    timestamp: datetime
-    category: str = "crypto"
-    event_slug: Optional[str] = None
-    btc_price: float = 0.0
-    btc_change_24h: float = 0.0
-    window_end: Optional[datetime] = None
-    actionable: bool = False
+def _dashboard_legacy_note() -> Optional[str]:
+    if _legacy_dashboard_sections_enabled():
+        return None
+    return WEATHER_ONLY_LEGACY_NOTE
 
 
-class TradeResponse(BaseModel):
-    id: int
-    market_ticker: str
-    platform: str
-    event_slug: Optional[str] = None
-    direction: str
-    entry_price: float
-    size: float
-    timestamp: datetime
-    settled: bool
-    result: str
-    pnl: Optional[float]
+def _active_product_scope() -> str:
+    return (getattr(settings, "ACTIVE_PRODUCT_SCOPE", "weather") or "weather").strip().lower() or "weather"
 
 
-class BotStats(BaseModel):
-    bankroll: float
-    total_trades: int
-    winning_trades: int
-    win_rate: float
-    total_pnl: float
-    is_running: bool
-    last_run: Optional[datetime]
+def _query_dashboard_recent_trades(
+    db: Session,
+    *,
+    legacy_sections_enabled: bool,
+    limit: int = 50,
+) -> List[Trade]:
+    """Return trade rows for the active dashboard scope.
+
+    In Kayvon's default weather-only scope, legacy BTC/RT trade rows can still
+    remain in the app DB for historical debugging. Keep the active dashboard's
+    recent-trades panel weather-scoped unless legacy sections are explicitly
+    re-enabled.
+    """
+    query = db.query(Trade)
+    if not legacy_sections_enabled:
+        query = query.filter(Trade.market_type.in_(WEATHER_MARKET_TYPES))
+    return query.order_by(Trade.timestamp.desc()).limit(limit).all()
 
 
-class CalibrationBucket(BaseModel):
-    bucket: str
-    predicted_avg: float
-    actual_rate: float
-    count: int
+def _query_dashboard_equity_trades(
+    db: Session,
+    *,
+    legacy_sections_enabled: bool,
+) -> List[Trade]:
+    """Return settled trade rows used by the active dashboard equity curve."""
+    query = db.query(Trade).filter(Trade.settled == True)
+    if not legacy_sections_enabled:
+        query = query.filter(Trade.market_type.in_(WEATHER_MARKET_TYPES))
+    return query.order_by(Trade.timestamp).all()
 
 
-class CalibrationSummary(BaseModel):
-    total_signals: int
-    total_with_outcome: int
-    accuracy: float
-    avg_predicted_edge: float
-    avg_actual_edge: float
-    brier_score: float
+def _query_open_position_risk_trades(
+    db: Session,
+    *,
+    legacy_sections_enabled: bool,
+    limit: int = 50,
+) -> List[Trade]:
+    """Return open trades for the active Cash-out Risk scope.
+
+    The active product scope is weather-only, so the dashboard and default API
+    readback should not surface legacy BTC/RT open rows unless legacy sections
+    are explicitly re-enabled for debugging.
+    """
+    query = (
+        db.query(Trade)
+        .filter(Trade.settled == False)  # noqa: E712 - SQLAlchemy comparison
+        .filter(Trade.closed_early == False)  # noqa: E712 - SQLAlchemy comparison
+    )
+    if not legacy_sections_enabled:
+        query = query.filter(Trade.market_type.in_(WEATHER_MARKET_TYPES))
+    return query.order_by(Trade.last_mark_time.desc().nullslast(), Trade.timestamp.desc()).limit(limit).all()
 
 
-class WeatherForecastResponse(BaseModel):
-    city_key: str
-    city_name: str
-    target_date: str
-    mean_high: float
-    std_high: float
-    mean_low: float
-    std_low: float
-    num_members: int
-    ensemble_agreement: float
+def _aggregate_bot_stats_for_scope(
+    state: BotState,
+    *,
+    weather_account: dict,
+    legacy_sections_enabled: bool,
+) -> dict:
+    """Choose top-level stats for the active product scope.
+
+    `BotState` historically tracks the original all-lane bankroll. In the
+    default weather-only product scope, top-level `/api/stats` and the dashboard
+    header should mirror the active weather paper ledger instead of legacy BTC
+    or RT state that may remain in the database.
+    """
+    if not legacy_sections_enabled:
+        total_trades = int(weather_account.get("total_trades") or 0)
+        winning_trades = int(weather_account.get("winning_trades") or 0)
+        return {
+            "bankroll": float(weather_account.get("current_equity") or 0.0),
+            "total_trades": total_trades,
+            "winning_trades": winning_trades,
+            "win_rate": winning_trades / total_trades if total_trades > 0 else 0,
+            "total_pnl": float(weather_account.get("realized_pnl") or 0.0),
+            "is_running": bool(getattr(state, "is_running", False)),
+            "last_run": getattr(state, "last_run", None),
+        }
+
+    total_trades = int(getattr(state, "total_trades", 0) or 0)
+    winning_trades = int(getattr(state, "winning_trades", 0) or 0)
+    return {
+        "bankroll": float(getattr(state, "bankroll", 0.0) or 0.0),
+        "total_trades": total_trades,
+        "winning_trades": winning_trades,
+        "win_rate": winning_trades / total_trades if total_trades > 0 else 0,
+        "total_pnl": float(getattr(state, "total_pnl", 0.0) or 0.0),
+        "is_running": bool(getattr(state, "is_running", False)),
+        "last_run": getattr(state, "last_run", None),
+    }
 
 
-class WeatherMarketResponse(BaseModel):
-    slug: str
-    market_id: str
-    platform: str = "polymarket"
-    title: str
-    city_key: str
-    city_name: str
-    target_date: str
-    threshold_f: float
-    metric: str
-    direction: str
-    yes_price: float
-    no_price: float
-    volume: float
+def _trade_to_response(t: Trade) -> TradeResponse:
+    return TradeResponse(
+        id=t.id,
+        market_ticker=t.market_ticker,
+        platform=t.platform,
+        event_slug=t.event_slug,
+        direction=t.direction,
+        entry_price=t.entry_price,
+        size=t.size,
+        timestamp=t.timestamp,
+        settled=t.settled,
+        result=t.result,
+        pnl=t.pnl,
+        closed_early=bool(getattr(t, "closed_early", False)),
+        exit_time=getattr(t, "exit_time", None),
+        exit_price=getattr(t, "exit_price", None),
+        exit_reason=getattr(t, "exit_reason", None),
+        unrealized_pnl=getattr(t, "unrealized_pnl", None),
+        last_mark_price=getattr(t, "last_mark_price", None),
+        last_mark_time=getattr(t, "last_mark_time", None),
+        last_risk_action=getattr(t, "last_risk_action", None),
+        last_risk_reasons=getattr(t, "last_risk_reasons", None) or [],
+        last_risk_source_status=getattr(t, "last_risk_source_status", None),
+        last_risk_evidence=getattr(t, "last_risk_evidence", None) or {},
+    )
 
 
-class WeatherSignalResponse(BaseModel):
-    market_id: str
-    city_key: str
-    city_name: str
-    target_date: str
-    threshold_f: float
-    metric: str
-    direction: str
-    model_probability: float
-    market_probability: float
-    edge: float
-    confidence: float
-    suggested_size: float
-    reasoning: str
-    ensemble_mean: float
-    ensemble_std: float
-    ensemble_members: int
-    actionable: bool = False
-
-
-class DashboardData(BaseModel):
-    stats: BotStats
-    btc_price: Optional[BtcPriceResponse]
-    microstructure: Optional[MicrostructureResponse] = None
-    windows: List[BtcWindowResponse]
-    active_signals: List[SignalResponse]
-    recent_trades: List[TradeResponse]
-    equity_curve: List[dict]
-    calibration: Optional[CalibrationSummary] = None
-    weather_signals: List[WeatherSignalResponse] = []
-    weather_forecasts: List[WeatherForecastResponse] = []
-
-
-class EventResponse(BaseModel):
-    timestamp: str
-    type: str
-    message: str
-    data: dict = {}
+def _open_position_risk_row_from_trade(t: Trade) -> OpenPositionRiskRowResponse:
+    last_mark_time = getattr(t, "last_mark_time", None)
+    risk_scan_stale = last_mark_time is None
+    checked_at = last_mark_time or datetime.utcnow()
+    risk_evidence = getattr(t, "last_risk_evidence", None) or {}
+    return OpenPositionRiskRowResponse(
+        trade_id=t.id,
+        market_type=getattr(t, "market_type", None) or "btc",
+        market_ticker=t.market_ticker,
+        event_slug=t.event_slug,
+        direction=t.direction,
+        entry_price=t.entry_price,
+        size=t.size,
+        current_exit_price=getattr(t, "last_mark_price", None),
+        unrealized_pnl=getattr(t, "unrealized_pnl", None),
+        model_probability_for_held_side=getattr(t, "model_probability", None),
+        market_probability_for_held_side=getattr(t, "last_mark_price", None),
+        action=getattr(t, "last_risk_action", None) or "watch",
+        reasons=getattr(t, "last_risk_reasons", None) or ["risk scan has not refreshed this position yet"],
+        source_status=getattr(t, "last_risk_source_status", None),
+        risk_evidence=risk_evidence,
+        live_exit_quote_bid=risk_evidence.get("live_exit_quote_bid"),
+        live_exit_quote_ask=risk_evidence.get("live_exit_quote_ask"),
+        live_exit_quote_top_bid_size=risk_evidence.get("live_exit_quote_top_bid_size"),
+        live_exit_quote_top_ask_size=risk_evidence.get("live_exit_quote_top_ask_size"),
+        live_exit_quote_source=risk_evidence.get("quote_source"),
+        live_exit_quote_error=risk_evidence.get("quote_error"),
+        settlement_source_known=risk_evidence.get("settlement_source_known"),
+        station_known=risk_evidence.get("station_known"),
+        settlement_url=risk_evidence.get("settlement_url"),
+        settlement_tags=risk_evidence.get("settlement_tags") or [],
+        latest_signal_id=risk_evidence.get("latest_signal_id"),
+        latest_signal_timestamp=risk_evidence.get("latest_signal_timestamp"),
+        latest_signal_market_price=risk_evidence.get("latest_signal_market_price"),
+        latest_signal_edge=risk_evidence.get("latest_signal_edge"),
+        latest_signal_suggested_size=risk_evidence.get("latest_signal_suggested_size"),
+        latest_signal_model_probability_for_held_side=risk_evidence.get("latest_signal_model_probability_for_held_side"),
+        checked_at=checked_at,
+        risk_scan_stale=risk_scan_stale,
+    )
 
 
 # Startup / Shutdown
+def _maybe_start_scheduler() -> bool:
+    """Launch background scheduler jobs unless autostart is disabled.
+
+    Returns True if the scheduler was started. Read-only API smokes and the
+    FastAPI TestClient can set ``SCHEDULER_AUTOSTART=false`` so constructing the
+    app never starts market scans, settlement, or paper trades.
+    """
+    from backend.core.scheduler import start_scheduler, log_event
+
+    if not settings.SCHEDULER_AUTOSTART:
+        log_event(
+            "info",
+            "Scheduler autostart disabled (SCHEDULER_AUTOSTART=false); no background jobs started",
+        )
+        return False
+
+    start_scheduler()
+    log_event("success", "Trading bot scheduler initialized")
+    return True
+
+
 @app.on_event("startup")
 async def startup():
     print("=" * 60)
@@ -262,12 +393,19 @@ async def startup():
     print(f"  - Settlement interval: {settings.SETTLEMENT_INTERVAL_SECONDS}s")
     print("")
 
-    from backend.core.scheduler import start_scheduler, log_event
-    start_scheduler()
-    log_event("success", "BTC 5-min trading bot initialized")
+    started = _maybe_start_scheduler()
+
+    if not started:
+        print("Scheduler autostart disabled (SCHEDULER_AUTOSTART=false).")
+        print("  - No background scans/settlement/paper jobs started.")
+        print("=" * 60)
+        return
 
     print("Bot is now running!")
-    print(f"  - BTC scan: every {settings.SCAN_INTERVAL_SECONDS}s (edge >= {settings.MIN_EDGE_THRESHOLD:.0%})")
+    if settings.BTC_LANE_ENABLED:
+        print(f"  - BTC scan: every {settings.SCAN_INTERVAL_SECONDS}s (edge >= {settings.MIN_EDGE_THRESHOLD:.0%})")
+    else:
+        print("  - BTC lane: DISABLED (BTC_LANE_ENABLED=false)")
     print(f"  - Settlement check: every {settings.SETTLEMENT_INTERVAL_SECONDS}s")
     if settings.WEATHER_ENABLED:
         print(f"  - Weather scan: every {settings.WEATHER_SCAN_INTERVAL_SECONDS}s (edge >= {settings.WEATHER_MIN_EDGE_THRESHOLD:.0%})")
@@ -286,7 +424,32 @@ async def shutdown():
 # Core endpoints
 @app.get("/")
 async def root():
-    return {"status": "ok", "message": "BTC 5-Min Trading Bot API v3.0", "simulation_mode": settings.SIMULATION_MODE}
+    return {"status": "ok", "message": "Weather Paper Trading Dashboard API v3.0", "simulation_mode": settings.SIMULATION_MODE}
+
+
+def _sqlite_path_from_database_url(database_url: str) -> str:
+    if database_url.startswith("sqlite:///"):
+        return database_url.removeprefix("sqlite:///")
+    if database_url.startswith("sqlite://"):
+        return database_url.removeprefix("sqlite://")
+    return database_url
+
+
+def _load_bot_weather_signal_calibration_rows(limit: int = 500) -> list[dict]:
+    """Load bot-model weather signal scores for the paper-account summary.
+
+    Read-only observability: this joins app DB signal rows to research final NWS
+    outcomes and never writes trades or upgrades actionability.
+    """
+    app_db_path = _sqlite_path_from_database_url(settings.DATABASE_URL)
+    research_db_path = "/Users/kayvonai/.hermes/research/prediction-market-edge-snapshots.sqlite"
+    scored_at = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    return load_bot_weather_signal_calibration_rows_from_sqlite(
+        app_db_path,
+        research_db_path,
+        scored_at=scored_at,
+        limit=limit,
+    )
 
 
 @app.get("/api/health")
@@ -300,16 +463,28 @@ async def get_stats(db: Session = Depends(get_db)):
     if not state:
         raise HTTPException(status_code=404, detail="Bot state not initialized")
 
-    win_rate = state.winning_trades / state.total_trades if state.total_trades > 0 else 0
+    btc_trades = db.query(Trade).filter(Trade.market_type == "btc").all()
+    weather_trades = db.query(Trade).filter(Trade.market_type.in_(WEATHER_MARKET_TYPES)).all()
+    entertainment_trades = db.query(Trade).filter(
+        Trade.market_type.in_(ENTERTAINMENT_MARKET_TYPES)
+    ).all()
+    weather_account = summarize_weather_paper_account(
+        weather_trades,
+        settled_forecasts=_load_bot_weather_signal_calibration_rows(),
+    )
+    btc_account = summarize_btc_paper_account(btc_trades)
+    entertainment_account = summarize_entertainment_paper_account(entertainment_trades)
+    aggregate_stats = _aggregate_bot_stats_for_scope(
+        state,
+        weather_account=weather_account,
+        legacy_sections_enabled=_legacy_dashboard_sections_enabled(),
+    )
 
     return BotStats(
-        bankroll=state.bankroll,
-        total_trades=state.total_trades,
-        winning_trades=state.winning_trades,
-        win_rate=win_rate,
-        total_pnl=state.total_pnl,
-        is_running=state.is_running,
-        last_run=state.last_run
+        **aggregate_stats,
+        weather_paper_account=weather_account,
+        btc_paper_account=btc_account,
+        entertainment_paper_account=entertainment_account,
     )
 
 
@@ -347,11 +522,26 @@ async def get_btc_windows():
                 down_price=m.down_price,
                 window_start=m.window_start,
                 window_end=m.window_end,
+                window_start_ts=int(m.window_start.timestamp()) if m.window_start else None,
+                window_end_ts=int(m.window_end.timestamp()) if m.window_end else None,
                 volume=m.volume,
                 is_active=m.is_active,
                 is_upcoming=m.is_upcoming,
                 time_until_end=m.time_until_end,
                 spread=m.spread,
+                up_bid=m.up_bid,
+                up_ask=m.up_ask,
+                up_ask_size=m.up_ask_size,
+                down_bid=m.down_bid,
+                down_ask=m.down_ask,
+                down_ask_size=m.down_ask_size,
+                up_midpoint=m.up_midpoint,
+                down_midpoint=m.down_midpoint,
+                up_last_price=m.up_last_price,
+                down_last_price=m.down_last_price,
+                recent_trades_count=m.recent_trades_count,
+                settlement_source=m.settlement_source,
+                settlement_url=m.settlement_url,
             )
             for m in markets
         ]
@@ -380,7 +570,8 @@ async def get_actionable_signals():
         return []
 
 
-def _signal_to_response(s: TradingSignal, actionable: bool = False) -> SignalResponse:
+def _signal_to_response(s: TradingSignal, actionable: Optional[bool] = None) -> SignalResponse:
+    is_actionable = s.actionable if actionable is None else actionable
     return SignalResponse(
         market_ticker=s.market.market_id,
         market_title=f"BTC 5m - {s.market.slug}",
@@ -398,7 +589,22 @@ def _signal_to_response(s: TradingSignal, actionable: bool = False) -> SignalRes
         btc_price=s.btc_price,
         btc_change_24h=s.btc_change_24h,
         window_end=s.market.window_end,
-        actionable=actionable,
+        actionable=is_actionable,
+        no_trade_reasons=s.no_trade_reasons,
+        execution_spread=s.execution_spread,
+        top_ask_size=s.top_ask_size,
+        settlement_source=s.settlement_source,
+        settlement_url=s.settlement_url,
+        model_price_source=s.model_price_source,
+        chainlink_feed_id=s.chainlink_feed_id,
+        chainlink_capture_method=s.chainlink_capture_method,
+        chainlink_source_url=s.chainlink_source_url,
+        chainlink_start_price=s.chainlink_start_price,
+        chainlink_end_price=s.chainlink_end_price,
+        chainlink_start_observed_at=s.chainlink_start_observed_at,
+        chainlink_end_observed_at=s.chainlink_end_observed_at,
+        chainlink_start_source_snapshot_path=s.chainlink_start_source_snapshot_path,
+        chainlink_end_source_snapshot_path=s.chainlink_end_source_snapshot_path,
     )
 
 
@@ -413,22 +619,36 @@ async def get_trades(
         query = query.filter(Trade.result == status)
     trades = query.order_by(Trade.timestamp.desc()).limit(limit).all()
 
-    return [
-        TradeResponse(
-            id=t.id,
-            market_ticker=t.market_ticker,
-            platform=t.platform,
-            event_slug=t.event_slug,
-            direction=t.direction,
-            entry_price=t.entry_price,
-            size=t.size,
-            timestamp=t.timestamp,
-            settled=t.settled,
-            result=t.result,
-            pnl=t.pnl
-        )
-        for t in trades
-    ]
+    return [_trade_to_response(t) for t in trades]
+
+
+@app.get("/api/open-position-risk", response_model=List[OpenPositionRiskRowResponse])
+async def get_open_position_risk(db: Session = Depends(get_db)):
+    """Read current open-position mark-to-market / exit recommendations.
+
+    This endpoint is paper/simulation observability only. It does not execute
+    exits; the scheduler/explicit scan path owns recommendation refreshes.
+    """
+    trades = _query_open_position_risk_trades(
+        db,
+        legacy_sections_enabled=_legacy_dashboard_sections_enabled(),
+        limit=50,
+    )
+    return [_open_position_risk_row_from_trade(t) for t in trades]
+
+
+@app.get("/api/entertainment/source-states", response_model=List[RottenTomatoesSourceStateResponse])
+async def get_rotten_tomatoes_source_states(limit: int = 10, db: Session = Depends(get_db)):
+    """Latest direct Rotten Tomatoes source-state snapshots.
+
+    These rows are research/audit context only. They deliberately remain
+    non-actionable until joined with current market quotes, CLOB depth, and
+    no-trade gate evaluation.
+    """
+    rows = db.query(RottenTomatoesSourceState).order_by(
+        RottenTomatoesSourceState.captured_at.desc()
+    ).limit(max(limit * 3, limit)).all()
+    return summarize_latest_rotten_tomatoes_source_states(rows, limit=limit)
 
 
 @app.get("/api/equity-curve")
@@ -461,6 +681,10 @@ async def simulate_trade(signal_ticker: str, db: Session = Depends(get_db)):
 
     if not signal:
         raise HTTPException(status_code=404, detail="Signal not found")
+
+    allowed, guard_reason = validate_btc_signal_for_simulation(signal)
+    if not allowed:
+        raise HTTPException(status_code=400, detail=guard_reason)
 
     state = db.query(BotState).first()
     if not state:
@@ -589,6 +813,177 @@ def _compute_calibration_summary(db: Session) -> Optional[CalibrationSummary]:
     )
 
 
+def _load_latest_weather_calibration_summary() -> Optional[WeatherCalibrationSummaryResponse]:
+    """Load latest market-implied weather calibration batch from research SQLite.
+
+    This is read-only observability. Missing DB/table should not break the live
+    dashboard and never creates paper trades/actionability.
+    """
+    db_path = "/Users/kayvonai/.hermes/research/prediction-market-edge-snapshots.sqlite"
+    summary = load_latest_weather_calibration_summary_from_sqlite(db_path)
+    if summary is None:
+        return None
+    if hasattr(WeatherCalibrationSummaryResponse, "model_validate"):
+        return WeatherCalibrationSummaryResponse.model_validate(summary)
+    return WeatherCalibrationSummaryResponse.parse_obj(summary)
+
+
+def _load_latest_weather_calibration_rows(limit: int = 5) -> List[WeatherCalibrationRowResponse]:
+    """Load latest weather calibration audit rows from research SQLite.
+
+    Rows are highest-error market-implied quote scores from the newest batch
+    only. They are diagnostics for review, not paper entries or actionability.
+    """
+    db_path = "/Users/kayvonai/.hermes/research/prediction-market-edge-snapshots.sqlite"
+    rows = load_latest_weather_calibration_rows_from_sqlite(db_path, limit=limit)
+    if hasattr(WeatherCalibrationRowResponse, "model_validate"):
+        return [WeatherCalibrationRowResponse.model_validate(row) for row in rows]
+    return [WeatherCalibrationRowResponse.parse_obj(row) for row in rows]
+
+
+def _load_latest_weather_bot_calibration_summary() -> Optional[WeatherCalibrationSummaryResponse]:
+    """Load latest bot-model weather calibration batch from research SQLite.
+
+    This is read-only model QA telemetry, separate from market-implied quote
+    calibration and paper ledger PnL/actionability.
+    """
+    db_path = "/Users/kayvonai/.hermes/research/prediction-market-edge-snapshots.sqlite"
+    summary = load_latest_weather_bot_signal_calibration_summary_from_sqlite(db_path)
+    if summary is None:
+        return None
+    if hasattr(WeatherCalibrationSummaryResponse, "model_validate"):
+        return WeatherCalibrationSummaryResponse.model_validate(summary)
+    return WeatherCalibrationSummaryResponse.parse_obj(summary)
+
+
+def _load_latest_weather_bot_calibration_rows(limit: int = 5) -> List[WeatherBotCalibrationRowResponse]:
+    """Load highest-error bot-model weather calibration rows from SQLite.
+
+    Rows are newest-batch model QA diagnostics only and remain non-actionable /
+    non-executed. They are separate from market-implied weather calibration rows.
+    """
+    db_path = "/Users/kayvonai/.hermes/research/prediction-market-edge-snapshots.sqlite"
+    rows = load_latest_weather_bot_signal_calibration_rows_from_sqlite(db_path, limit=limit)
+    if hasattr(WeatherBotCalibrationRowResponse, "model_validate"):
+        return [WeatherBotCalibrationRowResponse.model_validate(row) for row in rows]
+    return [WeatherBotCalibrationRowResponse.parse_obj(row) for row in rows]
+
+
+def _load_latest_weather_signal_review_candidates(limit: int = 5) -> List[WeatherSignalReviewCandidateResponse]:
+    """Load newest weather threshold review candidates from SQLite.
+
+    These are review-only diagnostics exported from live weather scans. The
+    loader normalizes rows as non-actionable, non-executed, and zero-size.
+    """
+    db_path = "/Users/kayvonai/.hermes/research/prediction-market-edge-snapshots.sqlite"
+    rows = load_latest_weather_signal_review_candidate_rows_from_sqlite(db_path, limit=limit)
+    if hasattr(WeatherSignalReviewCandidateResponse, "model_validate"):
+        return [WeatherSignalReviewCandidateResponse.model_validate(row) for row in rows]
+    return [WeatherSignalReviewCandidateResponse.parse_obj(row) for row in rows]
+
+
+def _load_latest_polymarket_weather_source_states(
+    limit: int = 5,
+    category: Optional[str] = None,
+    market_state: Optional[str] = None,
+) -> List[PolymarketWeatherSourceStateResponse]:
+    """Load newest Polymarket weather source-state rows from SQLite.
+
+    Rows preserve source/station/rule and token-level book context only; they
+    remain non-actionable until final source, model, liquidity, and sizing gates
+    are independently satisfied.
+    """
+    db_path = "/Users/kayvonai/.hermes/research/prediction-market-edge-snapshots.sqlite"
+    rows = load_latest_polymarket_weather_source_state_rows_from_sqlite(
+        db_path,
+        limit=limit,
+        category=category,
+        market_state=market_state,
+    )
+    if hasattr(PolymarketWeatherSourceStateResponse, "model_validate"):
+        return [PolymarketWeatherSourceStateResponse.model_validate(row) for row in rows]
+    return [PolymarketWeatherSourceStateResponse.parse_obj(row) for row in rows]
+
+
+@app.get("/api/weather/polymarket-source-states", response_model=List[PolymarketWeatherSourceStateResponse])
+async def get_polymarket_weather_source_states(
+    category: Optional[str] = Query(
+        default=None,
+        description="Optional source-state sample category: warn, part, hko, obs, src, or all.",
+    ),
+    market_state: Optional[str] = Query(
+        default=None,
+        description="Optional market state filter: open, closed, or all.",
+    ),
+    limit: int = Query(default=25, ge=0, le=100),
+) -> List[PolymarketWeatherSourceStateResponse]:
+    """Return newest Polymarket weather source-state rows, optionally category-filtered.
+
+    This is read-only operator drilldown for the weather dashboard. Rows remain
+    source-state-only/non-actionable regardless of category or sample size.
+    """
+    return _load_latest_polymarket_weather_source_states(
+        limit=limit,
+        category=category,
+        market_state=market_state,
+    )
+
+
+def _load_latest_polymarket_weather_source_state_summary() -> Optional[PolymarketWeatherSourceStateSummaryResponse]:
+    """Load newest Polymarket weather source-state coverage summary read-only."""
+    db_path = "/Users/kayvonai/.hermes/research/prediction-market-edge-snapshots.sqlite"
+    summary = load_latest_polymarket_weather_source_state_summary_from_sqlite(db_path)
+    if summary is None:
+        return None
+    if hasattr(PolymarketWeatherSourceStateSummaryResponse, "model_validate"):
+        return PolymarketWeatherSourceStateSummaryResponse.model_validate(summary)
+    return PolymarketWeatherSourceStateSummaryResponse.parse_obj(summary)
+
+
+def _load_latest_btc_calibration_summary() -> Optional[BtcCalibrationSummaryResponse]:
+    """Load latest BTC scoring/boundary calibration batch from research SQLite.
+
+    This is read-only observability for Chainlink-boundary/outcome join quality;
+    it never creates paper trades or actionability.
+    """
+    db_path = "/Users/kayvonai/.hermes/research/prediction-market-edge-snapshots.sqlite"
+    summary = load_latest_btc_calibration_summary_from_sqlite(db_path)
+    if summary is None:
+        return None
+    if hasattr(BtcCalibrationSummaryResponse, "model_validate"):
+        return BtcCalibrationSummaryResponse.model_validate(summary)
+    return BtcCalibrationSummaryResponse.parse_obj(summary)
+
+
+def _load_latest_btc_calibration_rows(limit: int = 16) -> List[BtcCalibrationRowResponse]:
+    """Load latest BTC scoring audit rows from research SQLite.
+
+    Rows are Chainlink-boundary/outcome join diagnostics from the newest batch
+    only. Default to 16 rows so the dashboard can show the complete 8-window
+    Up/Down BTC batch before any UI display limiting.
+    """
+    db_path = "/Users/kayvonai/.hermes/research/prediction-market-edge-snapshots.sqlite"
+    rows = load_latest_btc_calibration_rows_from_sqlite(db_path, limit=limit)
+    if hasattr(BtcCalibrationRowResponse, "model_validate"):
+        return [BtcCalibrationRowResponse.model_validate(row) for row in rows]
+    return [BtcCalibrationRowResponse.parse_obj(row) for row in rows]
+
+
+def _load_latest_entertainment_calibration_summary() -> Optional[EntertainmentCalibrationSummaryResponse]:
+    """Load latest RT/entertainment calibration batch from research SQLite.
+
+    This is read-only source-resolution/outcome-score observability; missing
+    calibration rows are expected until final-source watchers are built.
+    """
+    db_path = "/Users/kayvonai/.hermes/research/prediction-market-edge-snapshots.sqlite"
+    summary = load_latest_entertainment_calibration_summary_from_sqlite(db_path)
+    if summary is None:
+        return None
+    if hasattr(EntertainmentCalibrationSummaryResponse, "model_validate"):
+        return EntertainmentCalibrationSummaryResponse.model_validate(summary)
+    return EntertainmentCalibrationSummaryResponse.parse_obj(summary)
+
+
 @app.get("/api/calibration")
 async def get_calibration(db: Session = Depends(get_db)):
     """Return calibration data: predicted probability vs actual win rate."""
@@ -627,6 +1022,42 @@ async def get_calibration(db: Session = Depends(get_db)):
     return {"buckets": buckets, "summary": summary}
 
 
+@app.get("/api/polymarket/relayer/status")
+async def get_polymarket_relayer_status():
+    """Check whether Polymarket relayer credentials are configured and reachable."""
+    from backend.data.polymarket_relayer import (
+        PolymarketRelayerClient,
+        relayer_credentials_present,
+    )
+
+    if not relayer_credentials_present():
+        return {
+            "configured": False,
+            "connected": False,
+            "error": "Relayer credentials not configured (RELAYER_API_KEY / RELAYER_API_KEY_ADDRESS)",
+        }
+
+    address_present = bool(settings.RELAYER_API_KEY_ADDRESS)
+    address_preview = _redact_address(settings.RELAYER_API_KEY_ADDRESS)
+    try:
+        async with PolymarketRelayerClient() as client:
+            connected = await client.validate_credentials()
+        return {
+            "configured": True,
+            "connected": connected,
+            "address_present": address_present,
+            "address_preview": address_preview,
+        }
+    except Exception as e:
+        return {
+            "configured": True,
+            "connected": False,
+            "address_present": address_present,
+            "address_preview": address_preview,
+            "error": str(e),
+        }
+
+
 # Kalshi endpoints
 @app.get("/api/kalshi/status")
 async def get_kalshi_status():
@@ -642,9 +1073,12 @@ async def get_kalshi_status():
     try:
         client = KalshiClient()
         balance_data = await client.get_balance()
+        # Redact: expose only that the account responded with balance info, not
+        # the raw value. Detailed private payloads require an explicit operator
+        # view, never the default dashboard status route.
         return {
             "connected": True,
-            "balance": balance_data,
+            "balance_available": _summarize_account_balance(balance_data),
         }
     except Exception as e:
         return {
@@ -657,7 +1091,7 @@ async def get_kalshi_status():
 @app.get("/api/weather/forecasts", response_model=List[WeatherForecastResponse])
 async def get_weather_forecasts():
     """Get ensemble forecasts for configured cities."""
-    if not settings.WEATHER_ENABLED:
+    if not (settings.WEATHER_ENABLED or settings.WEATHER_RESEARCH_ENABLED):
         return []
 
     try:
@@ -692,7 +1126,7 @@ async def get_weather_forecasts():
 @app.get("/api/weather/markets", response_model=List[WeatherMarketResponse])
 async def get_weather_markets():
     """Get active weather temperature markets."""
-    if not settings.WEATHER_ENABLED:
+    if not (settings.WEATHER_ENABLED or settings.WEATHER_RESEARCH_ENABLED):
         return []
 
     try:
@@ -701,14 +1135,14 @@ async def get_weather_markets():
         city_keys = [c.strip() for c in settings.WEATHER_CITIES.split(",") if c.strip()]
         markets = await fetch_polymarket_weather_markets(city_keys)
 
-        # Also fetch Kalshi markets if enabled
-        if settings.KALSHI_ENABLED:
+        # Also fetch Kalshi markets if enabled for live use or read-only
+        # research/dashboard mode. Public market-data endpoints do not require
+        # private credentials, and no trade/account endpoints are touched here.
+        if settings.KALSHI_ENABLED or settings.WEATHER_RESEARCH_ENABLED:
             try:
-                from backend.data.kalshi_client import kalshi_credentials_present
                 from backend.data.kalshi_markets import fetch_kalshi_weather_markets
-                if kalshi_credentials_present():
-                    kalshi_markets = await fetch_kalshi_weather_markets(city_keys)
-                    markets.extend(kalshi_markets)
+                kalshi_markets = await fetch_kalshi_weather_markets(city_keys)
+                markets.extend(kalshi_markets)
             except Exception:
                 pass
 
@@ -727,8 +1161,58 @@ async def get_weather_markets():
                 yes_price=m.yes_price,
                 no_price=m.no_price,
                 volume=m.volume,
+                yes_midpoint=getattr(m, "yes_midpoint", None),
+                yes_last_price=getattr(m, "yes_last_price", None),
+                recent_trades_count=getattr(m, "recent_trades_count", 0),
             )
             for m in markets
+        ]
+    except Exception:
+        return []
+
+
+@app.get("/api/weather/divergences", response_model=List[WeatherDivergenceResponse])
+async def get_weather_divergences(
+    min_probability_gap: float = 0.05,
+    threshold_tolerance_f: float = 0.5,
+):
+    """Compare Polymarket vs Kalshi weather lines and return largest probability gaps."""
+    if not (settings.WEATHER_ENABLED or settings.WEATHER_RESEARCH_ENABLED):
+        return []
+
+    try:
+        from backend.core.weather_divergence import find_cross_venue_weather_divergences
+        from backend.data.weather_markets import fetch_polymarket_weather_markets
+        from backend.data.kalshi_markets import fetch_kalshi_weather_markets
+
+        city_keys = [c.strip() for c in settings.WEATHER_CITIES.split(",") if c.strip()]
+        markets = await fetch_polymarket_weather_markets(city_keys)
+        if settings.KALSHI_ENABLED or settings.WEATHER_RESEARCH_ENABLED:
+            markets.extend(await fetch_kalshi_weather_markets(city_keys))
+
+        divergences = find_cross_venue_weather_divergences(
+            markets,
+            min_probability_gap=min_probability_gap,
+            threshold_tolerance_f=threshold_tolerance_f,
+        )
+
+        return [
+            WeatherDivergenceResponse(
+                city_key=row.city_key,
+                target_date=row.target_date.isoformat(),
+                metric=row.metric,
+                direction=row.direction,
+                threshold_f=row.threshold_f,
+                polymarket_market_id=row.polymarket_market_id,
+                kalshi_market_id=row.kalshi_market_id,
+                polymarket_yes_price=row.polymarket_yes_price,
+                kalshi_yes_price=row.kalshi_yes_price,
+                probability_gap=row.probability_gap,
+                buy_yes_venue=row.buy_yes_venue,
+                sell_yes_venue=row.sell_yes_venue,
+                min_volume=row.min_volume,
+            )
+            for row in divergences
         ]
     except Exception:
         return []
@@ -737,7 +1221,7 @@ async def get_weather_markets():
 @app.get("/api/weather/signals", response_model=List[WeatherSignalResponse])
 async def get_weather_signals():
     """Get current weather trading signals."""
-    if not settings.WEATHER_ENABLED:
+    if not (settings.WEATHER_ENABLED or settings.WEATHER_RESEARCH_ENABLED):
         return []
 
     try:
@@ -768,6 +1252,12 @@ def _weather_signal_to_response(s) -> WeatherSignalResponse:
         ensemble_std=s.ensemble_std,
         ensemble_members=s.ensemble_members,
         actionable=s.passes_threshold,
+        no_trade_reasons=s.no_trade_reasons,
+        execution_spread=s.execution_spread,
+        top_ask_size=s.top_ask_size,
+        bucket_set_probability_mass=s.bucket_set_probability_mass,
+        bucket_set_sanity_passed=s.bucket_set_sanity_passed,
+        bucket_set_size=s.bucket_set_size,
     )
 
 
@@ -851,101 +1341,106 @@ async def reset_bot(db: Session = Depends(get_db)):
 async def get_dashboard(db: Session = Depends(get_db)):
     """Get all dashboard data in one call."""
     stats = await get_stats(db)
+    legacy_sections_enabled = _legacy_dashboard_sections_enabled()
 
-    # Fetch BTC price from microstructure first, fallback to CoinGecko
+    # Legacy BTC/RT dashboard work is intentionally skipped in the active
+    # weather-only scope. Direct legacy endpoints still exist for historical
+    # debugging, but /api/dashboard should avoid refreshing stale/off-scope data.
     btc_price_data = None
     micro_data = None
-    try:
-        micro = await compute_btc_microstructure()
-        if micro:
-            micro_data = MicrostructureResponse(
-                rsi=micro.rsi,
-                momentum_1m=micro.momentum_1m,
-                momentum_5m=micro.momentum_5m,
-                momentum_15m=micro.momentum_15m,
-                vwap_deviation=micro.vwap_deviation,
-                sma_crossover=micro.sma_crossover,
-                volatility=micro.volatility,
-                price=micro.price,
-                source=micro.source,
-            )
-            btc_price_data = BtcPriceResponse(
-                price=micro.price,
-                change_24h=micro.momentum_15m * 96,  # rough extrapolation
-                change_7d=0,
-                market_cap=0,
-                volume_24h=0,
-                last_updated=datetime.utcnow(),
-            )
-    except Exception:
-        pass
-    if not btc_price_data:
+    windows = []
+    signals = []
+    if legacy_sections_enabled:
+        # Fetch BTC price from microstructure first, fallback to CoinGecko
         try:
-            btc = await fetch_crypto_price("BTC")
-            if btc:
+            micro = await compute_btc_microstructure()
+            if micro:
+                micro_data = MicrostructureResponse(
+                    rsi=micro.rsi,
+                    momentum_1m=micro.momentum_1m,
+                    momentum_5m=micro.momentum_5m,
+                    momentum_15m=micro.momentum_15m,
+                    vwap_deviation=micro.vwap_deviation,
+                    sma_crossover=micro.sma_crossover,
+                    volatility=micro.volatility,
+                    price=micro.price,
+                    source=micro.source,
+                )
                 btc_price_data = BtcPriceResponse(
-                    price=btc.current_price,
-                    change_24h=btc.change_24h,
-                    change_7d=btc.change_7d,
-                    market_cap=btc.market_cap,
-                    volume_24h=btc.volume_24h,
-                    last_updated=btc.last_updated
+                    price=micro.price,
+                    change_24h=micro.momentum_15m * 96,  # rough extrapolation
+                    change_7d=0,
+                    market_cap=0,
+                    volume_24h=0,
+                    last_updated=datetime.utcnow(),
                 )
         except Exception:
             pass
+        if not btc_price_data:
+            try:
+                btc = await fetch_crypto_price("BTC")
+                if btc:
+                    btc_price_data = BtcPriceResponse(
+                        price=btc.current_price,
+                        change_24h=btc.change_24h,
+                        change_7d=btc.change_7d,
+                        market_cap=btc.market_cap,
+                        volume_24h=btc.volume_24h,
+                        last_updated=btc.last_updated
+                    )
+            except Exception:
+                pass
 
-    # Fetch windows
-    windows = []
-    try:
-        markets = await fetch_active_btc_markets()
-        windows = [
-            BtcWindowResponse(
-                slug=m.slug,
-                market_id=m.market_id,
-                up_price=m.up_price,
-                down_price=m.down_price,
-                window_start=m.window_start,
-                window_end=m.window_end,
-                volume=m.volume,
-                is_active=m.is_active,
-                is_upcoming=m.is_upcoming,
-                time_until_end=m.time_until_end,
-                spread=m.spread,
-            )
-            for m in markets
-        ]
-    except Exception:
-        pass
+        # Fetch windows
+        try:
+            markets = await fetch_active_btc_markets()
+            windows = [
+                BtcWindowResponse(
+                    slug=m.slug,
+                    market_id=m.market_id,
+                    up_price=m.up_price,
+                    down_price=m.down_price,
+                    window_start=m.window_start,
+                    window_end=m.window_end,
+                    window_start_ts=int(m.window_start.timestamp()) if m.window_start else None,
+                    window_end_ts=int(m.window_end.timestamp()) if m.window_end else None,
+                    volume=m.volume,
+                    is_active=m.is_active,
+                    is_upcoming=m.is_upcoming,
+                    time_until_end=m.time_until_end,
+                    spread=m.spread,
+                    up_bid=m.up_bid,
+                    up_ask=m.up_ask,
+                    up_ask_size=m.up_ask_size,
+                    down_bid=m.down_bid,
+                    down_ask=m.down_ask,
+                    down_ask_size=m.down_ask_size,
+                    up_midpoint=m.up_midpoint,
+                    down_midpoint=m.down_midpoint,
+                    up_last_price=m.up_last_price,
+                    down_last_price=m.down_last_price,
+                    recent_trades_count=m.recent_trades_count,
+                    settlement_source=m.settlement_source,
+                    settlement_url=m.settlement_url,
+                )
+                for m in markets
+            ]
+        except Exception:
+            pass
 
-    # Signals — return ALL signals, mark which are actionable
-    signals = []
-    try:
-        raw_signals = await scan_for_signals()
-        signals = [_signal_to_response(s, actionable=s.passes_threshold) for s in raw_signals]
-    except Exception:
-        pass
+        # Signals — return ALL legacy BTC signals when legacy dashboard is enabled.
+        try:
+            raw_signals = await scan_for_signals()
+            signals = [_signal_to_response(s, actionable=s.passes_threshold) for s in raw_signals]
+        except Exception:
+            pass
 
     # Recent trades
-    trades = db.query(Trade).order_by(Trade.timestamp.desc()).limit(50).all()
-    recent_trades = [
-        TradeResponse(
-            id=t.id,
-            market_ticker=t.market_ticker,
-            platform=t.platform,
-            event_slug=t.event_slug,
-            direction=t.direction,
-            entry_price=t.entry_price,
-            size=t.size,
-            timestamp=t.timestamp,
-            settled=t.settled,
-            result=t.result,
-            pnl=t.pnl
-        )
-        for t in trades
-    ]
+    trades = _query_dashboard_recent_trades(db, legacy_sections_enabled=legacy_sections_enabled, limit=50)
+    recent_trades = [_trade_to_response(t) for t in trades]
 
     # Equity curve
-    equity_trades = db.query(Trade).filter(Trade.settled == True).order_by(Trade.timestamp).all()
+    equity_trades = _query_dashboard_equity_trades(db, legacy_sections_enabled=legacy_sections_enabled)
     equity_curve = []
     cumulative_pnl = 0
     for trade in equity_trades:
@@ -957,21 +1452,85 @@ async def get_dashboard(db: Session = Depends(get_db)):
                 "bankroll": settings.INITIAL_BANKROLL + cumulative_pnl
             })
 
-    # Calibration summary
-    calibration = _compute_calibration_summary(db)
+    # Calibration summary. Weather remains active; legacy BTC/RT calibration
+    # loaders are skipped unless legacy dashboard sections are explicitly enabled.
+    calibration = _compute_calibration_summary(db) if legacy_sections_enabled else None
+    weather_calibration = _load_latest_weather_calibration_summary()
+    weather_bot_calibration = _load_latest_weather_bot_calibration_summary()
+    weather_calibration_rows = _load_latest_weather_calibration_rows(limit=5)
+    weather_bot_calibration_rows = _load_latest_weather_bot_calibration_rows(limit=5)
+    weather_signal_review_candidates = _load_latest_weather_signal_review_candidates(limit=5)
+    polymarket_weather_source_states = _load_latest_polymarket_weather_source_states(limit=5)
+    polymarket_weather_source_state_summary = _load_latest_polymarket_weather_source_state_summary()
+    btc_calibration = _load_latest_btc_calibration_summary() if legacy_sections_enabled else None
+    btc_calibration_rows = _load_latest_btc_calibration_rows(limit=16) if legacy_sections_enabled else []
+    entertainment_calibration = _load_latest_entertainment_calibration_summary() if legacy_sections_enabled else None
+
+    # Entertainment / Rotten Tomatoes direct source-state snapshots and latest
+    # public market rows. Legacy RT work is paused in the weather-only dashboard
+    # unless explicitly re-enabled via DASHBOARD_LEGACY_SECTIONS_ENABLED.
+    rotten_tomatoes_source_states: List[RottenTomatoesSourceStateResponse] = []
+    rt_review_rows = []
+    if legacy_sections_enabled:
+        try:
+            rt_rows = db.query(RottenTomatoesSourceState).order_by(
+                RottenTomatoesSourceState.captured_at.desc()
+            ).limit(30).all()
+            rotten_tomatoes_source_states = [
+                RottenTomatoesSourceStateResponse(**summary)
+                for summary in summarize_latest_rotten_tomatoes_source_states(rt_rows, limit=10)
+            ]
+            source_summaries = [
+                state.model_dump() if hasattr(state, "model_dump") else state.dict()
+                for state in rotten_tomatoes_source_states
+            ]
+            latest_market_rows, _, _ = load_latest_rotten_tomatoes_market_rows()
+            rt_review_rows = build_rotten_tomatoes_review_rows(
+                latest_market_rows,
+                source_summaries=source_summaries,
+            )
+        except Exception:
+            rt_review_rows = rotten_tomatoes_source_states
 
     # Weather data (if enabled)
     weather_signals_data = []
+    weather_divergences_data = []
     weather_forecasts_data = []
     if settings.WEATHER_ENABLED:
         try:
+            from backend.core.weather_divergence import find_cross_venue_weather_divergences
             from backend.core.weather_signals import scan_for_weather_signals
             from backend.data.weather import fetch_ensemble_forecast, CITY_CONFIG
+            from backend.data.weather_markets import fetch_polymarket_weather_markets
+            from backend.data.kalshi_markets import fetch_kalshi_weather_markets
 
             wx_signals = await scan_for_weather_signals()
             weather_signals_data = [_weather_signal_to_response(s) for s in wx_signals]
 
             city_keys = [c.strip() for c in settings.WEATHER_CITIES.split(",") if c.strip()]
+            markets = await fetch_polymarket_weather_markets(city_keys)
+            if settings.KALSHI_ENABLED or settings.WEATHER_RESEARCH_ENABLED:
+                markets.extend(await fetch_kalshi_weather_markets(city_keys))
+            divergences = find_cross_venue_weather_divergences(markets)
+            weather_divergences_data = [
+                WeatherDivergenceResponse(
+                    city_key=row.city_key,
+                    target_date=row.target_date.isoformat(),
+                    metric=row.metric,
+                    direction=row.direction,
+                    threshold_f=row.threshold_f,
+                    polymarket_market_id=row.polymarket_market_id,
+                    kalshi_market_id=row.kalshi_market_id,
+                    polymarket_yes_price=row.polymarket_yes_price,
+                    kalshi_yes_price=row.kalshi_yes_price,
+                    probability_gap=row.probability_gap,
+                    buy_yes_venue=row.buy_yes_venue,
+                    sell_yes_venue=row.sell_yes_venue,
+                    min_volume=row.min_volume,
+                )
+                for row in divergences[:20]
+            ]
+
             for city_key in city_keys:
                 if city_key not in CITY_CONFIG:
                     continue
@@ -991,7 +1550,46 @@ async def get_dashboard(db: Session = Depends(get_db)):
         except Exception:
             pass
 
+    signal_review_queue = SignalReviewQueueResponse(
+        **summarize_signal_review_queue(
+            btc_signals=signals if legacy_sections_enabled else [],
+            weather_signals=weather_signals_data,
+            weather_review_candidates=weather_signal_review_candidates,
+            weather_source_states=polymarket_weather_source_states,
+            rt_source_states=rt_review_rows if legacy_sections_enabled else [],
+            limit=12,
+        )
+    )
+
+    open_position_risk_rows = await get_open_position_risk(db)
+    open_position_risk_summary = OpenPositionRiskSummaryResponse(
+        total_open_positions=len(open_position_risk_rows),
+        action_counts={},
+        auto_exit_enabled=settings.PAPER_AUTO_EXIT_ENABLED,
+        recommendations_only=not settings.PAPER_AUTO_EXIT_ENABLED,
+        stale_mark_count=sum(1 for row in open_position_risk_rows if row.risk_scan_stale),
+        latest_checked_at=max(
+            (row.checked_at for row in open_position_risk_rows if not row.risk_scan_stale),
+            default=None,
+        ),
+        exited_count=0,
+        live_exit_quote_error_count=sum(1 for row in open_position_risk_rows if row.live_exit_quote_error),
+        closed_market_or_stale_token_count=sum(
+            1 for row in open_position_risk_rows if row.source_status == "closed_market_or_stale_token"
+        ),
+        source_status_counts={},
+    )
+    for row in open_position_risk_rows:
+        open_position_risk_summary.action_counts[row.action] = open_position_risk_summary.action_counts.get(row.action, 0) + 1
+        if row.source_status:
+            open_position_risk_summary.source_status_counts[row.source_status] = (
+                open_position_risk_summary.source_status_counts.get(row.source_status, 0) + 1
+            )
+
     return DashboardData(
+        active_product_scope=_active_product_scope(),
+        legacy_dashboard_sections_enabled=legacy_sections_enabled,
+        legacy_dashboard_note=_dashboard_legacy_note(),
         stats=stats,
         btc_price=btc_price_data,
         microstructure=micro_data,
@@ -1000,8 +1598,23 @@ async def get_dashboard(db: Session = Depends(get_db)):
         recent_trades=recent_trades,
         equity_curve=equity_curve,
         calibration=calibration,
+        weather_calibration=weather_calibration,
+        weather_bot_calibration=weather_bot_calibration,
+        weather_calibration_rows=weather_calibration_rows,
+        weather_bot_calibration_rows=weather_bot_calibration_rows,
+        weather_signal_review_candidates=weather_signal_review_candidates,
+        polymarket_weather_source_states=polymarket_weather_source_states,
+        polymarket_weather_source_state_summary=polymarket_weather_source_state_summary,
+        btc_calibration=btc_calibration,
+        btc_calibration_rows=btc_calibration_rows,
+        entertainment_calibration=entertainment_calibration,
         weather_signals=weather_signals_data,
+        weather_divergences=weather_divergences_data,
         weather_forecasts=weather_forecasts_data,
+        rotten_tomatoes_source_states=rotten_tomatoes_source_states,
+        signal_review_queue=signal_review_queue,
+        open_position_risk_rows=open_position_risk_rows,
+        open_position_risk_summary=open_position_risk_summary,
     )
 
 
@@ -1013,7 +1626,7 @@ async def websocket_events(websocket: WebSocket):
         await websocket.send_json({
             "timestamp": datetime.utcnow().isoformat(),
             "type": "success",
-            "message": "Connected to BTC trading bot"
+            "message": "Connected to weather paper trading dashboard"
         })
 
         from backend.core.scheduler import get_recent_events
