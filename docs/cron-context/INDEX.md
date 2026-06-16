@@ -13,6 +13,7 @@ Keep this file intentionally small. Cron jobs should read this index first, then
 - Rotten Tomatoes / entertainment lane: `docs/cron-context/entertainment-latest.md`
 - Platform / dashboard / tech debt lane: `docs/cron-context/platform-latest.md`
 - Weather/platform cron pause + reactivation handoff: `docs/cron-context/weather-platform-cron-pause-reactivation-handoff.md`
+- Post-hardening architecture update (READ before resuming crons; architecture changed materially while paused): `docs/cron-context/weather-architecture-update-2026-06-16.md`
 
 ## Heavier context files to open only when needed
 - `README.md` — project overview.
