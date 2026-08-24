@@ -39,6 +39,8 @@ class UTCDateTime(TypeDecorator):
     def process_bind_param(self, value, dialect):
         if value is None:
             return None
+        failed = False
+        normalized = None
         try:
             if type(value) is not datetime or value.tzinfo is None:
                 raise ValueError
@@ -57,25 +59,39 @@ class UTCDateTime(TypeDecorator):
                 fold=value.fold,
             )
         except Exception:
+            failed = True
+        if failed:
             raise ValueError("datetime must be an exact UTC datetime") from None
         return normalized.replace(tzinfo=None) if dialect.name == "sqlite" else normalized
 
     def process_result_value(self, value, dialect):
         if value is None:
             return None
-        if value.tzinfo is not None:
-            value = value.astimezone(timezone.utc).replace(tzinfo=None)
-        return datetime(
-            value.year,
-            value.month,
-            value.day,
-            value.hour,
-            value.minute,
-            value.second,
-            value.microsecond,
-            tzinfo=timezone.utc,
-            fold=value.fold,
-        )
+        failed = False
+        normalized = None
+        try:
+            if type(value) is not datetime:
+                raise ValueError
+            if value.tzinfo is not None:
+                offset = value.utcoffset()
+                if offset != timezone.utc.utcoffset(None):
+                    raise ValueError
+            normalized = datetime(
+                value.year,
+                value.month,
+                value.day,
+                value.hour,
+                value.minute,
+                value.second,
+                value.microsecond,
+                tzinfo=timezone.utc,
+                fold=value.fold,
+            )
+        except Exception:
+            failed = True
+        if failed:
+            raise ValueError("stored datetime must be an exact UTC datetime") from None
+        return normalized
 
 
 class Trade(Base):
