@@ -108,13 +108,15 @@ class FakeOrderScenario:
     average_fill_price: Decimal | None = None
 
     def __post_init__(self) -> None:
+        if type(self) is not FakeOrderScenario:
+            raise ValueError("invalid fake order scenario")
         if type(self.status) is not OrderStatus:
             raise ValueError("invalid fake order scenario")
-        if not isinstance(self.fill_fraction, Decimal):
+        if type(self.fill_fraction) is not Decimal:
             raise TypeError("fill_fraction must be a Decimal")
-        if self.average_fill_price is not None and not isinstance(
-            self.average_fill_price, Decimal
-        ):
+        if self.average_fill_price is not None and type(
+            self.average_fill_price
+        ) is not Decimal:
             raise TypeError("average_fill_price must be a Decimal")
         if not self.fill_fraction.is_finite() or (
             self.average_fill_price is not None
@@ -179,7 +181,7 @@ class FakePaperAdapter:
         scenario_items = tuple(scenarios.items()) if scenarios is not None else ()
         if not all(type(key) is str and bool(key.strip()) for key, _ in scenario_items):
             raise BrokerAdapterError("scenario keys must be nonblank strings")
-        if not all(isinstance(value, FakeOrderScenario) for _, value in scenario_items):
+        if not all(type(value) is FakeOrderScenario for _, value in scenario_items):
             raise TypeError("scenarios must contain FakeOrderScenario values")
         scenario_map = dict(scenario_items)
 

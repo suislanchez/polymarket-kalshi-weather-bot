@@ -602,6 +602,213 @@ def test_scenario_rejects_str_subclass_status_without_invoking_caller_behavior(h
     assert caught.value.__context__ is None
 
 
+@pytest.mark.parametrize("hostile", [False, True])
+def test_scenario_rejects_decimal_subclass_fill_fraction_before_caller_behavior(
+    hostile,
+):
+    sentinel = "scenario-fill-fraction-subclass-sentinel"
+    calls = {
+        "is_finite": 0,
+        "eq": 0,
+        "lt": 0,
+        "le": 0,
+        "gt": 0,
+        "ge": 0,
+        "as_tuple": 0,
+        "repr": 0,
+    }
+
+    class BenignDecimal(Decimal):
+        pass
+
+    class HostileDecimal(Decimal):
+        def is_finite(self):
+            calls["is_finite"] += 1
+            raise AssertionError(sentinel)
+
+        def __eq__(self, other):
+            calls["eq"] += 1
+            raise AssertionError(sentinel)
+
+        def __lt__(self, other):
+            calls["lt"] += 1
+            raise AssertionError(sentinel)
+
+        def __le__(self, other):
+            calls["le"] += 1
+            raise AssertionError(sentinel)
+
+        def __gt__(self, other):
+            calls["gt"] += 1
+            raise AssertionError(sentinel)
+
+        def __ge__(self, other):
+            calls["ge"] += 1
+            raise AssertionError(sentinel)
+
+        def as_tuple(self):
+            calls["as_tuple"] += 1
+            raise AssertionError(sentinel)
+
+        def __repr__(self):
+            calls["repr"] += 1
+            raise AssertionError(sentinel)
+
+    decimal_type = HostileDecimal if hostile else BenignDecimal
+    with pytest.raises(
+        TypeError, match="^fill_fraction must be a Decimal$"
+    ) as caught:
+        FakeOrderScenario(fill_fraction=decimal_type("0"))
+
+    assert calls == {name: 0 for name in calls}
+    assert sentinel not in str(caught.value)
+    assert sentinel not in repr(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+
+
+@pytest.mark.parametrize("hostile", [False, True])
+def test_scenario_rejects_decimal_subclass_average_price_before_caller_behavior(
+    hostile,
+):
+    sentinel = "scenario-average-price-subclass-sentinel"
+    calls = {
+        "is_finite": 0,
+        "eq": 0,
+        "lt": 0,
+        "le": 0,
+        "gt": 0,
+        "ge": 0,
+        "as_tuple": 0,
+        "repr": 0,
+    }
+
+    class BenignDecimal(Decimal):
+        pass
+
+    class HostileDecimal(Decimal):
+        def is_finite(self):
+            calls["is_finite"] += 1
+            raise AssertionError(sentinel)
+
+        def __eq__(self, other):
+            calls["eq"] += 1
+            raise AssertionError(sentinel)
+
+        def __lt__(self, other):
+            calls["lt"] += 1
+            raise AssertionError(sentinel)
+
+        def __le__(self, other):
+            calls["le"] += 1
+            raise AssertionError(sentinel)
+
+        def __gt__(self, other):
+            calls["gt"] += 1
+            raise AssertionError(sentinel)
+
+        def __ge__(self, other):
+            calls["ge"] += 1
+            raise AssertionError(sentinel)
+
+        def as_tuple(self):
+            calls["as_tuple"] += 1
+            raise AssertionError(sentinel)
+
+        def __repr__(self):
+            calls["repr"] += 1
+            raise AssertionError(sentinel)
+
+    decimal_type = HostileDecimal if hostile else BenignDecimal
+    with pytest.raises(
+        TypeError, match="^average_fill_price must be a Decimal$"
+    ) as caught:
+        FakeOrderScenario(
+            status=OrderStatus.PARTIALLY_FILLED,
+            fill_fraction=Decimal("0.5"),
+            average_fill_price=decimal_type("1"),
+        )
+
+    assert calls == {name: 0 for name in calls}
+    assert sentinel not in str(caught.value)
+    assert sentinel not in repr(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+
+
+@pytest.mark.parametrize("hostile", [False, True])
+def test_scenario_subclass_is_rejected_before_field_behavior(hostile):
+    sentinel = "scenario-instance-subclass-sentinel"
+    calls = {"is_finite": 0, "eq": 0, "repr": 0}
+
+    class HostileDecimal(Decimal):
+        def is_finite(self):
+            calls["is_finite"] += 1
+            raise AssertionError(sentinel)
+
+        def __eq__(self, other):
+            calls["eq"] += 1
+            raise AssertionError(sentinel)
+
+        def __repr__(self):
+            calls["repr"] += 1
+            raise AssertionError(sentinel)
+
+    class ScenarioSubclass(FakeOrderScenario):
+        pass
+
+    kwargs = {"fill_fraction": HostileDecimal("0")} if hostile else {}
+    with pytest.raises(ValueError, match="^invalid fake order scenario$") as caught:
+        ScenarioSubclass(**kwargs)
+
+    assert calls == {"is_finite": 0, "eq": 0, "repr": 0}
+    assert sentinel not in str(caught.value)
+    assert sentinel not in repr(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+
+
+def test_constructor_rejects_scenario_subclass_that_bypasses_base_validation():
+    sentinel = "scenario-mapping-subclass-sentinel"
+    calls = {"is_finite": 0, "eq": 0, "repr": 0}
+
+    class HostileDecimal(Decimal):
+        def is_finite(self):
+            calls["is_finite"] += 1
+            raise AssertionError(sentinel)
+
+        def __eq__(self, other):
+            calls["eq"] += 1
+            raise AssertionError(sentinel)
+
+        def __repr__(self):
+            calls["repr"] += 1
+            raise AssertionError(sentinel)
+
+    class BypassScenario(FakeOrderScenario):
+        def __post_init__(self):
+            pass
+
+    bypass = BypassScenario(fill_fraction=HostileDecimal("0"))
+    valid = FakeOrderScenario(status=OrderStatus.REJECTED)
+    clock = SentinelClock(error=AssertionError(sentinel))
+
+    with pytest.raises(
+        TypeError, match="^scenarios must contain FakeOrderScenario values$"
+    ) as caught:
+        FakePaperAdapter(
+            clock=clock,
+            scenarios={"valid": valid, "bypass": bypass},
+        )
+
+    assert calls == {"is_finite": 0, "eq": 0, "repr": 0}
+    assert sentinel not in str(caught.value)
+    assert sentinel not in repr(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert clock.calls == 0
+
+
 def test_extreme_fill_arithmetic_fails_closed_without_state_mutation():
     clock = CountingClock()
     adapter = make_adapter(
