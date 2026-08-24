@@ -24,6 +24,7 @@
 8. Do not remove the local legacy checkout. A symlink replacement is a separate final approval gate after all Archives verification succeeds.
 9. No forced trades: a valid run with zero proposals/orders is a successful run.
 10. Use `Decimal` for order/risk money and quantity calculations. Convert to strings at storage/API boundaries where precision must be preserved.
+11. The Hermes parent process exports a `PYTHONPATH` that injects Hermes packages into child interpreters. Prefix every Python, pip, pytest, pip-tools, pip-audit, and Bandit command with `env -u PYTHONPATH`; add `PYTHONPATH=.` back only when the project import path is required.
 
 ## Canonical paths
 
@@ -115,10 +116,10 @@ Expected: the clone includes both approved documentation commits, retains the up
 Run:
 
 ```bash
-python3.11 -m venv "$ENVS/unified-trading-py311"
-"$ENVS/unified-trading-py311/bin/python" -m pip install --upgrade pip
-"$ENVS/unified-trading-py311/bin/python" -m pip install -r "$REPO/requirements.txt" pytest
-"$ENVS/unified-trading-py311/bin/python" -m pip check
+env -u PYTHONPATH python3.11 -m venv "$ENVS/unified-trading-py311"
+env -u PYTHONPATH "$ENVS/unified-trading-py311/bin/python" -m pip install --upgrade pip
+env -u PYTHONPATH "$ENVS/unified-trading-py311/bin/python" -m pip install -r "$REPO/requirements.txt" pytest
+env -u PYTHONPATH "$ENVS/unified-trading-py311/bin/python" -m pip check
 ```
 
 Expected: the only implementation Python environment is under `$ENVS`, and dependency integrity passes.
@@ -185,7 +186,7 @@ assert settings.TRADING_DATA_ROOT.startswith("/Volumes/Archives/")
 Run:
 
 ```bash
-PYTHONPATH=. "$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_execution_mode.py tests/test_unified_config.py -q
+env -u PYTHONPATH PYTHONPATH=. "$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_execution_mode.py tests/test_unified_config.py -q
 ```
 
 Expected: fail because the package and settings do not exist.
@@ -213,7 +214,7 @@ Add settings for `EXECUTION_MODE`, `LIVE_TRADING_ENABLED`, `STOCK_CRYPTO_LANE_EN
 Run:
 
 ```bash
-PYTHONPATH=. "$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_execution_mode.py tests/test_unified_config.py tests/test_scheduler_autostart.py -q
+env -u PYTHONPATH PYTHONPATH=. "$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_execution_mode.py tests/test_unified_config.py tests/test_scheduler_autostart.py -q
 ```
 
 Expected: pass.
@@ -254,7 +255,7 @@ Use Pydantic models with `ConfigDict(extra="forbid", frozen=True)`.
 **Step 2: Run RED**
 
 ```bash
-PYTHONPATH=. "$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_trading_domain.py -q
+env -u PYTHONPATH PYTHONPATH=. "$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_trading_domain.py -q
 ```
 
 Expected: import failure.
@@ -287,7 +288,7 @@ Define matching immutable `RiskDecision`, `NormalizedOrder`, `ExecutionReport`, 
 **Step 4: Run GREEN**
 
 ```bash
-PYTHONPATH=. "$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_trading_domain.py -q
+env -u PYTHONPATH PYTHONPATH=. "$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_trading_domain.py -q
 ```
 
 Expected: pass.
@@ -330,7 +331,7 @@ Add acceptance tests for one stock proposal, one crypto proposal, and a no-propo
 **Step 2: Run RED**
 
 ```bash
-PYTHONPATH=. "$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_unified_risk_gate.py -q
+env -u PYTHONPATH PYTHONPATH=. "$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_unified_risk_gate.py -q
 ```
 
 Expected: import failure.
@@ -354,7 +355,7 @@ The function has no network/database calls. It returns all reasons, not only the
 **Step 4: Run GREEN and risk regressions**
 
 ```bash
-PYTHONPATH=. "$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_unified_risk_gate.py tests/test_position_risk.py -q
+env -u PYTHONPATH PYTHONPATH=. "$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_unified_risk_gate.py tests/test_position_risk.py -q
 ```
 
 Expected: pass.
@@ -395,7 +396,7 @@ Define a reusable contract suite that any adapter must satisfy:
 **Step 2: Run RED**
 
 ```bash
-PYTHONPATH=. "$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_broker_adapter_contract.py -q
+env -u PYTHONPATH PYTHONPATH=. "$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_broker_adapter_contract.py -q
 ```
 
 Expected: import failure.
@@ -407,7 +408,7 @@ Expected: import failure.
 **Step 4: Run GREEN**
 
 ```bash
-PYTHONPATH=. "$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_broker_adapter_contract.py -q
+env -u PYTHONPATH PYTHONPATH=. "$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_broker_adapter_contract.py -q
 ```
 
 Expected: pass.
@@ -446,7 +447,7 @@ Using a temporary SQLite database, verify:
 **Step 2: Run RED**
 
 ```bash
-PYTHONPATH=. "$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_trading_ledger.py tests/test_database.py -q
+env -u PYTHONPATH PYTHONPATH=. "$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_trading_ledger.py tests/test_database.py -q
 ```
 
 Expected: missing models/module.
@@ -468,7 +469,7 @@ Do not migrate or rewrite legacy weather rows.
 **Step 4: Run GREEN and schema regressions**
 
 ```bash
-PYTHONPATH=. "$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_trading_ledger.py tests/test_database.py tests/test_weather_paper_account.py -q
+env -u PYTHONPATH PYTHONPATH=. "$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_trading_ledger.py tests/test_database.py tests/test_weather_paper_account.py -q
 ```
 
 Expected: pass.
@@ -515,7 +516,7 @@ Cover:
 **Step 2: Run RED**
 
 ```bash
-PYTHONPATH=. "$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_paper_execution_service.py -q
+env -u PYTHONPATH PYTHONPATH=. "$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_paper_execution_service.py -q
 ```
 
 Expected: import failure.
@@ -527,7 +528,7 @@ Expected: import failure.
 **Step 4: Run GREEN plus domain suite**
 
 ```bash
-PYTHONPATH=. "$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_paper_execution_service.py tests/test_unified_risk_gate.py tests/test_trading_ledger.py -q
+env -u PYTHONPATH PYTHONPATH=. "$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_paper_execution_service.py tests/test_unified_risk_gate.py tests/test_trading_ledger.py -q
 ```
 
 Expected: pass.
@@ -556,7 +557,7 @@ Run from `$REPO`:
 
 ```bash
 test -x "$ENVS/unified-trading-py311/bin/python"
-"$ENVS/unified-trading-py311/bin/python" -m pip install pip-tools pip-audit bandit
+env -u PYTHONPATH "$ENVS/unified-trading-py311/bin/python" -m pip install pip-tools pip-audit bandit
 ```
 
 Expected: environment exists only on Archives.
@@ -574,7 +575,7 @@ The test must not read credentials or start network I/O.
 **Step 3: Run RED**
 
 ```bash
-"$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_lumibot_runtime.py -q
+env -u PYTHONPATH "$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_lumibot_runtime.py -q
 ```
 
 Expected: `ModuleNotFoundError`.
@@ -584,16 +585,16 @@ Expected: `ModuleNotFoundError`.
 Put the minimal LumiBot/Alpaca dependency in `requirements-trading.in`, compile exact transitive versions into `requirements-trading.txt`, install it, and record the resolved LumiBot version in README. Do not guess a version in code.
 
 ```bash
-"$ENVS/unified-trading-py311/bin/pip-compile" requirements-trading.in --output-file requirements-trading.txt
-"$ENVS/unified-trading-py311/bin/python" -m pip install -r requirements-trading.txt
-"$ENVS/unified-trading-py311/bin/python" -m pip check
+env -u PYTHONPATH "$ENVS/unified-trading-py311/bin/pip-compile" requirements-trading.in --output-file requirements-trading.txt
+env -u PYTHONPATH "$ENVS/unified-trading-py311/bin/python" -m pip install -r requirements-trading.txt
+env -u PYTHONPATH "$ENVS/unified-trading-py311/bin/python" -m pip check
 ```
 
 **Step 5: Run GREEN and security audit**
 
 ```bash
-"$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_lumibot_runtime.py -q
-"$ENVS/unified-trading-py311/bin/pip-audit" -r requirements-trading.txt
+env -u PYTHONPATH "$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_lumibot_runtime.py -q
+env -u PYTHONPATH "$ENVS/unified-trading-py311/bin/pip-audit" -r requirements-trading.txt
 ```
 
 Expected: import and `pip check` pass. Any vulnerability must be triaged and resolved or documented as a blocker before continuing; do not suppress it silently.
@@ -631,7 +632,7 @@ Use an injected fake LumiBot/Alpaca client—no network and no credentials. Veri
 **Step 2: Run RED**
 
 ```bash
-"$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_alpaca_paper_adapter.py -q
+env -u PYTHONPATH "$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_alpaca_paper_adapter.py -q
 ```
 
 Expected: import failure.
@@ -643,7 +644,7 @@ Construction takes `client_factory` plus settings. Validate endpoint and `EXECUT
 **Step 4: Run GREEN and contract tests**
 
 ```bash
-"$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_alpaca_paper_adapter.py tests/test_broker_adapter_contract.py -q
+env -u PYTHONPATH "$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_alpaca_paper_adapter.py tests/test_broker_adapter_contract.py -q
 ```
 
 Expected: pass without network.
@@ -683,7 +684,7 @@ Use fixed OHLCV bars. Verify:
 **Step 2: Run RED**
 
 ```bash
-"$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_trend_following_strategy.py -q
+env -u PYTHONPATH "$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_trend_following_strategy.py -q
 ```
 
 Expected: import failure.
@@ -695,7 +696,7 @@ Implement a configurable 20/50 simple-moving-average crossover that emits typed 
 **Step 4: Run GREEN**
 
 ```bash
-"$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_trend_following_strategy.py -q
+env -u PYTHONPATH "$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_trend_following_strategy.py -q
 ```
 
 Expected: pass.
@@ -735,7 +736,7 @@ Verify:
 **Step 2: Run RED**
 
 ```bash
-"$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_weather_paper_adapters.py tests/test_weather_venue_reliability_integration.py -q
+env -u PYTHONPATH "$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_weather_paper_adapters.py tests/test_weather_venue_reliability_integration.py -q
 ```
 
 Expected: new test fails because normalized adapters do not exist.
@@ -747,7 +748,7 @@ Translate existing weather signals into `TradeProposal`, reuse current validatio
 **Step 4: Run GREEN plus all weather tests**
 
 ```bash
-"$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_weather_paper_adapters.py tests/test_weather_venue_reliability_integration.py tests/test_weather_*.py -q
+env -u PYTHONPATH "$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_weather_paper_adapters.py tests/test_weather_venue_reliability_integration.py tests/test_weather_*.py -q
 ```
 
 Expected: pass.
@@ -786,7 +787,7 @@ Verify:
 **Step 2: Run RED**
 
 ```bash
-"$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_unified_scheduler.py tests/test_scheduler_autostart.py -q
+env -u PYTHONPATH "$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_unified_scheduler.py tests/test_scheduler_autostart.py -q
 ```
 
 Expected: new tests fail.
@@ -798,7 +799,7 @@ Add `stock_crypto_paper_job()` and register it only when both scheduler autostar
 **Step 4: Run GREEN and scheduler regressions**
 
 ```bash
-"$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_unified_scheduler.py tests/test_scheduler_autostart.py tests/test_scheduler_jobs.py -q
+env -u PYTHONPATH "$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_unified_scheduler.py tests/test_scheduler_autostart.py tests/test_scheduler_jobs.py -q
 ```
 
 Expected: pass.
@@ -838,7 +839,7 @@ With scheduler disabled and fake adapter injected, verify:
 **Step 2: Run RED**
 
 ```bash
-SCHEDULER_AUTOSTART=false "$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_unified_trading_api.py tests/test_api_schemas.py -q
+env -u PYTHONPATH SCHEDULER_AUTOSTART=false "$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_unified_trading_api.py tests/test_api_schemas.py -q
 ```
 
 Expected: 404/missing schemas.
@@ -850,7 +851,7 @@ Add response schemas and route dependencies for read models and the safe run ser
 **Step 4: Run GREEN and full API regressions**
 
 ```bash
-SCHEDULER_AUTOSTART=false "$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_unified_trading_api.py tests/test_api_schemas.py tests/test_dashboard_product_scope.py tests/test_scheduler_autostart.py -q
+env -u PYTHONPATH SCHEDULER_AUTOSTART=false "$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_unified_trading_api.py tests/test_api_schemas.py tests/test_dashboard_product_scope.py tests/test_scheduler_autostart.py -q
 ```
 
 Expected: pass.
@@ -953,7 +954,7 @@ Use temporary directories. Verify:
 **Step 2: Run RED**
 
 ```bash
-"$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_archive_migration.py -q
+env -u PYTHONPATH "$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_archive_migration.py -q
 ```
 
 Expected: missing script/module.
@@ -965,7 +966,7 @@ The script takes explicit `--source`, `--archive-root`, and either `--dry-run` o
 **Step 4: Run GREEN**
 
 ```bash
-"$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_archive_migration.py -q
+env -u PYTHONPATH "$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_archive_migration.py -q
 ```
 
 Expected: pass.
@@ -973,7 +974,7 @@ Expected: pass.
 **Step 5: Run dry-run against the real source**
 
 ```bash
-"$ENVS/unified-trading-py311/bin/python" scripts/migrate_runtime_to_archives.py \
+env -u PYTHONPATH "$ENVS/unified-trading-py311/bin/python" scripts/migrate_runtime_to_archives.py \
   --source "$SOURCE" \
   --archive-root "$ROOT" \
   --dry-run
@@ -984,7 +985,7 @@ Expected: categorized plan only; no values from `.env` or key files printed.
 **Step 6: Apply and verify**
 
 ```bash
-"$ENVS/unified-trading-py311/bin/python" scripts/migrate_runtime_to_archives.py \
+env -u PYTHONPATH "$ENVS/unified-trading-py311/bin/python" scripts/migrate_runtime_to_archives.py \
   --source "$SOURCE" \
   --archive-root "$ROOT" \
   --apply
@@ -1029,7 +1030,7 @@ Verify:
 **Step 2: Run RED**
 
 ```bash
-"$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_trading_preflight.py tests/test_paper_strategy_cli.py -q
+env -u PYTHONPATH "$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_trading_preflight.py tests/test_paper_strategy_cli.py -q
 ```
 
 Expected: scripts missing.
@@ -1050,9 +1051,9 @@ python scripts/verify_alpaca_paper.py --submit-cancel SPY
 **Step 4: Run GREEN and fake end-to-end smoke**
 
 ```bash
-"$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_trading_preflight.py tests/test_paper_strategy_cli.py -q
-"$ENVS/unified-trading-py311/bin/python" scripts/trading_preflight.py
-"$ENVS/unified-trading-py311/bin/python" scripts/run_paper_strategy.py --adapter fake --symbols SPY BTC/USD --once
+env -u PYTHONPATH "$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_trading_preflight.py tests/test_paper_strategy_cli.py -q
+env -u PYTHONPATH "$ENVS/unified-trading-py311/bin/python" scripts/trading_preflight.py
+env -u PYTHONPATH "$ENVS/unified-trading-py311/bin/python" scripts/run_paper_strategy.py --adapter fake --symbols SPY BTC/USD --once
 ```
 
 Expected: tests pass; preflight reports credentials absent; fake run records a proposal/risk/order lifecycle or a valid no-trade result.
@@ -1092,7 +1093,7 @@ Expected: clean tracked state.
 **Step 2: Run complete Python suite from Archives**
 
 ```bash
-PYTHONPATH=. "$ENVS/unified-trading-py311/bin/python" -m pytest -q
+env -u PYTHONPATH PYTHONPATH=. "$ENVS/unified-trading-py311/bin/python" -m pytest -q
 ```
 
 Expected: all legacy and new tests pass. Record the actual count; do not preclaim 272 because the suite will grow.
@@ -1111,10 +1112,10 @@ Expected: pass.
 
 ```bash
 cd "$REPO"
-"$ENVS/unified-trading-py311/bin/python" -m pip check
-"$ENVS/unified-trading-py311/bin/pip-audit" -r requirements.txt
-"$ENVS/unified-trading-py311/bin/pip-audit" -r requirements-trading.txt
-"$ENVS/unified-trading-py311/bin/python" -m bandit -r backend scripts -q
+env -u PYTHONPATH "$ENVS/unified-trading-py311/bin/python" -m pip check
+env -u PYTHONPATH "$ENVS/unified-trading-py311/bin/pip-audit" -r requirements.txt
+env -u PYTHONPATH "$ENVS/unified-trading-py311/bin/pip-audit" -r requirements-trading.txt
+env -u PYTHONPATH "$ENVS/unified-trading-py311/bin/python" -m bandit -r backend scripts -q
 ```
 
 Expected: no untriaged high/critical issue. Fix application findings; document upstream-only residuals with package, advisory, exposure, and mitigation.
@@ -1122,7 +1123,7 @@ Expected: no untriaged high/critical issue. Fix application findings; document u
 **Step 5: Run paper-only negative tests explicitly**
 
 ```bash
-EXECUTION_MODE=live PYTHONPATH=. "$ENVS/unified-trading-py311/bin/python" -c 'from backend.config import settings; from backend.trading.execution_mode import require_paper_mode; require_paper_mode(settings.EXECUTION_MODE)'
+env -u PYTHONPATH EXECUTION_MODE=live PYTHONPATH=. "$ENVS/unified-trading-py311/bin/python" -c 'from backend.config import settings; from backend.trading.execution_mode import require_paper_mode; require_paper_mode(settings.EXECUTION_MODE)'
 ```
 
 Expected: nonzero with paper-only error.
