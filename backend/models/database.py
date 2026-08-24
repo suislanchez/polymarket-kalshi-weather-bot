@@ -1,10 +1,23 @@
 """Database models and connection for BTC 5-min trading bot."""
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, JSON, text
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    Column,
+    DateTime,
+    Float,
+    Integer,
+    JSON,
+    String,
+    UniqueConstraint,
+    create_engine,
+    inspect,
+    text,
+)
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy import inspect
+from sqlalchemy.types import TypeDecorator
 import enum
 
 from backend.config import settings
@@ -15,6 +28,54 @@ engine = create_engine(
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
+
+
+class UTCDateTime(TypeDecorator):
+    """Persist UTC values portably and always restore exact aware UTC datetimes."""
+
+    impl = DateTime(timezone=True)
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return None
+        try:
+            if type(value) is not datetime or value.tzinfo is None:
+                raise ValueError
+            offset = value.utcoffset()
+            if offset != timezone.utc.utcoffset(None):
+                raise ValueError
+            normalized = datetime(
+                value.year,
+                value.month,
+                value.day,
+                value.hour,
+                value.minute,
+                value.second,
+                value.microsecond,
+                tzinfo=timezone.utc,
+                fold=value.fold,
+            )
+        except Exception:
+            raise ValueError("datetime must be an exact UTC datetime") from None
+        return normalized.replace(tzinfo=None) if dialect.name == "sqlite" else normalized
+
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return None
+        if value.tzinfo is not None:
+            value = value.astimezone(timezone.utc).replace(tzinfo=None)
+        return datetime(
+            value.year,
+            value.month,
+            value.day,
+            value.hour,
+            value.minute,
+            value.second,
+            value.microsecond,
+            tzinfo=timezone.utc,
+            fold=value.fold,
+        )
 
 
 class Trade(Base):
@@ -132,6 +193,65 @@ class Signal(Base):
     outcome_correct = Column(Boolean, nullable=True)   # did our direction prediction match?
     settlement_value = Column(Float, nullable=True)     # 1.0=UP won, 0.0=DOWN won
     settled_at = Column(DateTime, nullable=True)        # when we recorded the outcome
+
+
+class TradingEvent(Base):
+    """Immutable-at-the-repository-boundary event in an aggregate hash chain."""
+
+    __tablename__ = "trading_events"
+    __table_args__ = (
+        UniqueConstraint("event_id", name="uq_trading_events_event_id"),
+        UniqueConstraint("event_hash", name="uq_trading_events_event_hash"),
+        UniqueConstraint(
+            "aggregate_id", "sequence", name="uq_trading_events_aggregate_sequence"
+        ),
+        CheckConstraint("length(trim(event_id)) > 0", name="ck_trading_events_event_id"),
+        CheckConstraint(
+            "length(trim(aggregate_id)) > 0", name="ck_trading_events_aggregate_id"
+        ),
+        CheckConstraint("sequence > 0", name="ck_trading_events_sequence"),
+        CheckConstraint(
+            "length(trim(event_type)) > 0", name="ck_trading_events_event_type"
+        ),
+        CheckConstraint("length(previous_hash) = 64", name="ck_trading_events_previous_hash"),
+        CheckConstraint("length(event_hash) = 64", name="ck_trading_events_event_hash"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    event_id = Column(String, nullable=False, index=True)
+    aggregate_id = Column(String, nullable=False, index=True)
+    sequence = Column(Integer, nullable=False)
+    event_type = Column(String, nullable=False)
+    occurred_at = Column(UTCDateTime(), nullable=False)
+    payload = Column(JSON, nullable=False)
+    previous_hash = Column(String(64), nullable=False)
+    event_hash = Column(String(64), nullable=False, index=True)
+
+
+class UnifiedOrder(Base):
+    """Mutable idempotent projection of normalized execution reports."""
+
+    __tablename__ = "unified_orders"
+    __table_args__ = (
+        UniqueConstraint("client_order_id", name="uq_unified_orders_client_order_id"),
+        CheckConstraint(
+            "length(trim(client_order_id)) > 0", name="ck_unified_orders_client_order_id"
+        ),
+        CheckConstraint("length(trim(venue)) > 0", name="ck_unified_orders_venue"),
+        CheckConstraint("length(trim(status)) > 0", name="ck_unified_orders_status"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    client_order_id = Column(String, nullable=False, index=True)
+    venue = Column(String, nullable=False)
+    status = Column(String, nullable=False)
+    broker_order_id = Column(String, nullable=True)
+    rejection_reason = Column(String, nullable=True)
+    filled_quantity = Column(String, nullable=False)
+    filled_notional = Column(String, nullable=False)
+    average_fill_price = Column(String, nullable=True)
+    occurred_at = Column(UTCDateTime(), nullable=False)
+    order_metadata = Column("metadata", JSON, nullable=False)
 
 
 class AILog(Base):
