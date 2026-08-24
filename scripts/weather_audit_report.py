@@ -125,6 +125,21 @@ def render_markdown(report) -> str:
                 f"predicted `{mp}` vs actual `{wr}`"
             )
 
+    lines.extend(["", "## Probability calibration by venue"])
+    if getattr(report, "calibration_by_platform", None):
+        for platform, venue_calib in sorted(report.calibration_by_platform.items()):
+            if venue_calib.sample_size == 0:
+                continue
+            brier = "n/a" if venue_calib.brier_score is None else f"{venue_calib.brier_score:.4f}"
+            mean_pred = "n/a" if venue_calib.mean_predicted_win_prob is None else f"{venue_calib.mean_predicted_win_prob:.3f}"
+            emp = "n/a" if venue_calib.empirical_win_rate is None else f"{venue_calib.empirical_win_rate:.3f}"
+            lines.append(
+                f"- **{platform}:** sample `{venue_calib.sample_size}`; Brier `{brier}`; "
+                f"mean predicted `{mean_pred}`; empirical `{emp}`"
+            )
+    else:
+        lines.append("- No per-venue calibration rows available.")
+
     batch = report.latest_signal_batch
     lines.extend(
         [

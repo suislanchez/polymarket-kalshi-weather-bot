@@ -10,6 +10,11 @@ from backend.core.signals import calculate_edge, calculate_kelly_size
 from backend.core.weather_calibration import (
     calibrate_weather_probability,
     config_from_settings,
+    reliability_weight_from_brier,
+)
+from backend.core.weather_audit import (
+    WeatherTradeRow,
+    summarize_probability_calibration_by_platform,
 )
 from backend.core.weather_scan_runtime import map_concurrently, prefetch_forecasts
 from backend.core.weather_methodology import (
@@ -27,7 +32,7 @@ from backend.core.weather_paper_account import (
 from backend.data.weather import fetch_ensemble_forecast, EnsembleForecast, CITY_CONFIG
 from backend.data.noaa_aigefs import fetch_aigefs_forecast
 from backend.data.weather_markets import WeatherMarket, fetch_polymarket_weather_markets
-from backend.models.database import SessionLocal, Signal
+from backend.models.database import SessionLocal, Signal, Trade
 
 logger = logging.getLogger("trading_bot")
 
@@ -105,6 +110,55 @@ def _normalized_orderbook_imbalance(
     return _clamp01(1.0 - (drift / 0.05))
 
 
+def _weather_trade_row_from_model(trade: Trade) -> WeatherTradeRow:
+    """Convert an ORM Trade row into the audit calibration DTO."""
+    return WeatherTradeRow(
+        id=int(trade.id),
+        platform=str(trade.platform or "unknown"),
+        event_slug=str(trade.event_slug or trade.market_ticker or "unknown"),
+        direction=str(trade.direction or "unknown"),
+        entry_price=float(trade.entry_price or 0.0),
+        size=float(trade.size or 0.0),
+        timestamp=str(trade.timestamp or ""),
+        settled=bool(trade.settled),
+        settlement_time=None if trade.settlement_time is None else str(trade.settlement_time),
+        result=str(trade.result or "pending"),
+        pnl=None if trade.pnl is None else float(trade.pnl),
+        model_probability=None if trade.model_probability is None else float(trade.model_probability),
+        market_price_at_entry=None if trade.market_price_at_entry is None else float(trade.market_price_at_entry),
+        edge_at_entry=None if trade.edge_at_entry is None else float(trade.edge_at_entry),
+        market_ticker=None if trade.market_ticker is None else str(trade.market_ticker),
+    )
+
+
+def load_venue_reliability_weights_from_ledger() -> dict[str, float]:
+    """Load per-venue calibration reliability weights from settled weather paper trades.
+
+    This is a conservative read-only input to signal generation. If the ledger is
+    missing/unreadable, the caller falls back to neutral reliability (1.0) rather
+    than blocking market discovery.
+    """
+    db = SessionLocal()
+    try:
+        trades = db.query(Trade).filter(Trade.market_type == "weather").all()
+        calibration_by_platform = summarize_probability_calibration_by_platform(
+            _weather_trade_row_from_model(trade) for trade in trades
+        )
+        return {
+            platform: reliability_weight_from_brier(
+                brier=summary.brier_score,
+                sample_size=summary.sample_size,
+            )
+            for platform, summary in calibration_by_platform.items()
+            if summary.sample_size > 0
+        }
+    except Exception as exc:  # noqa: BLE001 - calibration should not kill scans
+        logger.warning("Failed to load venue reliability weights: %s", exc)
+        return {}
+    finally:
+        db.close()
+
+
 def compute_weather_composite_score(
     *,
     mispricing_edge: float,
@@ -135,6 +189,7 @@ async def generate_weather_signal(
     market: WeatherMarket,
     *,
     forecast: Optional[EnsembleForecast] = None,
+    venue_reliability: float = 1.0,
 ) -> Optional[WeatherTradingSignal]:
     """
     Generate a trading signal for a weather temperature market.
@@ -229,11 +284,12 @@ async def generate_weather_signal(
             ensemble_members=forecast.num_members,
             raw_probability=model_yes_prob,
             exact_source=bool(market.settlement_source and market.settlement_station),
+            venue_reliability=venue_reliability,
             config=config_from_settings(),
         )
         model_yes_prob = calibration.calibrated_probability
         source_tags.append(
-            f"calibration:z={calibration.threshold_z},conf={calibration.confident}"
+            f"calibration:z={calibration.threshold_z},conf={calibration.confident},venue_reliability={venue_reliability:.2f}"
         )
         if not calibration.confident and market.direction in ("above", "below"):
             manual_no_trade_reasons.append(
@@ -459,6 +515,10 @@ async def scan_for_weather_signals() -> List[WeatherTradingSignal]:
 
     logger.info(f"Found {len(markets)} total weather temperature markets")
 
+    venue_reliability = load_venue_reliability_weights_from_ledger()
+    if venue_reliability:
+        logger.info("Venue calibration reliability weights: %s", venue_reliability)
+
     # Prefetch one forecast per unique (city, date) under bounded concurrency, so
     # the many bucket lines that share a city/day do not each hit the provider.
     concurrency = max(1, int(settings.WEATHER_SCAN_CONCURRENCY))
@@ -475,7 +535,12 @@ async def scan_for_weather_signals() -> List[WeatherTradingSignal]:
     async def _generate(market: WeatherMarket) -> Optional[WeatherTradingSignal]:
         try:
             forecast = forecast_map.get((market.city_key, market.target_date))
-            return await generate_weather_signal(market, forecast=forecast)
+            reliability = venue_reliability.get(str(market.platform or "").lower(), 1.0)
+            return await generate_weather_signal(
+                market,
+                forecast=forecast,
+                venue_reliability=reliability,
+            )
         except Exception as e:  # noqa: BLE001 - one bad market must not abort the scan
             logger.debug(f"Weather signal generation failed for {market.title}: {e}")
             return None

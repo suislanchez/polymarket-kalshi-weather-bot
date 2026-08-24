@@ -15,6 +15,7 @@ from backend.core.weather_audit import (
     load_weather_trades,
     summarize_latest_signal_batch,
     summarize_probability_calibration,
+    summarize_probability_calibration_by_platform,
     trade_win_probability,
 )
 from scripts.weather_audit_report import render_markdown
@@ -379,6 +380,34 @@ def test_build_weather_audit_includes_all_time_windows_city_and_calibration(tmp_
     assert "lax" in report.by_city
     assert report.by_city["lax"].total == 2
     assert report.calibration.sample_size == 3
+
+
+def test_weather_audit_reports_probability_calibration_by_platform(tmp_path):
+    conn = _init_db(tmp_path / "venue-calibration.db")
+    rows = [
+        # Polymarket: two accurate high-confidence held-side forecasts.
+        (1, "polymarket", "pm-a", "pm-a", "weather", "yes", 0.5, 75.0, "2026-06-04 10:00:00", 1, "2026-06-05 10:00:00", "win", 75.0, 0.9),
+        (2, "polymarket", "pm-b", "pm-b", "weather", "no", 0.5, 75.0, "2026-06-04 11:00:00", 1, "2026-06-05 11:00:00", "win", 75.0, 0.1),
+        # Kalshi: two overconfident losers.
+        (3, "kalshi", "kx-a", "kx-a", "weather", "yes", 0.5, 75.0, "2026-06-04 12:00:00", 1, "2026-06-05 12:00:00", "loss", -75.0, 0.9),
+        (4, "kalshi", "kx-b", "kx-b", "weather", "no", 0.5, 75.0, "2026-06-04 13:00:00", 1, "2026-06-05 13:00:00", "loss", -75.0, 0.1),
+    ]
+    _insert_calibration_rows(conn, rows)
+
+    trades = load_all_weather_trades(conn)
+    by_platform = summarize_probability_calibration_by_platform(trades)
+    report = build_weather_audit(conn, now=datetime(2026, 6, 6, 12, 0, 0), window_hours=72)
+    markdown = render_markdown(report)
+
+    assert set(by_platform) == {"polymarket", "kalshi"}
+    assert by_platform["polymarket"].sample_size == 2
+    assert by_platform["polymarket"].brier_score == pytest.approx(0.01, abs=1e-6)
+    assert by_platform["kalshi"].sample_size == 2
+    assert by_platform["kalshi"].brier_score == pytest.approx(0.81, abs=1e-6)
+    assert report.calibration_by_platform["kalshi"].empirical_win_rate == 0.0
+    assert "## Probability calibration by venue" in markdown
+    assert "**kalshi:** sample `2`; Brier `0.8100`" in markdown
+    assert "**polymarket:** sample `2`; Brier `0.0100`" in markdown
 
 
 def test_extended_report_renders_and_is_json_serializable(tmp_path):

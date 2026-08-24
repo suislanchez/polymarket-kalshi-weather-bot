@@ -130,6 +130,7 @@ class WeatherAuditReport:
     trailing_windows: dict[str, WeatherTradeSummary] = field(default_factory=dict)
     by_city: dict[str, WeatherTradeSummary] = field(default_factory=dict)
     calibration: ProbabilityCalibrationSummary | None = None
+    calibration_by_platform: dict[str, ProbabilityCalibrationSummary] = field(default_factory=dict)
 
 
 def dataclass_to_dict(value: Any) -> Any:
@@ -386,6 +387,22 @@ def summarize_probability_calibration(
     )
 
 
+def summarize_probability_calibration_by_platform(
+    trades: Iterable[WeatherTradeRow],
+    *,
+    bin_edges: Sequence[float] = DEFAULT_CALIBRATION_BIN_EDGES,
+) -> dict[str, ProbabilityCalibrationSummary]:
+    """Return held-side probability calibration split by venue/platform."""
+    platform_rows: dict[str, list[WeatherTradeRow]] = {}
+    for trade in trades:
+        platform = (trade.platform or "unknown").strip().lower() or "unknown"
+        platform_rows.setdefault(platform, []).append(trade)
+    return {
+        platform: summarize_probability_calibration(rows, bin_edges=bin_edges)
+        for platform, rows in sorted(platform_rows.items())
+    }
+
+
 def detect_largest_outlier(trades: Iterable[WeatherTradeRow]) -> WeatherTradeRow | None:
     settled = [trade for trade in trades if trade.settled and trade.pnl is not None]
     if not settled:
@@ -547,4 +564,5 @@ def build_weather_audit(
             for city, city_trades in sorted(by_city_rows.items())
         },
         calibration=summarize_probability_calibration(all_trades),
+        calibration_by_platform=summarize_probability_calibration_by_platform(all_trades),
     )
