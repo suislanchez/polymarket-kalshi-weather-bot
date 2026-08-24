@@ -912,6 +912,19 @@ REPEATED_SEPARATOR_DENIED_KEYS = [
     )
 ] + [" PASSWORD ", "CrEdEnTiAl", "\tCREDENTIALS\n"]
 
+WRAPPED_SEPARATOR_DENIED_KEYS = [
+    "_api_key",
+    "api_key_",
+    "--api--key--",
+    " -_ API -- KEY _- ",
+    "__api__secret--",
+    "--secret__key__",
+    " _- ACCESS -- TOKEN -_ ",
+    "__password--",
+    "--credential__",
+    "--credentials__",
+]
+
 
 @pytest.mark.parametrize("key", REPEATED_SEPARATOR_DENIED_KEYS)
 def test_repeated_mixed_separator_denied_metadata_keys_fail_closed(key):
@@ -941,7 +954,32 @@ def test_repeated_mixed_separator_denied_metadata_keys_fail_closed(key):
     assert submit(adapter).broker_order_id == "fake-paper-000001"
 
 
-@pytest.mark.parametrize("key", ["apikey", "my_api_key_note", "ordinary-note"])
+@pytest.mark.parametrize("key", WRAPPED_SEPARATOR_DENIED_KEYS)
+def test_wrapped_denied_metadata_keys_fail_closed_before_allocation(key):
+    sentinel = "wrapped-separator-metadata-sentinel"
+    client_order_id = "wrapped-separator-client"
+    clock = CountingClock()
+    adapter = make_adapter(clock)
+    metadata = {"outer": [{"safe": [{key: sentinel}]}]}
+    order = make_order(client_order_id=client_order_id, metadata=metadata)
+
+    with pytest.raises(
+        BrokerAdapterError, match="^order contains a prohibited metadata key$"
+    ) as caught:
+        submit(adapter, order)
+
+    exposed = f"{caught.value!s} {caught.value!r} {adapter!r} {adapter.__dict__!r}"
+    assert sentinel not in exposed
+    assert client_order_id not in exposed
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert clock.calls == 0
+    assert adapter.get_order(client_order_id) is None
+    assert adapter.list_recent_orders() == ()
+    assert submit(adapter).broker_order_id == "fake-paper-000001"
+
+
+@pytest.mark.parametrize("key", ["apikey", "my_api_key_note", "ordinary-note", "_ordinary_"])
 def test_noncanonical_metadata_key_names_remain_benign(key):
     sentinel = "ordinary-metadata-sentinel"
     report = submit(make_adapter(), make_order(metadata={key: sentinel}))

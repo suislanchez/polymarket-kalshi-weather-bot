@@ -280,7 +280,7 @@ class FakePaperAdapter:
             else:
                 result.append(character)
             in_separator = is_separator
-        return "".join(result)
+        return "".join(result).strip("_")
 
     @classmethod
     def _contains_denied_metadata_key(cls, value: object) -> bool:
