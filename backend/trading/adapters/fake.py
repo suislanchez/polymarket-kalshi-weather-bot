@@ -163,7 +163,7 @@ class FakePaperAdapter:
         positions: Iterable[PositionSnapshot] = (),
         scenarios: Mapping[str, FakeOrderScenario] | None = None,
     ) -> None:
-        if not isinstance(venue, Venue):
+        if type(venue) is not Venue:
             raise BrokerAdapterError("adapter venue must be a Venue")
         position_items = tuple(positions)
         if not all(type(position) is PositionSnapshot for position in position_items):

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal, DecimalException, localcontext
 from pathlib import Path
@@ -337,6 +338,137 @@ def test_constructor_rejects_position_from_another_venue_without_clock():
 def test_constructor_rejects_non_venue_instead_of_retaining_false_green_value(venue):
     with pytest.raises(BrokerAdapterError, match="adapter venue must be a Venue"):
         FakePaperAdapter(clock=CountingClock(), venue=venue)
+
+
+@pytest.mark.parametrize("venue", list(Venue))
+def test_constructor_accepts_exact_venue_enum_variants(venue):
+    adapter = FakePaperAdapter(clock=CountingClock(), venue=venue)
+
+    assert f"venue='{venue.value}'" in repr(adapter)
+
+
+def test_constructor_rejects_spoofed_venue_before_any_caller_behavior():
+    sentinel = "spoofed-venue-boundary-sentinel"
+    calls = {
+        "venue_class": 0,
+        "venue_eq": 0,
+        "venue_repr": 0,
+        "venue_attributes": 0,
+        "positions": 0,
+        "scenarios": 0,
+    }
+
+    class VenueImpostor:
+        @property
+        def __class__(self):
+            calls["venue_class"] += 1
+            return Venue
+
+        def __eq__(self, other):
+            calls["venue_eq"] += 1
+            raise AssertionError(sentinel)
+
+        def __repr__(self):
+            calls["venue_repr"] += 1
+            raise AssertionError(sentinel)
+
+        def __getattr__(self, name):
+            calls["venue_attributes"] += 1
+            raise AssertionError(sentinel)
+
+    class ExplodingPositions:
+        def __iter__(self):
+            calls["positions"] += 1
+            raise AssertionError(sentinel)
+
+    class ExplodingScenarios(Mapping):
+        def __getitem__(self, key):
+            raise AssertionError(sentinel)
+
+        def __iter__(self):
+            raise AssertionError(sentinel)
+
+        def __len__(self):
+            raise AssertionError(sentinel)
+
+        def items(self):
+            calls["scenarios"] += 1
+            raise AssertionError(sentinel)
+
+    clock = SentinelClock(error=AssertionError(sentinel))
+    with pytest.raises(
+        BrokerAdapterError, match="^adapter venue must be a Venue$"
+    ) as caught:
+        FakePaperAdapter(
+            clock=clock,
+            venue=VenueImpostor(),
+            positions=ExplodingPositions(),
+            scenarios=ExplodingScenarios(),
+        )
+
+    assert str(caught.value) == "adapter venue must be a Venue"
+    assert sentinel not in str(caught.value)
+    assert sentinel not in repr(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert calls == {
+        "venue_class": 0,
+        "venue_eq": 0,
+        "venue_repr": 0,
+        "venue_attributes": 0,
+        "positions": 0,
+        "scenarios": 0,
+    }
+    assert clock.calls == 0
+
+
+def test_constructor_rejects_raising_class_property_without_invoking_it():
+    sentinel = "raising-venue-class-sentinel"
+    calls = {"venue_class": 0, "positions": 0, "scenarios": 0}
+
+    class RaisingClassVenue:
+        @property
+        def __class__(self):
+            calls["venue_class"] += 1
+            raise AssertionError(sentinel)
+
+    class ExplodingPositions:
+        def __iter__(self):
+            calls["positions"] += 1
+            raise AssertionError(sentinel)
+
+    class ExplodingScenarios(Mapping):
+        def __getitem__(self, key):
+            raise AssertionError(sentinel)
+
+        def __iter__(self):
+            raise AssertionError(sentinel)
+
+        def __len__(self):
+            raise AssertionError(sentinel)
+
+        def items(self):
+            calls["scenarios"] += 1
+            raise AssertionError(sentinel)
+
+    clock = SentinelClock(error=AssertionError(sentinel))
+    with pytest.raises(
+        BrokerAdapterError, match="^adapter venue must be a Venue$"
+    ) as caught:
+        FakePaperAdapter(
+            clock=clock,
+            venue=RaisingClassVenue(),
+            positions=ExplodingPositions(),
+            scenarios=ExplodingScenarios(),
+        )
+
+    assert str(caught.value) == "adapter venue must be a Venue"
+    assert sentinel not in str(caught.value)
+    assert sentinel not in repr(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert calls == {"venue_class": 0, "positions": 0, "scenarios": 0}
+    assert clock.calls == 0
 
 
 def test_constructor_rejects_non_venue_before_fixtures_scenarios_or_clock():
