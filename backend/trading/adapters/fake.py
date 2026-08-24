@@ -174,19 +174,20 @@ class FakePaperAdapter:
             positions=fixtures,
             metadata=_REPORT_METADATA,
         )
+        scenario_items = tuple(scenarios.items()) if scenarios is not None else ()
+        if not all(type(key) is str and bool(key.strip()) for key, _ in scenario_items):
+            raise BrokerAdapterError("scenario keys must be nonblank strings")
+        if not all(isinstance(value, FakeOrderScenario) for _, value in scenario_items):
+            raise TypeError("scenarios must contain FakeOrderScenario values")
+        scenario_map = dict(scenario_items)
+
         self._clock = clock
         self._venue = venue
         self._cash = validated.cash
         self._equity = validated.equity
         self._buying_power = validated.buying_power
         self._positions = fixtures
-        self._scenarios = dict(scenarios) if scenarios is not None else {}
-        if not all(
-            isinstance(key, str) and bool(key.strip()) for key in self._scenarios
-        ):
-            raise BrokerAdapterError("scenario keys must be nonblank strings")
-        if not all(isinstance(value, FakeOrderScenario) for value in self._scenarios.values()):
-            raise TypeError("scenarios must contain FakeOrderScenario values")
+        self._scenarios = scenario_map
         self._reports: dict[str, ExecutionReport] = {}
         self._fingerprints: dict[str, str] = {}
         self._transition_sequences: dict[str, int] = {}
@@ -216,6 +217,7 @@ class FakePaperAdapter:
     def _read_clock(self) -> datetime:
         failed = False
         value: object = None
+        normalized: datetime | None = None
         try:
             value = self._clock()
         except Exception:
@@ -223,17 +225,30 @@ class FakePaperAdapter:
 
         if not failed:
             try:
-                failed = not (
-                    isinstance(value, datetime)
-                    and value.tzinfo is not None
-                    and value.utcoffset() == timezone.utc.utcoffset(value)
-                )
+                if (
+                    type(value) is not datetime
+                    or value.tzinfo is None
+                    or value.utcoffset() != timezone.utc.utcoffset(None)
+                ):
+                    failed = True
+                else:
+                    normalized = datetime(
+                        value.year,
+                        value.month,
+                        value.day,
+                        value.hour,
+                        value.minute,
+                        value.second,
+                        value.microsecond,
+                        tzinfo=timezone.utc,
+                        fold=value.fold,
+                    )
             except Exception:
                 failed = True
 
-        if failed:
+        if failed or normalized is None:
             raise BrokerAdapterError("adapter clock failed") from None
-        return cast(datetime, value)
+        return normalized
 
     def get_account_snapshot(self) -> AccountSnapshot:
         captured_at = self._read_clock()

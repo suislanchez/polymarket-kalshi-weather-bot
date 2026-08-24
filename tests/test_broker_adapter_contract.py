@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ast
 import inspect
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal, DecimalException, localcontext
 from pathlib import Path
 from typing import Protocol
@@ -59,6 +59,21 @@ class SentinelClock:
         if self.error is not None:
             raise self.error
         return self.result
+
+
+class StatefulUtc(tzinfo):
+    def __init__(self, sentinel: str) -> None:
+        self.sentinel = sentinel
+        self.calls = 0
+
+    def utcoffset(self, dt):
+        self.calls += 1
+        if self.calls == 1:
+            return timedelta(0)
+        raise RuntimeError(self.sentinel)
+
+    def dst(self, dt):
+        return timedelta(0)
 
 
 def order_data(**overrides):
@@ -221,6 +236,37 @@ def test_constructor_rejects_malformed_scenario_keys_without_clock(key):
     clock = CountingClock()
     with pytest.raises(BrokerAdapterError, match="scenario keys must be nonblank strings"):
         FakePaperAdapter(clock=clock, scenarios={key: FakeOrderScenario()})
+    assert clock.calls == 0
+
+
+@pytest.mark.parametrize("hostile", [False, True])
+def test_constructor_rejects_str_subclass_scenario_keys_before_retaining_state(hostile):
+    sentinel = "scenario-key-subclass-sentinel"
+
+    class BenignKey(str):
+        pass
+
+    class ExplodingKey(str):
+        __hash__ = str.__hash__
+
+        def __eq__(self, other):
+            raise RuntimeError(sentinel)
+
+    key_type = ExplodingKey if hostile else BenignKey
+    clock = SentinelClock(error=AssertionError(sentinel))
+
+    with pytest.raises(
+        BrokerAdapterError, match="^scenario keys must be nonblank strings$"
+    ) as caught:
+        FakePaperAdapter(
+            clock=clock,
+            scenarios={key_type("client-1"): FakeOrderScenario()},
+        )
+
+    assert sentinel not in str(caught.value)
+    assert sentinel not in repr(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
     assert clock.calls == 0
 
 
@@ -675,6 +721,68 @@ def test_all_clock_paths_fail_sanitized_and_atomically(clock, operation):
         assert adapter.list_recent_orders() == (existing,)
     else:
         assert adapter.list_recent_orders() == ()
+
+
+@pytest.mark.parametrize("operation", ["account", "positions", "submit", "cancel"])
+def test_all_clock_paths_normalize_stateful_custom_utc_to_safe_base_datetime(operation):
+    sentinel = f"stateful-clock-{operation}-sentinel"
+    custom_timezone = StatefulUtc(sentinel)
+    clock_value = datetime(
+        2026,
+        8,
+        24,
+        12,
+        34,
+        56,
+        789012,
+        tzinfo=custom_timezone,
+        fold=1,
+    )
+    clock = SentinelClock(clock_value)
+    adapter = FakePaperAdapter(clock=clock, positions=[make_position()])
+
+    if operation == "account":
+        account = adapter.get_account_snapshot()
+        returned_times = (account.captured_at, account.positions[0].captured_at)
+    elif operation == "positions":
+        returned_times = (adapter.list_positions()[0].captured_at,)
+    elif operation == "submit":
+        returned_times = (submit(adapter).occurred_at,)
+    else:
+        adapter._clock = CountingClock()
+        submit(adapter)
+        adapter._clock = clock
+        returned_times = (adapter.cancel_order("client-1").occurred_at,)
+
+    expected_fields = (2026, 8, 24, 12, 34, 56, 789012, 1)
+    for returned in returned_times:
+        assert type(returned) is datetime
+        assert returned.tzinfo is timezone.utc
+        assert (
+            returned.year,
+            returned.month,
+            returned.day,
+            returned.hour,
+            returned.minute,
+            returned.second,
+            returned.microsecond,
+            returned.fold,
+        ) == expected_fields
+    assert custom_timezone.calls == 1
+
+
+def test_clock_rejects_datetime_subclass_with_fixed_sanitized_error():
+    class CustomDatetime(datetime):
+        pass
+
+    clock = SentinelClock(CustomDatetime(2026, 8, 24, tzinfo=timezone.utc))
+    adapter = FakePaperAdapter(clock=clock)
+
+    with pytest.raises(BrokerAdapterError, match="^adapter clock failed$") as caught:
+        adapter.get_account_snapshot()
+
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
 
 
 def test_venue_mismatch_is_rejected_before_allocation():
