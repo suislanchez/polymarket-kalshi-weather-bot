@@ -566,6 +566,160 @@ def test_constructor_sanitizes_scenario_items_materialization_failures(raise_aft
     assert clock.calls == 0
 
 
+def test_constructor_sanitizes_hostile_scenario_entry_iteration():
+    sentinel = "scenario-entry-credential-sentinel"
+    clock = SentinelClock(error=AssertionError("clock-must-not-run"))
+
+    class HostileEntry:
+        def __iter__(self):
+            raise RuntimeError(sentinel)
+
+    class HostileScenarios(Mapping):
+        def __getitem__(self, key):
+            raise KeyError(key)
+
+        def __iter__(self):
+            return iter(())
+
+        def __len__(self):
+            return 0
+
+        def items(self):
+            return [HostileEntry()]
+
+    adapter = FakePaperAdapter.__new__(FakePaperAdapter)
+    with pytest.raises(BrokerAdapterError, match="^scenario fixtures failed$") as caught:
+        FakePaperAdapter.__init__(
+            adapter,
+            clock=clock,
+            venue=Venue.ALPACA_PAPER,
+            scenarios=HostileScenarios(),
+        )
+
+    assert str(caught.value) == "scenario fixtures failed"
+    assert sentinel not in str(caught.value)
+    assert sentinel not in repr(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert clock.calls == 0
+    assert adapter.__dict__ == {}
+
+
+@pytest.mark.parametrize(
+    "entry_factory",
+    [
+        pytest.param(lambda: (), id="empty-tuple"),
+        pytest.param(lambda: ["client-1"], id="one-list"),
+        pytest.param(
+            lambda: ("client-1", FakeOrderScenario(), "unexpected"),
+            id="three-tuple",
+        ),
+        pytest.param(lambda: iter(()), id="empty-generator"),
+        pytest.param(lambda: iter(["client-1"]), id="one-generator"),
+        pytest.param(
+            lambda: iter(["client-1", FakeOrderScenario(), "unexpected"]),
+            id="three-generator",
+        ),
+    ],
+)
+def test_constructor_sanitizes_malformed_scenario_entry_lengths(entry_factory):
+    clock = CountingClock()
+
+    class MalformedScenarios(Mapping):
+        def __getitem__(self, key):
+            raise KeyError(key)
+
+        def __iter__(self):
+            return iter(())
+
+        def __len__(self):
+            return 0
+
+        def items(self):
+            return [entry_factory()]
+
+    with pytest.raises(BrokerAdapterError, match="^scenario fixtures failed$") as caught:
+        FakePaperAdapter(
+            clock=clock,
+            venue=Venue.ALPACA_PAPER,
+            scenarios=MalformedScenarios(),
+        )
+
+    assert str(caught.value) == "scenario fixtures failed"
+    assert "not enough values to unpack" not in repr(caught.value)
+    assert "too many values to unpack" not in repr(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert clock.calls == 0
+
+
+@pytest.mark.parametrize("yield_count", [1, 2])
+def test_constructor_sanitizes_partially_yielded_scenario_entry_failures(yield_count):
+    sentinel = f"scenario-partial-entry-{yield_count}-credential-sentinel"
+    clock = CountingClock()
+
+    def partial_entry():
+        yield "client-1"
+        if yield_count == 2:
+            yield FakeOrderScenario()
+        raise RuntimeError(sentinel)
+
+    class PartialEntryScenarios(Mapping):
+        def __getitem__(self, key):
+            raise KeyError(key)
+
+        def __iter__(self):
+            return iter(())
+
+        def __len__(self):
+            return 0
+
+        def items(self):
+            return [partial_entry()]
+
+    with pytest.raises(BrokerAdapterError, match="^scenario fixtures failed$") as caught:
+        FakePaperAdapter(clock=clock, scenarios=PartialEntryScenarios())
+
+    assert str(caught.value) == "scenario fixtures failed"
+    assert sentinel not in str(caught.value)
+    assert sentinel not in repr(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert clock.calls == 0
+
+
+def test_constructor_accepts_and_defensively_copies_valid_scenario_item_pairs():
+    list_scenario = FakeOrderScenario(
+        status=OrderStatus.FILLED,
+        fill_fraction=Decimal("1"),
+        average_fill_price=Decimal("101.5"),
+    )
+    tuple_scenario = FakeOrderScenario(status=OrderStatus.REJECTED)
+    list_entry = ["client-1", list_scenario]
+    tuple_entry = ("client-2", tuple_scenario)
+    caller_items = [list_entry, tuple_entry]
+
+    class PairScenarios(Mapping):
+        def __getitem__(self, key):
+            raise KeyError(key)
+
+        def __iter__(self):
+            return iter(())
+
+        def __len__(self):
+            return 0
+
+        def items(self):
+            return caller_items
+
+    adapter = make_adapter(scenarios=PairScenarios())
+    list_entry[:] = ["mutated", FakeOrderScenario()]
+    caller_items.clear()
+
+    assert submit(adapter).status is OrderStatus.FILLED
+    assert submit(adapter, make_order(client_order_id="client-2")).status is OrderStatus.REJECTED
+
+
 @pytest.mark.parametrize("key", [1, "", " ", "\t\n"])
 def test_constructor_rejects_malformed_scenario_keys_without_clock(key):
     clock = CountingClock()

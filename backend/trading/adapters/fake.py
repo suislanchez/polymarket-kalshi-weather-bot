@@ -195,7 +195,13 @@ class FakePaperAdapter:
         scenario_items: tuple[tuple[str, FakeOrderScenario], ...] = ()
         if scenarios is not None:
             try:
-                scenario_items = tuple(scenarios.items())
+                normalized_items = []
+                for raw_item in scenarios.items():
+                    pair = tuple(raw_item)
+                    if len(pair) != 2:
+                        raise ValueError("scenario item must contain exactly two values")
+                    normalized_items.append((pair[0], pair[1]))
+                scenario_items = tuple(normalized_items)
             except Exception:
                 scenario_materialization_failed = True
         if scenario_materialization_failed:
