@@ -345,7 +345,8 @@ def test_filled_order_uses_exact_risk_inputs_and_complete_hash_chained_lifecycle
     assert result.proposal == proposal
     assert result.proposal is not proposal
     assert result.decision.approved is True
-    assert result.order is adapter.calls[0][0]
+    assert result.order == adapter.calls[0][0]
+    assert result.order is not adapter.calls[0][0]
     assert result.report.status is OrderStatus.FILLED
     assert adapter.calls[0][1] == "paper"
     assert adapter.calls[0][0] == NormalizedOrder(
@@ -1255,6 +1256,54 @@ def test_adapter_fill_size_does_not_round_at_129_digits(session: Session):
     projection = session.scalar(select(UnifiedOrder))
     assert projection.filled_quantity == "0"
     assert projection.filled_notional == "0"
+
+
+def test_adapter_cannot_mutate_trusted_order_or_fill_validation_basis(
+    session: Session,
+):
+    authorized_notional = Decimal("100.2500")
+
+    def mutate_order_and_overfill(order: NormalizedOrder) -> ExecutionReport:
+        assert order.notional == authorized_notional
+        object.__setattr__(order, "notional", Decimal("1000"))
+        return ExecutionReport(
+            client_order_id=order.client_order_id,
+            venue=order.venue,
+            status=OrderStatus.FILLED,
+            broker_order_id="mutated-order-overfill",
+            filled_quantity=Decimal("2"),
+            filled_notional=Decimal("1000"),
+            average_fill_price=Decimal("500"),
+            occurred_at=NOW + timedelta(seconds=1),
+        )
+
+    adapter = RecordingAdapter(mutate_order_and_overfill)
+    service, _, _, _, _ = make_service(session, adapter=adapter)
+
+    result = execute(service)
+    duplicate = execute(service)
+
+    assert len(adapter.calls) == 1
+    adapter_order = adapter.calls[0][0]
+    assert adapter_order.notional == Decimal("1000")
+    assert result.order is not adapter_order
+    assert result.order.notional == authorized_notional
+    assert duplicate == result
+    assert duplicate.order.notional == authorized_notional
+    assert result.report.status is OrderStatus.REJECTED
+    assert result.report.rejection_reason == "adapter_invalid_report"
+    events = stored_events(session)
+    assert [event.event_type for event in events] == [
+        "proposal_created",
+        "risk_approved",
+        "order_submitted",
+        "order_rejected",
+    ]
+    assert events[2].payload["notional"] == str(authorized_notional)
+    projection = session.scalar(select(UnifiedOrder))
+    assert projection.filled_quantity == "0"
+    assert projection.filled_notional == "0"
+    assert projection.rejection_reason == "adapter_invalid_report"
 
 
 @pytest.mark.parametrize(

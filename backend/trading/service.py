@@ -660,9 +660,10 @@ class PaperExecutionService:
     ) -> ExecutionReport:
         adapter_failed = False
         report: object = None
+        adapter_order = self._normalize_request_model(order, NormalizedOrder)
         try:
             report = adapter.submit_order(
-                order, execution_mode=self._settings.execution_mode
+                adapter_order, execution_mode=self._settings.execution_mode
             )
         except Exception:
             adapter_failed = True
