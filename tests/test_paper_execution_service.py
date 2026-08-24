@@ -494,6 +494,30 @@ def test_unknown_risk_reason_code_fails_closed_without_leaking(session: Session)
     assert sentinel not in f"{caught.value!r}{[event.payload for event in events]!r}"
 
 
+def test_approved_risk_decision_with_reason_codes_fails_closed(
+    session: Session,
+):
+    decision = RiskDecision(
+        proposal_id="proposal-1",
+        approved=True,
+        reason_codes=("order_notional_limit",),
+        approved_notional=Decimal("100.2500"),
+        decided_at=NOW,
+    )
+    service, adapter, _, _, _ = make_service(
+        session, risk=RecordingRisk(decision)
+    )
+
+    with pytest.raises(PaperExecutionServiceError) as caught:
+        execute(service)
+
+    assert_sanitized(caught.value, "risk decision invalid")
+    assert adapter.calls == []
+    assert [event.event_type for event in stored_events(session)] == [
+        "proposal_created"
+    ]
+
+
 def test_risk_decision_timestamp_must_match_risk_context(session: Session):
     decision = RiskDecision(
         proposal_id="proposal-1",
