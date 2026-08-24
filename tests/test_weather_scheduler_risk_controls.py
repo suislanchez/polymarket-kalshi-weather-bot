@@ -1,16 +1,25 @@
 from datetime import datetime
 from types import SimpleNamespace
 
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
 from backend.core.scheduler import (
     _open_weather_positions_by_city,
     _weather_daily_settled_pnl,
     _weather_paper_execution_blockers,
 )
-from backend.models.database import SessionLocal, Trade
+from backend.models.database import Base, Trade
 
 
-def test_weather_daily_settled_pnl_counts_weather_only():
-    db = SessionLocal()
+def _session(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'weather_risk_controls.sqlite'}")
+    Base.metadata.create_all(bind=engine)
+    return sessionmaker(bind=engine)()
+
+
+def test_weather_daily_settled_pnl_counts_weather_only(tmp_path):
+    db = _session(tmp_path)
     now = datetime(2099, 1, 1, 12, 0, 0)
     marker = "test-weather-pnl"
     try:
@@ -57,8 +66,8 @@ def test_weather_daily_settled_pnl_counts_weather_only():
         db.close()
 
 
-def test_open_weather_positions_by_city_maps_from_signals():
-    db = SessionLocal()
+def test_open_weather_positions_by_city_maps_from_signals(tmp_path):
+    db = _session(tmp_path)
     marker = "test-city-cap"
     try:
         db.add_all(
