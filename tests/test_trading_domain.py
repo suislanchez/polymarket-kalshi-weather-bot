@@ -275,10 +275,99 @@ def test_json_metadata_is_deeply_immutable_and_dumps_as_mutable_json():
     assert isinstance(dumped["metadata"], dict)
     assert isinstance(dumped["metadata"]["audit"], dict)
     assert isinstance(dumped["metadata"]["audit"]["sources"], list)
-    assert json.loads(proposal.model_dump_json())["metadata"] == dumped["metadata"]
+    def reject_non_finite_constant(value):
+        raise ValueError(f"non-finite JSON constant: {value}")
+
+    assert json.loads(
+        proposal.model_dump_json(), parse_constant=reject_non_finite_constant
+    )["metadata"] == dumped["metadata"]
 
     dumped["metadata"]["audit"]["sources"][1]["version"] = 99
     assert proposal.metadata["audit"]["sources"][1]["version"] == 1
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_json_metadata_rejects_non_finite_python_floats(value):
+    with pytest.raises(ValidationError, match="finite JSON number"):
+        TradeProposal(**proposal_data(metadata={"nested": [value]}))
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_json_metadata_rejects_non_finite_constants_from_raw_json(constant):
+    raw = json.dumps(
+        proposal_data(
+            venue=Venue.ALPACA_PAPER.value,
+            asset_class=AssetClass.STOCK.value,
+            side=Side.BUY.value,
+            notional="100.00",
+            reference_price="642.31",
+            market_data_at=NOW.isoformat(),
+            created_at=NOW.isoformat(),
+            metadata={"nested": [0]},
+        )
+    ).replace('"nested": [0]', f'"nested": [{constant}]')
+
+    with pytest.raises(ValidationError, match="finite JSON number"):
+        TradeProposal.model_validate_json(raw)
+
+
+def test_model_copy_validates_and_deeply_freezes_metadata_updates():
+    proposal = TradeProposal(**proposal_data())
+    mutable_metadata = {"audit": {"sources": ["strategy"]}}
+
+    copied = proposal.model_copy(update={"metadata": mutable_metadata})
+    mutable_metadata["audit"]["sources"].append("caller")
+
+    assert copied is not proposal
+    assert copied.model_dump()["metadata"] == {
+        "audit": {"sources": ["strategy"]}
+    }
+    with pytest.raises(TypeError):
+        copied.metadata["audit"]["sources"][0] = "adapter"
+    assert json.loads(copied.model_dump_json())["metadata"] == {
+        "audit": {"sources": ["strategy"]}
+    }
+
+
+def test_model_copy_rejects_invalid_scalar_updates():
+    proposal = TradeProposal(**proposal_data())
+
+    with pytest.raises(ValidationError):
+        proposal.model_copy(update={"notional": Decimal("-1")})
+
+
+def test_normalized_order_model_copy_rejects_dual_sizing():
+    order = NormalizedOrder(**order_data())
+
+    with pytest.raises(ValidationError, match="exactly one sizing field"):
+        order.model_copy(update={"quantity": Decimal("1")})
+
+
+def test_execution_report_model_copy_revalidates_lifecycle():
+    report = ExecutionReport(
+        client_order_id="order:trend:SPY:2026-08-23T12:00:00Z",
+        venue=Venue.ALPACA_PAPER,
+        status=OrderStatus.SUBMITTED,
+        occurred_at=NOW,
+    )
+
+    with pytest.raises(ValidationError, match="positive fill basis"):
+        report.model_copy(update={"status": OrderStatus.FILLED})
+
+
+def test_deep_model_copy_reconstructs_a_distinct_deeply_frozen_model():
+    proposal = TradeProposal(
+        **proposal_data(metadata={"audit": {"sources": ["strategy"]}})
+    )
+
+    copied = proposal.model_copy(deep=True)
+
+    assert copied == proposal
+    assert copied is not proposal
+    assert copied.metadata is not proposal.metadata
+    assert copied.metadata["audit"] is not proposal.metadata["audit"]
+    with pytest.raises(TypeError):
+        copied.metadata["audit"]["sources"][0] = "adapter"
 
 
 def test_default_metadata_and_limit_snapshots_are_deeply_immutable():

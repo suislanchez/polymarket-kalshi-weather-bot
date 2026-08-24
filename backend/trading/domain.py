@@ -6,8 +6,9 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
+from math import isfinite
 from types import MappingProxyType
-from typing import Annotated, cast
+from typing import Annotated, Any, Self, cast
 
 from pydantic import (
     AfterValidator,
@@ -72,6 +73,8 @@ def _require_utc(value: datetime) -> datetime:
 
 
 def _freeze_json(value: JsonValue) -> object:
+    if isinstance(value, float) and not isfinite(value):
+        raise ValueError("value must be a finite JSON number")
     if isinstance(value, Mapping):
         return MappingProxyType(
             {key: _freeze_json(item) for key, item in value.items()}
@@ -111,6 +114,15 @@ class DomainModel(BaseModel):
     """Shared strictness for all values crossing trading boundaries."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, validate_default=True)
+
+    def model_copy(
+        self, *, update: Mapping[str, Any] | None = None, deep: bool = False
+    ) -> Self:
+        if update is not None or deep:
+            data = self.model_dump(round_trip=True)
+            data.update(update or {})
+            return cast(Self, type(self).model_validate(data))
+        return super().model_copy(update=update, deep=deep)
 
 
 class SizedOrderModel(DomainModel):
