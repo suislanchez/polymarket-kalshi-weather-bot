@@ -1,11 +1,12 @@
 """Contract tests for normalized, immutable paper-trading domain values."""
 
+import copy
 import json
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
-from pydantic import ValidationError
+from pydantic import Field, PrivateAttr, ValidationError
 
 from backend.trading.domain import (
     AccountSnapshot,
@@ -23,6 +24,13 @@ from backend.trading.domain import (
 
 
 NOW = datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc)
+
+
+class AliasedTradeProposal(TradeProposal):
+    public_note: str = Field(alias="publicNote")
+    _private_state: dict[str, list[str]] = PrivateAttr(
+        default_factory=lambda: {"events": []}
+    )
 
 
 def proposal_data(**overrides):
@@ -329,6 +337,87 @@ def test_model_copy_validates_and_deeply_freezes_metadata_updates():
     }
 
 
+@pytest.mark.parametrize("update", [None, {}])
+def test_shallow_model_copy_preserves_native_unset_private_and_metadata_semantics(
+    update,
+):
+    proposal = AliasedTradeProposal(
+        **proposal_data(metadata={"audit": {"sources": ["strategy"]}}),
+        publicNote="original",
+    )
+    proposal._private_state["events"].append("created")
+    fields_set = proposal.model_fields_set
+    exclude_unset = proposal.model_dump(exclude_unset=True)
+
+    copied = (
+        proposal.model_copy()
+        if update is None
+        else proposal.model_copy(update=update)
+    )
+
+    assert copied is not proposal
+    assert copied.model_fields_set == fields_set
+    assert copied.model_dump(exclude_unset=True) == exclude_unset
+    assert copied.metadata is proposal.metadata
+    assert copied._private_state is proposal._private_state
+    assert copied.public_note == "original"
+
+
+def test_deep_model_copy_preserves_alias_subclass_unset_and_private_semantics():
+    proposal = AliasedTradeProposal(
+        **proposal_data(metadata={"audit": {"sources": ["strategy"]}}),
+        publicNote="original",
+    )
+    proposal._private_state["events"].append("created")
+
+    copied = proposal.model_copy(deep=True)
+
+    assert type(copied) is AliasedTradeProposal
+    assert copied is not proposal
+    assert copied.model_fields_set == proposal.model_fields_set
+    assert copied.model_dump(exclude_unset=True) == proposal.model_dump(
+        exclude_unset=True
+    )
+    assert copied.public_note == "original"
+    assert copied._private_state == {"events": ["created"]}
+    assert copied._private_state is not proposal._private_state
+    copied._private_state["events"].append("copied")
+    assert proposal._private_state == {"events": ["created"]}
+
+
+@pytest.mark.parametrize("deep", [False, True])
+def test_validated_model_copy_updates_only_requested_fields_and_preserves_native_state(
+    deep,
+):
+    proposal = AliasedTradeProposal(
+        **proposal_data(metadata={"audit": {"sources": ["strategy"]}}),
+        publicNote="original",
+    )
+    proposal._private_state["events"].append("created")
+
+    copied = proposal.model_copy(update={"public_note": "updated"}, deep=deep)
+
+    assert type(copied) is AliasedTradeProposal
+    assert copied.public_note == "updated"
+    assert copied.model_fields_set == proposal.model_fields_set | {"public_note"}
+    assert set(copied.model_dump(exclude_unset=True)) == copied.model_fields_set
+    assert copied._private_state == {"events": ["created"]}
+    if deep:
+        assert copied._private_state is not proposal._private_state
+    else:
+        assert copied._private_state is proposal._private_state
+    assert json.loads(copied.model_dump_json())["public_note"] == "updated"
+
+
+def test_validated_model_copy_still_rejects_unknown_and_naive_utc_updates():
+    proposal = TradeProposal(**proposal_data())
+
+    with pytest.raises(ValidationError, match="Extra inputs"):
+        proposal.model_copy(update={"unknown_field": "unsafe"})
+    with pytest.raises(ValidationError, match="UTC"):
+        proposal.model_copy(update={"created_at": NOW.replace(tzinfo=None)})
+
+
 def test_model_copy_rejects_invalid_scalar_updates():
     proposal = TradeProposal(**proposal_data())
 
@@ -364,10 +453,66 @@ def test_deep_model_copy_reconstructs_a_distinct_deeply_frozen_model():
 
     assert copied == proposal
     assert copied is not proposal
-    assert copied.metadata is not proposal.metadata
-    assert copied.metadata["audit"] is not proposal.metadata["audit"]
+    assert copied.metadata is proposal.metadata
+    assert copied.metadata["audit"] is proposal.metadata["audit"]
     with pytest.raises(TypeError):
         copied.metadata["audit"]["sources"][0] = "adapter"
+
+
+def test_python_deepcopy_preserves_models_private_state_and_immutable_metadata():
+    proposal = AliasedTradeProposal(
+        **proposal_data(metadata={"audit": {"sources": ["strategy"]}}),
+        publicNote="original",
+    )
+    proposal._private_state["events"].append("created")
+    position = PositionSnapshot(
+        venue=Venue.ALPACA_PAPER,
+        asset_class=AssetClass.STOCK,
+        symbol="SPY",
+        quantity=Decimal("1"),
+        cost_basis=Decimal("640"),
+        market_value=Decimal("642"),
+        average_entry_price=Decimal("640"),
+        current_price=Decimal("642"),
+        realized_pnl=Decimal("0"),
+        unrealized_pnl=Decimal("2"),
+        captured_at=NOW,
+        metadata={"position": {"sources": ["ledger"]}},
+    )
+    account = AccountSnapshot(
+        venue=Venue.ALPACA_PAPER,
+        cash=Decimal("9358"),
+        equity=Decimal("10000"),
+        buying_power=Decimal("9358"),
+        captured_at=NOW,
+        positions=(position,),
+        metadata={"account": {"sources": ["adapter"]}},
+    )
+
+    proposal_copy = copy.deepcopy(proposal)
+    account_copy = copy.deepcopy(account)
+
+    assert proposal_copy is not proposal
+    assert type(proposal_copy) is AliasedTradeProposal
+    assert proposal_copy.model_fields_set == proposal.model_fields_set
+    assert proposal_copy._private_state == {"events": ["created"]}
+    assert proposal_copy._private_state is not proposal._private_state
+    proposal_copy._private_state["events"].append("copied")
+    assert proposal._private_state == {"events": ["created"]}
+    assert proposal_copy.metadata is proposal.metadata
+    assert proposal_copy.model_dump()["metadata"] == {
+        "audit": {"sources": ["strategy"]}
+    }
+
+    assert account_copy is not account
+    assert account_copy.model_fields_set == account.model_fields_set
+    assert account_copy.positions is not account.positions
+    assert account_copy.positions[0] is not account.positions[0]
+    assert account_copy.metadata is account.metadata
+    assert account_copy.positions[0].metadata is account.positions[0].metadata
+    assert json.loads(account_copy.model_dump_json())["positions"][0]["metadata"] == {
+        "position": {"sources": ["ledger"]}
+    }
 
 
 def test_default_metadata_and_limit_snapshots_are_deeply_immutable():

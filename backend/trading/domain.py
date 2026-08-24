@@ -13,12 +13,41 @@ from typing import Annotated, Any, Self, cast
 from pydantic import (
     AfterValidator,
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
     JsonValue,
     PlainSerializer,
     model_validator,
 )
+
+
+class _ImmutableMapping(Mapping[str, object]):
+    """A recursively immutable mapping that is safe to share across deep copies."""
+
+    __slots__ = ("_data",)
+
+    def __init__(self, values: Mapping[str, object]) -> None:
+        self._data = MappingProxyType(dict(values))
+
+    def __getitem__(self, key: str) -> object:
+        return self._data[key]
+
+    def __iter__(self):
+        return iter(self._data)
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> Self:
+        memo[id(self)] = self
+        return self
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, Mapping) and self._data == other
+
+    def __repr__(self) -> str:
+        return repr(self._data)
 
 
 class AssetClass(str, Enum):
@@ -76,7 +105,7 @@ def _freeze_json(value: JsonValue) -> object:
     if isinstance(value, float) and not isfinite(value):
         raise ValueError("value must be a finite JSON number")
     if isinstance(value, Mapping):
-        return MappingProxyType(
+        return _ImmutableMapping(
             {key: _freeze_json(item) for key, item in value.items()}
         )
     if isinstance(value, (list, tuple)):
@@ -85,7 +114,7 @@ def _freeze_json(value: JsonValue) -> object:
 
 
 def _freeze_json_object(value: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
-    frozen = MappingProxyType(
+    frozen = _ImmutableMapping(
         {key: _freeze_json(item) for key, item in value.items()}
     )
     return cast(Mapping[str, JsonValue], frozen)
@@ -105,6 +134,7 @@ PositiveDecimal = Annotated[Decimal, Field(gt=0)]
 NonNegativeDecimal = Annotated[Decimal, Field(ge=0)]
 FrozenJsonObject = Annotated[
     Mapping[str, JsonValue],
+    BeforeValidator(_thaw_json),
     AfterValidator(_freeze_json_object),
     PlainSerializer(_thaw_json, return_type=dict[str, JsonValue]),
 ]
@@ -113,16 +143,26 @@ FrozenJsonObject = Annotated[
 class DomainModel(BaseModel):
     """Shared strictness for all values crossing trading boundaries."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True, validate_default=True)
+    model_config = ConfigDict(
+        extra="forbid", frozen=True, populate_by_name=True, validate_default=True
+    )
 
     def model_copy(
         self, *, update: Mapping[str, Any] | None = None, deep: bool = False
     ) -> Self:
-        if update is not None or deep:
-            data = self.model_dump(round_trip=True)
-            data.update(update or {})
-            return cast(Self, type(self).model_validate(data))
-        return super().model_copy(update=update, deep=deep)
+        if update is None or not update:
+            return super().model_copy(update=None, deep=deep)
+
+        candidate = {
+            field_name: getattr(self, field_name)
+            for field_name in type(self).model_fields
+        }
+        candidate.update(update)
+        validated = type(self).model_validate(candidate)
+        validated_update = {
+            field_name: getattr(validated, field_name) for field_name in update
+        }
+        return super().model_copy(update=validated_update, deep=deep)
 
 
 class SizedOrderModel(DomainModel):
