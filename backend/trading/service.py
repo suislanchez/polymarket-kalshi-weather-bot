@@ -101,12 +101,23 @@ class PaperExecutionService:
         append_event_fn: AppendEvent = append_event,
         upsert_order_projection_fn: UpsertProjection = upsert_order_projection,
     ) -> None:
-        if type(settings) is not PaperExecutionSettings:
-            raise PaperExecutionServiceError("paper execution settings invalid")
+        invalid_settings = False
+        settings_snapshot: PaperExecutionSettings | None = None
+        try:
+            if type(settings) is not PaperExecutionSettings:
+                raise ValueError
+            execution_mode = settings.execution_mode
+            if type(execution_mode) is not str or execution_mode != "paper":
+                raise ValueError
+            settings_snapshot = PaperExecutionSettings(execution_mode=execution_mode)
+        except Exception:
+            invalid_settings = True
+        if invalid_settings or settings_snapshot is None:
+            raise PaperExecutionServiceError("paper execution settings invalid") from None
         self._session = session
         self._adapters = adapters
         self._risk_evaluator = risk_evaluator
-        self._settings = settings
+        self._settings = settings_snapshot
         self._clock = clock
         self._kill_switch = kill_switch
         self._append_event = append_event_fn

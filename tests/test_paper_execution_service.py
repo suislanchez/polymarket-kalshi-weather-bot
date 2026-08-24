@@ -278,6 +278,60 @@ def test_no_proposal_is_a_true_noop_without_touching_dependencies(session: Sessi
     assert session.scalar(select(func.count()).select_from(TradingEvent)) == 0
 
 
+def test_constructor_rejects_corrupted_exact_settings_with_fixed_context_free_error(
+    session: Session,
+):
+    class HostileMode:
+        def __repr__(self):
+            raise RuntimeError("SETTINGS_SECRET_SENTINEL")
+
+        def __str__(self):
+            raise RuntimeError("SETTINGS_SECRET_SENTINEL")
+
+    settings = PaperExecutionSettings()
+    object.__setattr__(settings, "execution_mode", HostileMode())
+
+    with pytest.raises(PaperExecutionServiceError) as caught:
+        PaperExecutionService(
+            session=session,
+            adapters={Venue.ALPACA_PAPER: RecordingAdapter()},
+            risk_evaluator=RecordingRisk(),
+            settings=settings,
+            clock=CountingClock(),
+            kill_switch=SequenceKillSwitch(False, False),
+        )
+
+    assert_sanitized(
+        caught.value,
+        "paper execution settings invalid",
+        "SETTINGS_SECRET_SENTINEL",
+        "HostileMode",
+    )
+
+
+def test_service_snapshots_paper_settings_without_retaining_caller_alias(
+    session: Session,
+):
+    settings = PaperExecutionSettings()
+    adapter = RecordingAdapter()
+    service = PaperExecutionService(
+        session=session,
+        adapters={Venue.ALPACA_PAPER: adapter},
+        risk_evaluator=RecordingRisk(),
+        settings=settings,
+        clock=CountingClock(),
+        kill_switch=SequenceKillSwitch(False, False),
+    )
+    object.__setattr__(settings, "execution_mode", "live")
+
+    result = execute(service)
+
+    assert result is not None
+    assert result.report is not None
+    assert result.report.status is OrderStatus.FILLED
+    assert adapter.calls[0][1] == "paper"
+
+
 def test_filled_order_uses_exact_risk_inputs_and_complete_hash_chained_lifecycle(session: Session):
     service, adapter, risk, clock, kill = make_service(session)
     proposal = make_proposal()
