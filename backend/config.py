@@ -62,11 +62,11 @@ class Settings(BaseSettings):
     # Unified risk controls
     MAX_ORDER_NOTIONAL_USD: float = 250.0
     MAX_ORDER_EQUITY_FRACTION: float = 0.01
-    MAX_SYMBOL_EXPOSURE_FRACTION: float = 0.10
+    MAX_SYMBOL_EXPOSURE_FRACTION: float = 0.05
     MAX_GROSS_EXPOSURE_FRACTION: float = 0.25
     MAX_CRYPTO_EXPOSURE_FRACTION: float = 0.10
-    MAX_DAILY_LOSS_FRACTION: float = 0.02
-    MAX_MARKET_DATA_AGE_SECONDS: int = 60
+    MAX_DAILY_LOSS_FRACTION: float = 0.01
+    MAX_MARKET_DATA_AGE_SECONDS: int = 30
     GLOBAL_TRADING_KILL_SWITCH: bool = False
 
     # Alpaca paper API only. Credentials are blank by default.

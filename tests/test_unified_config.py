@@ -1,5 +1,7 @@
 """Deterministic defaults for the unified paper-trading runtime."""
 
+import pytest
+
 from backend.config import Settings
 
 
@@ -26,16 +28,27 @@ def test_unified_paper_runtime_defaults():
     assert settings.TRADING_SYMBOL_ALLOWLIST == "SPY,QQQ,BTC/USD,ETH/USD"
 
 
-def test_unified_risk_defaults():
+@pytest.mark.parametrize(
+    ("setting_name", "expected"),
+    [
+        ("MAX_ORDER_NOTIONAL_USD", 250.0),
+        ("MAX_ORDER_EQUITY_FRACTION", 0.01),
+        ("MAX_SYMBOL_EXPOSURE_FRACTION", 0.05),
+        ("MAX_GROSS_EXPOSURE_FRACTION", 0.25),
+        ("MAX_CRYPTO_EXPOSURE_FRACTION", 0.10),
+        ("MAX_DAILY_LOSS_FRACTION", 0.01),
+        ("MAX_MARKET_DATA_AGE_SECONDS", 30),
+    ],
+)
+def test_unified_risk_defaults(setting_name, expected):
     settings = Settings(_env_file=None)
 
-    assert settings.MAX_ORDER_NOTIONAL_USD == 250.0
-    assert settings.MAX_ORDER_EQUITY_FRACTION == 0.01
-    assert settings.MAX_SYMBOL_EXPOSURE_FRACTION == 0.10
-    assert settings.MAX_GROSS_EXPOSURE_FRACTION == 0.25
-    assert settings.MAX_CRYPTO_EXPOSURE_FRACTION == 0.10
-    assert settings.MAX_DAILY_LOSS_FRACTION == 0.02
-    assert settings.MAX_MARKET_DATA_AGE_SECONDS == 60
+    assert getattr(settings, setting_name) == expected
+
+
+def test_global_trading_kill_switch_defaults_to_off():
+    settings = Settings(_env_file=None)
+
     assert settings.GLOBAL_TRADING_KILL_SWITCH is False
 
 
