@@ -979,7 +979,15 @@ Expected: missing script/module.
 
 **Step 3: Implement dry-run and apply modes**
 
-The script takes explicit `--source`, `--archive-root`, and either `--dry-run` or `--apply`. It uses Python file APIs, temporary destination names, `fsync`, atomic rename, SHA-256 verification, and restrictive secret permissions. It never deletes source data.
+The script takes explicit `--source`, `--research-db-source`, `--research-snapshot-source`, `--archive-root`, and either `--dry-run` or `--apply`. It uses Python file APIs, temporary destination names, `fsync`, atomic rename, SHA-256 verification, and restrictive secret permissions. It never deletes source data.
+
+Route the active data to canonical destinations that later runtime settings consume:
+
+- app ledger → `$DATA/ledgers/tradingbot.db`;
+- research SQLite → `$DATA/research/prediction-market-edge-snapshots.sqlite`;
+- research snapshots → `$DATA/research/snapshots/`.
+
+Add tests proving all three destinations match the Task 15A configuration defaults.
 
 **Step 4: Run GREEN**
 
@@ -994,6 +1002,8 @@ Expected: pass.
 ```bash
 env -u PYTHONPATH "$ENVS/unified-trading-py311/bin/python" scripts/migrate_runtime_to_archives.py \
   --source "$SOURCE" \
+  --research-db-source /Users/kayvonai/.hermes/research/prediction-market-edge-snapshots.sqlite \
+  --research-snapshot-source /Users/kayvonai/.hermes/research \
   --archive-root "$ROOT" \
   --dry-run
 ```
@@ -1005,6 +1015,8 @@ Expected: categorized plan only; no values from `.env` or key files printed.
 ```bash
 env -u PYTHONPATH "$ENVS/unified-trading-py311/bin/python" scripts/migrate_runtime_to_archives.py \
   --source "$SOURCE" \
+  --research-db-source /Users/kayvonai/.hermes/research/prediction-market-edge-snapshots.sqlite \
+  --research-snapshot-source /Users/kayvonai/.hermes/research \
   --archive-root "$ROOT" \
   --apply
 ```
@@ -1023,6 +1035,89 @@ Do not add runtime manifests, backups, secrets, databases, or copied data.
 
 ---
 
+### Task 15A: Bind all runtime state to Archives and fail closed if Archives is unavailable
+
+**Files:**
+- Modify: `backend/config.py`
+- Modify: `.env.example`
+- Modify: `backend/trading/execution_mode.py`
+- Modify: `backend/api/main.py`
+- Modify: `backend/trading/service.py`
+- Modify: `backend/core/weather_signals.py`
+- Modify: `backend/core/entertainment_signals.py`
+- Modify: `scripts/weather_audit_report.py`
+- Modify: `scripts/migrate_runtime_to_archives.py`
+- Modify: `tests/test_unified_config.py`
+- Create: `tests/test_archive_runtime_guard.py`
+- Modify: `tests/test_archive_migration.py`
+- Modify: `tests/test_scheduler_autostart.py`
+- Modify: `tests/test_paper_execution_service.py`
+- Add focused tests for configured research and audit paths.
+
+**Step 1: Write failing path and fail-closed tests**
+
+Use temporary directories and injected mount checks. Verify:
+
+- canonical defaults are exactly:
+  - `TRADING_ARCHIVES_ROOT=/Volumes/Archives`;
+  - `DATABASE_URL=sqlite:////Volumes/Archives/Hermes-Offload/2026-08-23/trading-system/data/ledgers/tradingbot.db`;
+  - `RESEARCH_DATABASE_PATH=/Volumes/Archives/Hermes-Offload/2026-08-23/trading-system/data/research/prediction-market-edge-snapshots.sqlite`;
+  - `RESEARCH_SNAPSHOT_ROOT=/Volumes/Archives/Hermes-Offload/2026-08-23/trading-system/data/research/snapshots`;
+- no mutable runtime default is relative or outside `/Volumes/Archives`;
+- missing or non-mounted Archives root, internal-disk paths, relative paths, or missing required runtime directories raise a clear error;
+- API startup rejects before `init_db()` or scheduler startup, so no substitute SQLite file can be created;
+- `PaperExecutionService` rejects before risk evaluation, ledger mutation, or adapter invocation and rechecks immediately before submission to cover mount-loss races;
+- API research loaders and weather review-candidate persistence use `settings.RESEARCH_DATABASE_PATH`;
+- entertainment snapshots use `settings.RESEARCH_SNAPSHOT_ROOT` without enabling entertainment;
+- weather audit defaults to the configured Archives app ledger while explicit `--db` remains available for isolated tests;
+- migration destinations match the runtime defaults.
+
+**Step 2: Run RED**
+
+```bash
+env -u PYTHONPATH PYTHONPATH=. "$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_unified_config.py tests/test_archive_runtime_guard.py tests/test_archive_migration.py tests/test_scheduler_autostart.py tests/test_paper_execution_service.py -q
+```
+
+Expected: fail because the centralized guard and configured research paths do not exist.
+
+**Step 3: Implement one reusable Archives guard and route all active state through settings**
+
+Add `require_archives_runtime(...)` to `backend/trading/execution_mode.py`. It rejects an unavailable/non-mounted Archives root, any mutable runtime path outside it, and missing required runtime directories. Reuse the same guard at API startup before `init_db()`, before proposal evaluation, and again immediately before adapter submission.
+
+Replace all active production literals for the internal research database/snapshots with `settings.RESEARCH_DATABASE_PATH` or `settings.RESEARCH_SNAPSHOT_ROOT`. Keep historical `/Users/...` strings only where they are serialized provenance in historical documentation or fixtures. Remove the repository-local `sqlite:///./tradingbot.db` alternative from `.env.example`; the canonical runtime has no internal-disk fallback.
+
+**Step 4: Run GREEN and relevant regressions**
+
+```bash
+env -u PYTHONPATH PYTHONPATH=. "$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_unified_config.py tests/test_archive_runtime_guard.py tests/test_archive_migration.py tests/test_scheduler_autostart.py tests/test_paper_execution_service.py tests/test_weather_paper_account.py tests/test_weather_audit.py -q
+```
+
+Expected: pass.
+
+**Step 5: Prove there are no active internal-disk fallbacks**
+
+```bash
+git grep -nE '/Users/kayvonai/(Documents|\.hermes)' -- backend scripts .env.example
+git grep -nE 'sqlite:///(\./)?tradingbot\.db|default="tradingbot\.db"' -- backend scripts .env.example
+git grep -n 'prediction-market-edge-snapshots.sqlite' -- backend scripts .env.example
+```
+
+Expected: the first two searches return zero production matches. Every third-search match is the canonical Archives default or a settings reference, never a `/Users/...` literal.
+
+Run a test with the Archives root deliberately unavailable and prove API startup, proposal evaluation, and adapter submission fail while no fallback `tradingbot.db` or research SQLite appears under the repository, current directory, home directory, or any internal-disk location.
+
+**Step 6: Commit**
+
+```bash
+git add backend/config.py .env.example backend/trading/execution_mode.py backend/api/main.py backend/trading/service.py backend/core/weather_signals.py backend/core/entertainment_signals.py scripts/weather_audit_report.py scripts/migrate_runtime_to_archives.py tests
+git diff --cached --check
+git commit -m "feat: bind runtime state to Archives"
+```
+
+Do not add migrated databases, snapshots, manifests, logs, artifacts, or credentials.
+
+---
+
 ### Task 16: Add operator commands and credential-ready preflight
 
 **Files:**
@@ -1037,7 +1132,8 @@ Do not add runtime manifests, backups, secrets, databases, or copied data.
 
 Verify:
 
-- preflight checks Archives mount/writeability, paper mode, DB integrity, dependency imports, kill switch, and adapter state;
+- preflight reuses `require_archives_runtime(...)` and checks Archives mount/writeability, paper mode, DB integrity, dependency imports, kill switch, and adapter state;
+- paper strategy reuses the same guard before evaluation and relies on the service's immediate pre-submit recheck;
 - no credentials yields `credential_ready=false`, not a traceback;
 - paper strategy CLI can run with `--adapter fake` and record deterministic events;
 - `--adapter alpaca` refuses missing credentials cleanly;
@@ -1148,12 +1244,23 @@ Expected: nonzero with paper-only error.
 
 Search tracked source for forbidden live hosts/order bypasses and secret-like assignments. Review every match; a match is not automatically a defect, but no live execution path or usable secret may remain.
 
+Also run the scoped runtime-path searches from Task 15A:
+
+```bash
+git grep -nE '/Users/kayvonai/(Documents|\.hermes)' -- backend scripts .env.example
+git grep -nE 'sqlite:///(\./)?tradingbot\.db|default="tradingbot\.db"' -- backend scripts .env.example
+git grep -n 'prediction-market-edge-snapshots.sqlite' -- backend scripts .env.example
+```
+
+Require zero production matches from the first two commands. Every third-command match must be the canonical Archives default or a settings reference.
+
 **Step 6: Verify migrated data and startup**
 
 - Rehash every migration manifest entry.
 - Run SQLite `PRAGMA integrity_check` for every copied DB.
 - Start API with `SCHEDULER_AUTOSTART=false` from Archives.
-- Verify `/api/health` and `/api/trading/status`.
+- Deliberately make the configured Archives root unavailable and prove API startup, proposal evaluation, and adapter submission fail before side effects with no internal-disk SQLite fallback created.
+- Restore Archives and verify `/api/health` and `/api/trading/status`.
 - Run the fake paper strategy once.
 - If Alpaca credentials were supplied, run read-only account verification and bounded submit/cancel.
 - Confirm Polymarket/Kalshi weather endpoints still return valid simulation/research responses or honest upstream-empty states.
