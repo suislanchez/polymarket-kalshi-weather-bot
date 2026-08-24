@@ -434,6 +434,43 @@ def test_non_rejected_execution_report_prohibits_rejection_reason():
         )
 
 
+@pytest.mark.parametrize(
+    ("status", "fill_values"),
+    [
+        (status, fill_values)
+        for status in (
+            OrderStatus.PROPOSED,
+            OrderStatus.APPROVED,
+            OrderStatus.SUBMITTED,
+        )
+        for fill_values in (
+            {"filled_quantity": Decimal("1")},
+            {"filled_notional": Decimal("10")},
+        )
+    ],
+)
+def test_non_fill_execution_statuses_prohibit_fill_values(status, fill_values):
+    report = ExecutionReport(
+        client_order_id="order:trend:SPY:2026-08-23T12:00:00Z",
+        venue=Venue.ALPACA_PAPER,
+        status=status,
+        occurred_at=NOW,
+    )
+    assert report.filled_quantity == Decimal("0")
+    assert report.filled_notional == Decimal("0")
+    assert report.average_fill_price is None
+
+    with pytest.raises(ValidationError, match="prohibit fills"):
+        ExecutionReport(
+            client_order_id=report.client_order_id,
+            venue=report.venue,
+            status=status,
+            average_fill_price=Decimal("10"),
+            occurred_at=NOW,
+            **fill_values,
+        )
+
+
 @pytest.mark.parametrize("status", [OrderStatus.PARTIALLY_FILLED, OrderStatus.FILLED])
 def test_fill_status_requires_positive_fill_basis_and_average_price(status):
     report = ExecutionReport(

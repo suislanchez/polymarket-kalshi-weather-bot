@@ -211,6 +211,11 @@ class ExecutionReport(DomainModel):
     @model_validator(mode="after")
     def validate_lifecycle_values(self) -> ExecutionReport:
         rejection_statuses = {OrderStatus.RISK_REJECTED, OrderStatus.REJECTED}
+        non_fill_statuses = {
+            OrderStatus.PROPOSED,
+            OrderStatus.APPROVED,
+            OrderStatus.SUBMITTED,
+        }
         fill_statuses = {OrderStatus.PARTIALLY_FILLED, OrderStatus.FILLED}
         has_fill = self.filled_quantity > 0 or self.filled_notional > 0
 
@@ -229,6 +234,10 @@ class ExecutionReport(DomainModel):
             raise ValueError("positive fills require average_fill_price")
         if self.average_fill_price is not None and not has_fill:
             raise ValueError("average_fill_price requires a positive fill basis")
+        if self.status in non_fill_statuses and (
+            has_fill or self.average_fill_price is not None
+        ):
+            raise ValueError("non-fill statuses prohibit fills and average_fill_price")
         return self
 
 
