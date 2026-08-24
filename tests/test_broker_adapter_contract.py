@@ -282,6 +282,39 @@ def test_constructor_validates_all_position_types_before_copying_any_fixture(mon
     assert clock.calls == 0
 
 
+@pytest.mark.parametrize("raise_after_yield", [False, True])
+def test_constructor_sanitizes_position_materialization_failures_before_copying(
+    monkeypatch, raise_after_yield
+):
+    sentinel = f"position-materialization-{raise_after_yield}-credential-sentinel"
+    clock = CountingClock()
+    copy_calls = 0
+    original_model_copy = PositionSnapshot.model_copy
+
+    def counting_model_copy(self, *args, **kwargs):
+        nonlocal copy_calls
+        copy_calls += 1
+        return original_model_copy(self, *args, **kwargs)
+
+    class ExplodingPositions:
+        def __iter__(self):
+            if raise_after_yield:
+                yield make_position()
+            raise RuntimeError(sentinel)
+
+    monkeypatch.setattr(PositionSnapshot, "model_copy", counting_model_copy)
+    with pytest.raises(BrokerAdapterError, match="^position fixtures failed$") as caught:
+        FakePaperAdapter(clock=clock, venue=Venue.ALPACA_PAPER, positions=ExplodingPositions())
+
+    assert str(caught.value) == "position fixtures failed"
+    assert sentinel not in str(caught.value)
+    assert sentinel not in repr(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert copy_calls == 0
+    assert clock.calls == 0
+
+
 def test_exact_position_fixtures_are_detached_and_recaptured_as_exact_snapshots():
     caller_metadata = {"fixture": {"source": "caller"}}
     source = make_position(metadata=caller_metadata)
@@ -487,6 +520,50 @@ def test_constructor_rejects_non_venue_before_fixtures_scenarios_or_clock():
         )
     assert sentinel not in str(caught.value)
     assert sentinel not in repr(caught.value)
+
+
+@pytest.mark.parametrize("raise_after_yield", [False, True])
+def test_constructor_sanitizes_scenario_items_materialization_failures(raise_after_yield):
+    sentinel = f"scenario-materialization-{raise_after_yield}-credential-sentinel"
+    clock = CountingClock()
+    calls = {"items": 0, "iteration": 0}
+
+    class ExplodingScenarioItems(Mapping):
+        def __getitem__(self, key):
+            raise KeyError(key)
+
+        def __iter__(self):
+            return iter(())
+
+        def __len__(self):
+            return 0
+
+        def items(self):
+            calls["items"] += 1
+            if not raise_after_yield:
+                raise RuntimeError(sentinel)
+
+            def entries():
+                calls["iteration"] += 1
+                yield "client-1", FakeOrderScenario()
+                raise RuntimeError(sentinel)
+
+            return entries()
+
+    with pytest.raises(BrokerAdapterError, match="^scenario fixtures failed$") as caught:
+        FakePaperAdapter(
+            clock=clock,
+            venue=Venue.ALPACA_PAPER,
+            scenarios=ExplodingScenarioItems(),
+        )
+
+    assert str(caught.value) == "scenario fixtures failed"
+    assert sentinel not in str(caught.value)
+    assert sentinel not in repr(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert calls == {"items": 1, "iteration": int(raise_after_yield)}
+    assert clock.calls == 0
 
 
 @pytest.mark.parametrize("key", [1, "", " ", "\t\n"])
@@ -1179,6 +1256,85 @@ def test_nonpaper_mode_is_rejected_before_all_observable_side_effects(mode):
     assert adapter.list_recent_orders() == ()
     valid = submit(adapter)
     assert valid.broker_order_id == "fake-paper-000001"
+
+
+def test_paper_mode_rejects_normalized_order_subclass_before_virtual_dispatch_or_state():
+    sentinel = "order-model-dump-credential-sentinel"
+
+    class HostileOrder(NormalizedOrder):
+        dump_calls: ClassVar[int] = 0
+
+        def model_dump(self, *args, **kwargs):
+            type(self).dump_calls += 1
+            raise RuntimeError(sentinel)
+
+    clock = CountingClock()
+    adapter = make_adapter(clock)
+    hostile = HostileOrder(**order_data())
+
+    with pytest.raises(BrokerAdapterError, match="^order must be a NormalizedOrder$") as caught:
+        adapter.submit_order(hostile, execution_mode="paper")
+
+    assert str(caught.value) == "order must be a NormalizedOrder"
+    assert sentinel not in str(caught.value)
+    assert sentinel not in repr(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert HostileOrder.dump_calls == 0
+    assert clock.calls == 0
+    valid = submit(adapter)
+    assert valid.broker_order_id == "fake-paper-000001"
+    assert adapter.list_recent_orders() == (valid,)
+
+
+@pytest.mark.parametrize("invalid_order", [None, object()])
+def test_paper_mode_rejects_other_non_exact_orders_atomically(invalid_order):
+    clock = CountingClock()
+    adapter = make_adapter(clock)
+
+    with pytest.raises(BrokerAdapterError, match="^order must be a NormalizedOrder$") as caught:
+        adapter.submit_order(invalid_order, execution_mode="paper")
+
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert clock.calls == 0
+    valid = submit(adapter)
+    assert valid.broker_order_id == "fake-paper-000001"
+    assert adapter.list_recent_orders() == (valid,)
+
+
+@pytest.mark.parametrize("mode", ["live", "invalid"])
+def test_execution_mode_gate_precedes_exact_order_validation_without_touching_order(mode):
+    sentinel = "execution-mode-order-touch-sentinel"
+
+    class HostileOrderArgument:
+        def __getattribute__(self, name):
+            raise RuntimeError(sentinel)
+
+    clock = CountingClock()
+    adapter = make_adapter(clock)
+
+    with pytest.raises(ExecutionModeError) as caught:
+        adapter.submit_order(HostileOrderArgument(), execution_mode=mode)
+
+    assert sentinel not in str(caught.value)
+    assert sentinel not in repr(caught.value)
+    assert clock.calls == 0
+    valid = submit(adapter)
+    assert valid.broker_order_id == "fake-paper-000001"
+    assert adapter.list_recent_orders() == (valid,)
+
+
+def test_order_fingerprinting_uses_inert_base_model_dispatch():
+    tree = ast.parse(inspect.getsource(FakePaperAdapter))
+    model_dump_dispatches = [
+        ast.unparse(node.func)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "model_dump"
+    ]
+    assert model_dump_dispatches == ["NormalizedOrder.model_dump"]
 
 
 def test_nonapproved_order_is_rejected_before_allocation():

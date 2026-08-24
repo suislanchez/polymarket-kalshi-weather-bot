@@ -165,7 +165,14 @@ class FakePaperAdapter:
     ) -> None:
         if type(venue) is not Venue:
             raise BrokerAdapterError("adapter venue must be a Venue")
-        position_items = tuple(positions)
+        position_materialization_failed = False
+        position_items: tuple[PositionSnapshot, ...] = ()
+        try:
+            position_items = tuple(positions)
+        except Exception:
+            position_materialization_failed = True
+        if position_materialization_failed:
+            raise BrokerAdapterError("position fixtures failed") from None
         if not all(type(position) is PositionSnapshot for position in position_items):
             raise BrokerAdapterError("positions must contain PositionSnapshot values")
         fixtures = tuple(
@@ -184,7 +191,15 @@ class FakePaperAdapter:
             positions=fixtures,
             metadata=_REPORT_METADATA,
         )
-        scenario_items = tuple(scenarios.items()) if scenarios is not None else ()
+        scenario_materialization_failed = False
+        scenario_items: tuple[tuple[str, FakeOrderScenario], ...] = ()
+        if scenarios is not None:
+            try:
+                scenario_items = tuple(scenarios.items())
+            except Exception:
+                scenario_materialization_failed = True
+        if scenario_materialization_failed:
+            raise BrokerAdapterError("scenario fixtures failed") from None
         if not all(type(key) is str and bool(key.strip()) for key, _ in scenario_items):
             raise BrokerAdapterError("scenario keys must be nonblank strings")
         if not all(type(value) is FakeOrderScenario for _, value in scenario_items):
@@ -308,7 +323,7 @@ class FakePaperAdapter:
     @staticmethod
     def _fingerprint(order: NormalizedOrder) -> str:
         canonical = json.dumps(
-            order.model_dump(mode="json"),
+            NormalizedOrder.model_dump(order, mode="json"),
             sort_keys=True,
             separators=(",", ":"),
             ensure_ascii=True,
@@ -367,6 +382,8 @@ class FakePaperAdapter:
         self, order: NormalizedOrder, *, execution_mode: str
     ) -> ExecutionReport:
         require_paper_mode(execution_mode)
+        if type(order) is not NormalizedOrder:
+            raise BrokerAdapterError("order must be a NormalizedOrder")
         if order.status is not OrderStatus.APPROVED:
             raise BrokerAdapterError("adapter accepts approved orders only")
         if order.venue is not self._venue:
