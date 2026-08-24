@@ -669,6 +669,26 @@ def test_adapter_exception_becomes_fixed_rejection_event_and_projection(session:
     assert projection.rejection_reason == "adapter_error"
 
 
+def test_initial_kill_switch_cannot_be_approved_if_it_clears_before_submit(
+    session: Session,
+):
+    kill = SequenceKillSwitch(True, False)
+    service, adapter, risk, _, _ = make_service(session, kill_switch=kill)
+
+    with pytest.raises(PaperExecutionServiceError) as raised:
+        execute(service)
+
+    assert_sanitized(raised.value, "risk decision invalid")
+    assert kill.calls == 1
+    assert len(risk.calls) == 1
+    risk_context = risk.calls[0][2]
+    assert type(risk_context) is RiskContext
+    assert risk_context.global_kill_switch is True
+    assert adapter.calls == []
+    assert [event.event_type for event in stored_events(session)] == ["proposal_created"]
+    assert session.scalar(select(UnifiedOrder)) is None
+
+
 def test_kill_switch_is_rechecked_immediately_before_submit_and_never_claims_submission(session: Session):
     kill = SequenceKillSwitch(False, True)
     service, adapter, _, _, _ = make_service(session, kill_switch=kill)

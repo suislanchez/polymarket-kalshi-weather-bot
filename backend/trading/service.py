@@ -580,6 +580,7 @@ class PaperExecutionService:
                 type(normalized) is not RiskDecision
                 or normalized.proposal_id != proposal.proposal_id
                 or normalized.decided_at != context.now
+                or (context.global_kill_switch and normalized.approved)
                 or (normalized.approved and bool(normalized.reason_codes))
                 or any(
                     reason not in _ALLOWED_RISK_REASON_CODES
