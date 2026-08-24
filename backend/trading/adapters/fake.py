@@ -7,7 +7,16 @@ import json
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import (
+    Context,
+    Decimal,
+    DecimalException,
+    DivisionByZero,
+    InvalidOperation,
+    Overflow,
+    ROUND_HALF_EVEN,
+    localcontext,
+)
 from typing import cast
 
 from backend.trading.adapters.base import (
@@ -42,6 +51,25 @@ _DENIED_METADATA_KEYS = frozenset(
 _VALIDATION_TIME = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
+def _decimal_context() -> Context:
+    """Return a fresh arithmetic context independent of ambient process state."""
+
+    context = Context(
+        prec=28,
+        rounding=ROUND_HALF_EVEN,
+        Emin=-999999,
+        Emax=999999,
+        capitals=1,
+        clamp=0,
+    )
+    for signal in context.traps:
+        context.traps[signal] = False
+    for signal in (InvalidOperation, DivisionByZero, Overflow):
+        context.traps[signal] = True
+    context.clear_flags()
+    return context
+
+
 @dataclass(frozen=True, slots=True)
 class FakeOrderScenario:
     """One deterministic result selected by a client's order identifier."""
@@ -57,6 +85,11 @@ class FakeOrderScenario:
             self.average_fill_price, Decimal
         ):
             raise TypeError("average_fill_price must be a Decimal")
+        if not self.fill_fraction.is_finite() or (
+            self.average_fill_price is not None
+            and not self.average_fill_price.is_finite()
+        ):
+            raise ValueError("invalid fake order scenario")
 
         empty = self.fill_fraction == 0 and self.average_fill_price is None
         if self.status in {OrderStatus.SUBMITTED, OrderStatus.REJECTED}:
@@ -192,6 +225,44 @@ class FakePaperAdapter:
         self._reports[client_order_id] = report
         self._transition_sequences[client_order_id] = self._transition_counter
 
+    @staticmethod
+    def _fill_values(
+        order: NormalizedOrder, scenario: FakeOrderScenario
+    ) -> tuple[Decimal, Decimal, Decimal | None, str | None]:
+        filled_quantity = Decimal("0")
+        filled_notional = Decimal("0")
+        average_fill_price = None
+        rejection_reason = None
+        if scenario.status in {OrderStatus.PARTIALLY_FILLED, OrderStatus.FILLED}:
+            average_fill_price = cast(Decimal, scenario.average_fill_price)
+            try:
+                with localcontext(_decimal_context()):
+                    if order.quantity is not None:
+                        filled_quantity = order.quantity * scenario.fill_fraction
+                        filled_notional = filled_quantity * average_fill_price
+                    else:
+                        filled_notional = (
+                            cast(Decimal, order.notional) * scenario.fill_fraction
+                        )
+                        filled_quantity = filled_notional / average_fill_price
+            except DecimalException:
+                raise BrokerAdapterError("simulated fill arithmetic failed") from None
+            if (
+                not filled_quantity.is_finite()
+                or not filled_notional.is_finite()
+                or filled_quantity <= 0
+                or filled_notional <= 0
+            ):
+                raise BrokerAdapterError("simulated fill arithmetic failed")
+        elif scenario.status is OrderStatus.REJECTED:
+            rejection_reason = "simulated_rejection"
+        return (
+            filled_quantity,
+            filled_notional,
+            average_fill_price,
+            rejection_reason,
+        )
+
     def submit_order(
         self, order: NormalizedOrder, *, execution_mode: str
     ) -> ExecutionReport:
@@ -213,24 +284,15 @@ class FakePaperAdapter:
             return prior
 
         scenario = self._scenarios.get(order.client_order_id, FakeOrderScenario())
-        self._broker_counter += 1
-        broker_order_id = f"fake-paper-{self._broker_counter:06d}"
+        next_broker_counter = self._broker_counter + 1
+        broker_order_id = f"fake-paper-{next_broker_counter:06d}"
+        (
+            filled_quantity,
+            filled_notional,
+            average_fill_price,
+            rejection_reason,
+        ) = self._fill_values(order, scenario)
         occurred_at = self._clock()
-
-        filled_quantity = Decimal("0")
-        filled_notional = Decimal("0")
-        average_fill_price = None
-        rejection_reason = None
-        if scenario.status in {OrderStatus.PARTIALLY_FILLED, OrderStatus.FILLED}:
-            average_fill_price = cast(Decimal, scenario.average_fill_price)
-            if order.quantity is not None:
-                filled_quantity = order.quantity * scenario.fill_fraction
-                filled_notional = filled_quantity * average_fill_price
-            else:
-                filled_notional = cast(Decimal, order.notional) * scenario.fill_fraction
-                filled_quantity = filled_notional / average_fill_price
-        elif scenario.status is OrderStatus.REJECTED:
-            rejection_reason = "simulated_rejection"
 
         report = ExecutionReport(
             client_order_id=order.client_order_id,
@@ -244,6 +306,7 @@ class FakePaperAdapter:
             occurred_at=occurred_at,
             metadata=_REPORT_METADATA,
         )
+        self._broker_counter = next_broker_counter
         self._fingerprints[order.client_order_id] = fingerprint
         self._record_transition(order.client_order_id, report)
         return report

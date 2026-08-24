@@ -5,7 +5,7 @@ from __future__ import annotations
 import ast
 import inspect
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, DecimalException, localcontext
 from pathlib import Path
 from typing import Protocol
 
@@ -350,6 +350,68 @@ def test_notional_order_fill_math_is_exact(fraction, expected_status, expected_n
     assert report.filled_quantity == expected_quantity
 
 
+def test_fill_math_is_independent_of_ambient_decimal_precision():
+    scenario = FakeOrderScenario(
+        status=OrderStatus.FILLED,
+        fill_fraction=Decimal("1"),
+        average_fill_price=Decimal("3"),
+    )
+    order = make_order(quantity=None, notional=Decimal("100"))
+
+    with localcontext() as context:
+        context.prec = 28
+        normal = submit(make_adapter(scenarios={"client-1": scenario}), order)
+    with localcontext() as context:
+        context.prec = 3
+        low_precision = submit(
+            make_adapter(scenarios={"client-1": scenario}), order
+        )
+
+    assert low_precision.filled_quantity == normal.filled_quantity
+    assert low_precision.filled_notional == normal.filled_notional == Decimal("100")
+
+
+@pytest.mark.parametrize(
+    "value", [Decimal("NaN"), Decimal("Infinity"), Decimal("-Infinity")]
+)
+def test_scenario_rejects_nonfinite_decimal_with_sanitized_validation(value):
+    with pytest.raises(ValueError, match="invalid fake order scenario"):
+        FakeOrderScenario(
+            status=OrderStatus.PARTIALLY_FILLED,
+            fill_fraction=value,
+            average_fill_price=Decimal("1"),
+        )
+
+
+def test_extreme_fill_arithmetic_fails_closed_without_state_mutation():
+    clock = CountingClock()
+    adapter = make_adapter(
+        clock,
+        scenarios={
+            "extreme": FakeOrderScenario(
+                status=OrderStatus.FILLED,
+                fill_fraction=Decimal("1"),
+                average_fill_price=Decimal("1E+999999"),
+            )
+        },
+    )
+    extreme = make_order(
+        client_order_id="extreme",
+        quantity=Decimal("1E+999999"),
+    )
+
+    try:
+        with pytest.raises(BrokerAdapterError, match="fill arithmetic"):
+            submit(adapter, extreme)
+    except DecimalException as error:  # pragma: no cover - fail-closed regression
+        pytest.fail(f"adapter leaked {type(error).__name__}")
+
+    assert clock.calls == 0
+    assert adapter.get_order("extreme") is None
+    assert adapter.list_recent_orders() == ()
+    assert submit(adapter).broker_order_id == "fake-paper-000001"
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
@@ -437,6 +499,30 @@ def test_nonapproved_order_is_rejected_before_allocation():
     assert "secret-id" not in str(caught.value)
     assert clock.calls == 0
     assert submit(adapter).broker_order_id == "fake-paper-000001"
+
+
+def test_clock_failure_does_not_consume_broker_id_or_store_order():
+    class FailOnceClock:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def __call__(self) -> datetime:
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("injected clock failure")
+            return NOW
+
+    clock = FailOnceClock()
+    adapter = FakePaperAdapter(clock=clock)
+
+    with pytest.raises(RuntimeError, match="injected clock failure"):
+        submit(adapter, make_order(client_order_id="failed"))
+
+    assert adapter.get_order("failed") is None
+    assert adapter.list_recent_orders() == ()
+    assert submit(adapter, make_order(client_order_id="successful")).broker_order_id == (
+        "fake-paper-000001"
+    )
 
 
 def test_venue_mismatch_is_rejected_before_allocation():
