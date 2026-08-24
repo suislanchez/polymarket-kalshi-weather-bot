@@ -508,10 +508,17 @@ class PaperExecutionService:
         try:
             with localcontext(_SERVICE_DECIMAL_CONTEXT):
                 proposed_notional = proposal.notional
+                if proposal.quantity is not None:
+                    quantity_notional = (
+                        proposal.quantity * proposal.reference_price
+                    )
+                    proposed_notional = (
+                        quantity_notional
+                        if proposed_notional is None
+                        else min(proposed_notional, quantity_notional)
+                    )
                 if proposed_notional is None:
-                    if proposal.quantity is None:
-                        return False
-                    proposed_notional = proposal.quantity * proposal.reference_price
+                    return False
 
                 approved_notional = decision.approved_notional
                 if approved_notional is None:

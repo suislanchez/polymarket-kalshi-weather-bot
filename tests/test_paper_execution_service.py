@@ -963,6 +963,41 @@ def test_approved_risk_size_cannot_exceed_proposal_or_active_order_cap(
     ]
 
 
+@pytest.mark.parametrize(
+    ("quantity", "proposal_notional", "approved_notional"),
+    [
+        (Decimal("0.1"), Decimal("100"), Decimal("75")),
+        (Decimal("0.4"), Decimal("100"), Decimal("150")),
+    ],
+)
+def test_approved_risk_size_uses_lesser_dual_proposal_basis(
+    session: Session,
+    quantity: Decimal,
+    proposal_notional: Decimal,
+    approved_notional: Decimal,
+):
+    proposal = make_proposal(quantity=quantity, notional=proposal_notional)
+    decision = RiskDecision(
+        proposal_id=proposal.proposal_id,
+        approved=True,
+        approved_notional=approved_notional,
+        decided_at=NOW,
+    )
+    service, adapter, risk, _, _ = make_service(
+        session, risk=RecordingRisk(decision)
+    )
+
+    with pytest.raises(PaperExecutionServiceError) as caught:
+        execute(service, proposal)
+
+    assert_sanitized(caught.value, "risk decision invalid")
+    assert len(risk.calls) == 1
+    assert adapter.calls == []
+    assert [event.event_type for event in stored_events(session)] == [
+        "proposal_created"
+    ]
+
+
 @pytest.mark.parametrize("basis", ["notional", "quantity"])
 def test_adapter_fill_cannot_exceed_submitted_order_size(
     session: Session, basis: str
