@@ -48,11 +48,33 @@ class Settings(BaseSettings):
     AI_LOG_ALL_CALLS: bool = True
     AI_DAILY_BUDGET_USD: float = 1.0
 
-    # Active product scope / dashboard focus
-    # Kayvon's current direction is weather-only. Legacy BTC and RT/entertainment
-    # code/data can remain available behind direct endpoints, but the default
-    # dashboard should avoid spending cycles on those legacy sections.
-    ACTIVE_PRODUCT_SCOPE: str = "weather"
+    # Unified paper-trading runtime. Live trading is rejected during app startup.
+    EXECUTION_MODE: str = "paper"
+    LIVE_TRADING_ENABLED: bool = False
+    ACTIVE_PRODUCT_SCOPE: str = "unified_paper"
+    STOCK_CRYPTO_LANE_ENABLED: bool = False
+    TRADING_SYSTEM_ROOT: str = "/Volumes/Archives/Hermes-Offload/2026-08-23/trading-system/unified-trading-system"
+    TRADING_DATA_ROOT: str = "/Volumes/Archives/Hermes-Offload/2026-08-23/trading-system/data"
+    TRADING_ARTIFACTS_ROOT: str = "/Volumes/Archives/Hermes-Offload/2026-08-23/trading-system/artifacts"
+    TRADING_LOG_ROOT: str = "/Volumes/Archives/Hermes-Offload/2026-08-23/trading-system/logs"
+    TRADING_SYMBOL_ALLOWLIST: str = "SPY,QQQ,BTC/USD,ETH/USD"
+
+    # Unified risk controls
+    MAX_ORDER_NOTIONAL_USD: float = 250.0
+    MAX_ORDER_EQUITY_FRACTION: float = 0.01
+    MAX_SYMBOL_EXPOSURE_FRACTION: float = 0.10
+    MAX_GROSS_EXPOSURE_FRACTION: float = 0.25
+    MAX_CRYPTO_EXPOSURE_FRACTION: float = 0.10
+    MAX_DAILY_LOSS_FRACTION: float = 0.02
+    MAX_MARKET_DATA_AGE_SECONDS: int = 60
+    GLOBAL_TRADING_KILL_SWITCH: bool = False
+
+    # Alpaca paper API only. Credentials are blank by default.
+    ALPACA_PAPER_BASE_URL: str = "https://paper-api.alpaca.markets"
+    ALPACA_API_KEY: str = ""
+    ALPACA_API_SECRET: str = ""
+
+    # Legacy dashboard sections remain hidden unless explicitly requested.
     DASHBOARD_LEGACY_SECTIONS_ENABLED: bool = False
 
     # Scheduler / app lifecycle
@@ -61,9 +83,9 @@ class Settings(BaseSettings):
     # FastAPI TestClient should set SCHEDULER_AUTOSTART=false so importing or
     # constructing the app never triggers market scans or paper trades.
     SCHEDULER_AUTOSTART: bool = True
-    # Legacy BTC 5-min lane. Disabled by default under the weather-only product
-    # scope. This is the canonical off-switch for BTC scanning — do not rely on
-    # MIN_EDGE_THRESHOLD=999 to suppress BTC actionability.
+    # Legacy BTC 5-min prediction-market lane. Disabled by default under the
+    # unified-paper product scope. This is the canonical off-switch for BTC
+    # scanning — do not rely on MIN_EDGE_THRESHOLD=999 to suppress actionability.
     BTC_LANE_ENABLED: bool = False
 
     # Bot settings - BTC 5-MIN TRADING

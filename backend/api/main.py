@@ -9,6 +9,7 @@ import json
 import os
 
 from backend.config import settings
+from backend.trading.execution_mode import require_paper_mode
 from backend.models.database import (
     get_db, init_db, SessionLocal,
     Signal, Trade, BotState, AILog, ScanLog, RottenTomatoesSourceState
@@ -356,6 +357,8 @@ def _maybe_start_scheduler() -> bool:
 
 @app.on_event("startup")
 async def startup():
+    require_paper_mode(settings.EXECUTION_MODE, settings.LIVE_TRADING_ENABLED)
+
     print("=" * 60)
     print("BTC 5-MIN TRADING BOT v3.0")
     print("=" * 60)
