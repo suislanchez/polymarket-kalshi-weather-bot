@@ -213,7 +213,7 @@ class PaperExecutionService:
         if prior is not None:
             if prior[0] != identity:
                 raise PaperExecutionServiceError("proposal identity conflict")
-            return prior[1]
+            return self._detach_result(prior[1])
         pending_proposal = self._pending_idempotency.get(context.idempotency_key)
         prior_proposal_id = (
             None if pending_proposal is None else pending_proposal[0]
@@ -326,6 +326,7 @@ class PaperExecutionService:
         identity: str,
         result: PaperExecutionResult,
     ) -> None:
+        cached_result = self._detach_result(result)
         failed = False
         transaction: SessionTransaction | None = None
         try:
@@ -336,8 +337,34 @@ class PaperExecutionService:
             failed = True
         if failed or transaction is None:
             raise PaperExecutionServiceError("transaction state invalid") from None
-        self._pending_completed[proposal_id] = (identity, result, transaction)
+        self._pending_completed[proposal_id] = (identity, cached_result, transaction)
         self._pending_idempotency[idempotency_key] = (proposal_id, transaction)
+
+    @classmethod
+    def _detach_result(cls, result: object) -> PaperExecutionResult:
+        failed = False
+        detached: PaperExecutionResult | None = None
+        try:
+            if type(result) is not PaperExecutionResult:
+                raise ValueError
+            proposal = cls._normalize_request_model(result.proposal, TradeProposal)
+            decision = cls._normalize_request_model(result.decision, RiskDecision)
+            order = (
+                None
+                if result.order is None
+                else cls._normalize_request_model(result.order, NormalizedOrder)
+            )
+            report = (
+                None
+                if result.report is None
+                else cls._normalize_request_model(result.report, ExecutionReport)
+            )
+            detached = PaperExecutionResult(proposal, decision, order, report)
+        except Exception:
+            failed = True
+        if failed or detached is None:
+            raise PaperExecutionServiceError("execution result invalid") from None
+        return detached
 
     @staticmethod
     def _normalize_request_model(value: object, model_type):
@@ -517,7 +544,22 @@ class PaperExecutionService:
         failed = False
         decision: object = None
         try:
-            decision = self._risk_evaluator(proposal, portfolio, context, limits)
+            evaluator_proposal = self._normalize_request_model(
+                proposal, TradeProposal
+            )
+            evaluator_portfolio = self._normalize_request_model(
+                portfolio, PortfolioState
+            )
+            evaluator_context = self._normalize_request_model(
+                context, RiskContext
+            )
+            evaluator_limits = self._normalize_request_model(limits, RiskLimits)
+            decision = self._risk_evaluator(
+                evaluator_proposal,
+                evaluator_portfolio,
+                evaluator_context,
+                evaluator_limits,
+            )
         except Exception:
             failed = True
         if failed:

@@ -610,7 +610,8 @@ def test_completed_duplicate_returns_same_immutable_result_without_any_new_effec
 
     second = execute(service)
 
-    assert second is first
+    assert second == first
+    assert second is not first
     assert (len(adapter.calls), len(risk.calls), clock.calls, kill.calls, len(stored_events(session))) == counts
     with pytest.raises(Exception):
         second.report = None
@@ -827,7 +828,8 @@ def test_commit_keeps_completed_replay_without_new_effects(session: Session):
 
     second = execute(service)
 
-    assert second is first
+    assert second == first
+    assert second is not first
     assert (len(adapter.calls), len(risk.calls), clock.calls, kill.calls) == counts
     assert len(stored_events(session)) == 5
     assert session.scalar(select(func.count()).select_from(UnifiedOrder)) == 1
@@ -865,7 +867,8 @@ def test_unrelated_rollback_preserves_prior_committed_duplicate_result(
         limits=make_limits(),
     )
 
-    assert replay is first
+    assert replay == first
+    assert replay is not first
     assert (len(adapter.calls), len(risk.calls), clock.calls, kill.calls) == counts
     assert session.scalar(select(func.count()).select_from(TradingEvent)) == 5
     assert session.scalar(select(func.count()).select_from(UnifiedOrder)) == 1
@@ -903,7 +906,8 @@ def test_nested_rollback_preserves_prior_outer_transaction_duplicate_result(
         limits=make_limits(),
     )
 
-    assert replay is first
+    assert replay == first
+    assert replay is not first
     assert (len(adapter.calls), len(risk.calls), clock.calls, kill.calls) == counts
     assert session.scalar(select(func.count()).select_from(TradingEvent)) == 5
     assert session.scalar(select(func.count()).select_from(UnifiedOrder)) == 1
@@ -1256,6 +1260,125 @@ def test_adapter_fill_size_does_not_round_at_129_digits(session: Session):
     projection = session.scalar(select(UnifiedOrder))
     assert projection.filled_quantity == "0"
     assert projection.filled_notional == "0"
+
+
+def test_risk_evaluator_cannot_expand_authoritative_request_or_limits(
+    session: Session,
+):
+    adapter = RecordingAdapter()
+
+    def expand_request(proposal, portfolio, context, limits):
+        object.__setattr__(proposal, "notional", Decimal("1000"))
+        object.__setattr__(portfolio, "equity", Decimal("100000"))
+        object.__setattr__(limits, "max_order_notional", Decimal("2000"))
+        object.__setattr__(limits, "max_order_equity_fraction", Decimal("1"))
+        return RiskDecision(
+            proposal_id=proposal.proposal_id,
+            approved=True,
+            approved_notional=Decimal("1000"),
+            decided_at=context.now,
+        )
+
+    service, _, _, _, _ = make_service(session, adapter=adapter, risk=expand_request)
+
+    with pytest.raises(PaperExecutionServiceError) as raised:
+        execute(service)
+
+    assert_sanitized(raised.value, "risk decision invalid")
+    assert adapter.calls == []
+    assert [event.event_type for event in stored_events(session)] == ["proposal_created"]
+    assert session.scalar(select(UnifiedOrder)) is None
+
+
+def test_risk_evaluator_mutations_are_detached_from_valid_execution(
+    session: Session,
+):
+    held: dict[str, object] = {}
+
+    def mutate_all_inputs(proposal, portfolio, context, limits):
+        held.update(
+            proposal=proposal,
+            portfolio=portfolio,
+            context=context,
+            limits=limits,
+        )
+        decided_at = context.now
+        object.__setattr__(proposal, "notional", Decimal("1000"))
+        object.__setattr__(proposal, "symbol", "MUTATED")
+        object.__setattr__(portfolio, "equity", Decimal("100000"))
+        object.__setattr__(context, "now", NOW + timedelta(days=1))
+        object.__setattr__(limits, "max_order_notional", Decimal("2000"))
+        return RiskDecision(
+            proposal_id="proposal-1",
+            approved=True,
+            approved_notional=Decimal("100.2500"),
+            decided_at=decided_at,
+        )
+
+    adapter = RecordingAdapter()
+    service, _, _, _, _ = make_service(
+        session,
+        adapter=adapter,
+        risk=mutate_all_inputs,
+    )
+
+    result = execute(service)
+    object.__setattr__(held["proposal"], "notional", Decimal("9999"))
+    object.__setattr__(held["limits"], "max_order_notional", Decimal("9999"))
+
+    assert result.proposal.symbol == "SPY"
+    assert result.proposal.notional == Decimal("100.2500")
+    assert result.order.notional == Decimal("100.2500")
+    assert adapter.calls[0][0].notional == Decimal("100.2500")
+    events = stored_events(session)
+    assert events[0].payload["notional"] == "100.2500"
+    assert events[2].payload["notional"] == "100.2500"
+    assert (
+        json.loads(result.decision.model_dump_json())["limit_snapshot"]
+        == make_limits().snapshot()
+    )
+
+
+def test_caller_mutation_cannot_corrupt_pending_or_committed_replay(
+    session: Session,
+):
+    service, adapter, risk, clock, kill = make_service(session)
+
+    first = execute(service)
+    object.__setattr__(first.proposal, "symbol", "CALLER-MUTATED")
+    object.__setattr__(first.decision, "approved_notional", Decimal("9999"))
+    object.__setattr__(first.order, "notional", Decimal("9999"))
+    object.__setattr__(first.report, "client_order_id", "caller-mutated-id")
+
+    pending_replay = execute(service)
+
+    assert pending_replay is not first
+    assert pending_replay.proposal.symbol == "SPY"
+    assert pending_replay.decision.approved_notional == Decimal("100.2500")
+    assert pending_replay.order.notional == Decimal("100.2500")
+    assert pending_replay.report.client_order_id == "paper:proposal-1"
+
+    session.commit()
+    object.__setattr__(pending_replay.proposal, "symbol", "SECOND-MUTATION")
+    object.__setattr__(pending_replay.decision, "approved_notional", Decimal("8888"))
+    object.__setattr__(pending_replay.order, "notional", Decimal("8888"))
+    object.__setattr__(pending_replay.report, "client_order_id", "second-mutated-id")
+
+    committed_replay = execute(service)
+
+    assert committed_replay is not pending_replay
+    assert committed_replay.proposal.symbol == "SPY"
+    assert committed_replay.decision.approved_notional == Decimal("100.2500")
+    assert committed_replay.order.notional == Decimal("100.2500")
+    assert committed_replay.report.client_order_id == "paper:proposal-1"
+    assert len(adapter.calls) == 1
+    assert len(risk.calls) == 1
+    assert clock.calls == 1
+    assert kill.calls == 2
+    assert len(stored_events(session)) == 5
+    projection = session.scalar(select(UnifiedOrder))
+    assert projection.client_order_id == "paper:proposal-1"
+    assert projection.filled_notional == "100.2500"
 
 
 def test_adapter_cannot_mutate_trusted_order_or_fill_validation_basis(
