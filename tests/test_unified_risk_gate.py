@@ -2,7 +2,7 @@
 
 import json
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, DecimalException, localcontext
 
 import pytest
 from pydantic import ValidationError
@@ -29,7 +29,8 @@ def limits_data(**overrides):
         "daily_loss_fraction": Decimal("0.01"),
         "stock_crypto_max_quote_age_seconds": Decimal("30"),
         "weather_max_quote_age_seconds": Decimal("300"),
-        "allowed_symbols": frozenset({"SPY", "QQQ", "BTC/USD", "ETH/USD"}),
+        "allowed_stock_symbols": frozenset({"SPY", "QQQ"}),
+        "allowed_crypto_symbols": frozenset({"BTC/USD", "ETH/USD"}),
         "allowed_venues": frozenset(
             {Venue.ALPACA_PAPER, Venue.POLYMARKET_PAPER, Venue.KALSHI_PAPER}
         ),
@@ -136,7 +137,8 @@ def test_accepts_valid_stock_with_one_normalized_notional_and_limit_snapshot():
         "daily_loss_fraction": "0.01",
         "stock_crypto_max_quote_age_seconds": "30",
         "weather_max_quote_age_seconds": "300",
-        "allowed_symbols": ["BTC/USD", "ETH/USD", "QQQ", "SPY"],
+        "allowed_stock_symbols": ["QQQ", "SPY"],
+        "allowed_crypto_symbols": ["BTC/USD", "ETH/USD"],
         "allowed_venues": ["alpaca_paper", "kalshi_paper", "polymarket_paper"],
     }
     assert json.loads(decision.model_dump_json())["limit_snapshot"] == decision.model_dump()[
@@ -165,13 +167,53 @@ def test_no_proposal_returns_no_decision_or_trade():
 
 @pytest.mark.parametrize(
     ("asset_class", "symbol"),
-    [(AssetClass.STOCK, "AAPL"), (AssetClass.CRYPTO, "DOGE/USD")],
+    [(AssetClass.STOCK, "AAPL"), (AssetClass.CRYPTO, "DOGE")],
 )
 def test_rejects_stock_or_crypto_symbol_outside_allowlist(asset_class, symbol):
     assert_rejected(
         decide(make_proposal(asset_class=asset_class, symbol=symbol)),
         "symbol_not_allowed",
     )
+
+
+@pytest.mark.parametrize(
+    ("asset_class", "symbol"),
+    [
+        (AssetClass.STOCK, "BTC/USD"),
+        (AssetClass.STOCK, "ETH/USD"),
+        (AssetClass.CRYPTO, "SPY"),
+        (AssetClass.CRYPTO, "QQQ"),
+    ],
+)
+def test_rejects_symbol_from_the_other_asset_class(asset_class, symbol):
+    assert_rejected(
+        decide(make_proposal(asset_class=asset_class, symbol=symbol)),
+        "asset_symbol_mismatch",
+    )
+
+
+@pytest.mark.parametrize(
+    ("asset_class", "symbol", "reference_price"),
+    [
+        (AssetClass.STOCK, "SPY", Decimal("100")),
+        (AssetClass.STOCK, "QQQ", Decimal("100")),
+        (AssetClass.CRYPTO, "BTC/USD", Decimal("60000")),
+        (AssetClass.CRYPTO, "ETH/USD", Decimal("3000")),
+    ],
+)
+def test_accepts_each_asset_class_own_allowed_symbols(
+    asset_class, symbol, reference_price
+):
+    decision = decide(
+        make_proposal(
+            asset_class=asset_class,
+            symbol=symbol,
+            reference_price=reference_price,
+        )
+    )
+
+    assert decision.approved is True
+    assert decision.reason_codes == ()
 
 
 def test_rejects_sell_quantity_beyond_held_long_quantity():
@@ -198,7 +240,8 @@ def test_rejects_venue_outside_configured_paper_allowlist():
     ],
 )
 def test_rejects_incoherent_asset_and_venue(asset_class, venue):
-    proposal = make_proposal(asset_class=asset_class, venue=venue)
+    symbol = "BTC/USD" if asset_class is AssetClass.CRYPTO else "SPY"
+    proposal = make_proposal(asset_class=asset_class, venue=venue, symbol=symbol)
     expected = (
         ("asset_venue_mismatch", "weather_upstream_not_approved")
         if asset_class is AssetClass.PREDICTION_WEATHER
@@ -219,7 +262,10 @@ def test_rejects_effective_notional_over_lesser_fixed_and_equity_order_cap():
 
 
 def test_rejects_projected_symbol_exposure_over_five_percent():
-    state = make_portfolio(symbol_exposures={"SPY": Decimal("450")})
+    state = make_portfolio(
+        symbol_exposures={"SPY": Decimal("450")},
+        gross_exposure=Decimal("450"),
+    )
     assert_rejected(decide(portfolio=state), "symbol_exposure_limit")
 
 
@@ -230,7 +276,9 @@ def test_rejects_projected_gross_exposure_over_twenty_five_percent():
 
 def test_rejects_projected_crypto_exposure_over_ten_percent():
     proposal = make_proposal(asset_class=AssetClass.CRYPTO, symbol="BTC/USD")
-    state = make_portfolio(crypto_exposure=Decimal("950"))
+    state = make_portfolio(
+        gross_exposure=Decimal("950"), crypto_exposure=Decimal("950")
+    )
     assert_rejected(decide(proposal, portfolio=state), "crypto_exposure_limit")
 
 
@@ -360,6 +408,91 @@ def test_sell_that_only_reduces_long_position_reduces_exposure_and_passes():
     assert decision.approved_notional == Decimal("100")
 
 
+@pytest.mark.parametrize(
+    ("asset_class", "symbol", "crypto_exposure"),
+    [
+        (AssetClass.STOCK, "SPY", Decimal("0")),
+        (AssetClass.CRYPTO, "BTC/USD", Decimal("3000")),
+    ],
+)
+def test_fully_covered_sell_can_incrementally_derisk_an_over_limit_account(
+    asset_class, symbol, crypto_exposure
+):
+    proposal = make_proposal(
+        asset_class=asset_class,
+        symbol=symbol,
+        side=Side.SELL,
+        quantity=Decimal("1"),
+        notional=None,
+        reference_price=Decimal("100"),
+    )
+    state = make_portfolio(
+        symbol_exposures={symbol: Decimal("3000")},
+        gross_exposure=Decimal("3000"),
+        crypto_exposure=crypto_exposure,
+        held_quantities={symbol: Decimal("1")},
+    )
+
+    decision = decide(proposal, portfolio=state)
+
+    assert decision.approved is True
+    assert decision.approved_notional == Decimal("100")
+    assert decision.reason_codes == ()
+
+
+def test_uncovered_sell_in_over_limit_account_remains_rejected():
+    proposal = make_proposal(
+        side=Side.SELL,
+        quantity=Decimal("2"),
+        notional=None,
+        reference_price=Decimal("100"),
+    )
+    state = make_portfolio(
+        symbol_exposures={"SPY": Decimal("3000")},
+        gross_exposure=Decimal("3000"),
+        held_quantities={"SPY": Decimal("1")},
+    )
+
+    assert_rejected(
+        decide(
+            proposal,
+            portfolio=state,
+            limits=make_limits(max_order_equity_fraction=Decimal("0.10")),
+        ),
+        "opening_short_not_allowed",
+        "symbol_exposure_limit",
+        "gross_exposure_limit",
+    )
+
+
+def test_buy_in_over_limit_account_remains_rejected():
+    state = make_portfolio(
+        symbol_exposures={"SPY": Decimal("3000")},
+        gross_exposure=Decimal("3000"),
+    )
+    assert_rejected(
+        decide(portfolio=state),
+        "symbol_exposure_limit",
+        "gross_exposure_limit",
+    )
+
+
+def test_order_notional_cap_still_applies_to_fully_covered_derisk_sell():
+    proposal = make_proposal(
+        side=Side.SELL,
+        quantity=Decimal("3"),
+        notional=None,
+        reference_price=Decimal("100"),
+    )
+    state = make_portfolio(
+        symbol_exposures={"SPY": Decimal("3000")},
+        gross_exposure=Decimal("3000"),
+        held_quantities={"SPY": Decimal("3")},
+    )
+
+    assert_rejected(decide(proposal, portfolio=state), "order_notional_limit")
+
+
 def test_multi_failure_returns_all_reasons_once_in_stable_gate_order():
     proposal = make_proposal(
         venue=Venue.POLYMARKET_PAPER,
@@ -399,17 +532,27 @@ def test_multi_failure_returns_all_reasons_once_in_stable_gate_order():
 
 
 def test_risk_models_are_frozen_extra_forbidden_and_deeply_immutable():
-    symbols = {"SPY", "QQQ", "BTC/USD", "ETH/USD"}
+    stock_symbols = {"SPY", "QQQ"}
+    crypto_symbols = {"BTC/USD", "ETH/USD"}
     exposures = {"SPY": Decimal("10")}
     seen = {"already-seen"}
-    limits = make_limits(allowed_symbols=symbols)
-    state = make_portfolio(symbol_exposures=exposures, held_quantities={"SPY": Decimal("1")})
+    limits = make_limits(
+        allowed_stock_symbols=stock_symbols,
+        allowed_crypto_symbols=crypto_symbols,
+    )
+    state = make_portfolio(
+        symbol_exposures=exposures,
+        gross_exposure=Decimal("10"),
+        held_quantities={"SPY": Decimal("1")},
+    )
     context = make_context(seen_idempotency_keys=seen)
-    symbols.add("AAPL")
+    stock_symbols.add("AAPL")
+    crypto_symbols.add("DOGE")
     exposures["SPY"] = Decimal("999")
     seen.add("risk:proposal-1")
 
-    assert "AAPL" not in limits.allowed_symbols
+    assert "AAPL" not in limits.allowed_stock_symbols
+    assert "DOGE" not in limits.allowed_crypto_symbols
     assert state.symbol_exposures["SPY"] == Decimal("10")
     assert "risk:proposal-1" not in context.seen_idempotency_keys
     with pytest.raises(ValidationError, match="frozen"):
@@ -475,8 +618,164 @@ def test_risk_model_copy_revalidates_updates_and_preserves_deep_immutability():
         context.model_copy(update={"unknown": "unsafe"})
 
     mutable = {"SPY": Decimal("10")}
-    copied = state.model_copy(update={"symbol_exposures": mutable})
+    copied = state.model_copy(
+        update={"symbol_exposures": mutable, "gross_exposure": Decimal("10")}
+    )
     mutable["SPY"] = Decimal("999")
     assert copied.symbol_exposures["SPY"] == Decimal("10")
     with pytest.raises(TypeError):
         copied.symbol_exposures["SPY"] = Decimal("20")
+
+
+def test_asset_symbol_allowlists_are_nonempty_disjoint_and_copy_revalidated():
+    with pytest.raises(ValidationError):
+        make_limits(allowed_stock_symbols=frozenset())
+    with pytest.raises(ValidationError):
+        make_limits(allowed_crypto_symbols=frozenset())
+    with pytest.raises(ValidationError, match="disjoint"):
+        make_limits(allowed_crypto_symbols=frozenset({"SPY", "BTC/USD"}))
+
+    limits = make_limits()
+    mutable_overlap = {"SPY"}
+    with pytest.raises(ValidationError, match="disjoint"):
+        limits.model_copy(update={"allowed_crypto_symbols": mutable_overlap})
+
+    mutable_symbols = {"AAPL"}
+    copied = limits.model_copy(update={"allowed_stock_symbols": mutable_symbols})
+    mutable_symbols.add("MUTATED-LATER")
+    assert copied.allowed_stock_symbols == frozenset({"AAPL"})
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"crypto_exposure": Decimal("101"), "gross_exposure": Decimal("100")},
+        {
+            "symbol_exposures": {"QQQ": Decimal("101")},
+            "gross_exposure": Decimal("100"),
+        },
+        {
+            "symbol_exposures": {
+                "SPY": Decimal("60"),
+                "QQQ": Decimal("41"),
+            },
+            "gross_exposure": Decimal("100"),
+        },
+    ],
+)
+def test_portfolio_rejects_contradictory_aggregate_exposures(overrides):
+    with pytest.raises(ValidationError, match="gross_exposure"):
+        make_portfolio(**overrides)
+
+
+def test_portfolio_accepts_equal_aggregate_and_unknown_legacy_symbol():
+    state = make_portfolio(
+        symbol_exposures={
+            "SPY": Decimal("60"),
+            "LEGACY-UNKNOWN": Decimal("40"),
+        },
+        gross_exposure=Decimal("100"),
+        crypto_exposure=Decimal("100"),
+    )
+
+    assert sum(state.symbol_exposures.values()) == state.gross_exposure
+
+
+def test_portfolio_rejects_blank_mapping_keys():
+    with pytest.raises(ValidationError):
+        make_portfolio(
+            symbol_exposures={"  ": Decimal("1")}, gross_exposure=Decimal("1")
+        )
+
+
+def _evaluate_with_precision(precision, proposal, *, limits=None):
+    with localcontext() as context:
+        context.prec = precision
+        return decide(proposal, limits=limits)
+
+
+def test_over_limit_notional_is_independent_of_ambient_decimal_precision():
+    proposal = make_proposal(
+        quantity=Decimal("1.005"),
+        notional=None,
+        reference_price=Decimal("100"),
+    )
+    limits = make_limits(
+        max_order_notional=Decimal("100"),
+        max_order_equity_fraction=Decimal("1"),
+    )
+
+    normal = _evaluate_with_precision(28, proposal, limits=limits)
+    low = _evaluate_with_precision(3, proposal, limits=limits)
+
+    assert_rejected(normal, "order_notional_limit")
+    assert_rejected(low, "order_notional_limit")
+
+
+def test_valid_notional_output_is_identical_across_ambient_decimal_contexts():
+    proposal = make_proposal(
+        quantity=Decimal("1.23456789"),
+        notional=None,
+        reference_price=Decimal("10.00000001"),
+    )
+
+    normal = _evaluate_with_precision(28, proposal)
+    low = _evaluate_with_precision(3, proposal)
+
+    assert normal.approved is True
+    assert low.approved is True
+    assert normal.approved_notional == low.approved_notional
+    assert normal.approved_notional == Decimal("12.3456789123456789")
+
+
+@pytest.mark.parametrize(
+    "proposal",
+    [
+        make_proposal(quantity=Decimal("1E+999999"), notional=None),
+        make_proposal(reference_price=Decimal("1E+999999")),
+        make_proposal(notional=Decimal("1E+999999")),
+        make_proposal(quantity=Decimal("9" * 200), notional=None),
+    ],
+)
+def test_extreme_finite_proposal_values_fail_closed_without_decimal_exception(proposal):
+    try:
+        decision = decide(proposal)
+    except (DecimalException, OverflowError) as error:  # pragma: no cover
+        pytest.fail(f"risk arithmetic leaked {type(error).__name__}")
+
+    assert_rejected(decision, "risk_arithmetic_invalid")
+
+
+@pytest.mark.parametrize(
+    ("factory", "overrides"),
+    [
+        (RiskLimits, {"max_order_notional": Decimal("1E+19")}),
+        (RiskLimits, {"daily_loss_fraction": Decimal("1E-19")}),
+        (PortfolioState, {"equity": Decimal("1E+19")}),
+        (PortfolioState, {"daily_realized_pnl": Decimal("1E+19")}),
+        (PortfolioState, {"symbol_exposures": {"SPY": Decimal("1E+19")}}),
+        (PortfolioState, {"held_quantities": {"SPY": Decimal("1E-19")}}),
+    ],
+)
+def test_risk_models_reject_unsupported_finite_numeric_bounds(factory, overrides):
+    base = limits_data() if factory is RiskLimits else portfolio_data()
+    with pytest.raises(ValidationError, match="supported"):
+        factory(**{**base, **overrides})
+
+
+def test_risk_models_accept_explicit_supported_numeric_boundaries():
+    largest = Decimal("9.9999999999999999999999999999999999999E+18")
+    smallest = Decimal("1E-18")
+
+    limits = make_limits(max_order_notional=largest, daily_loss_fraction=smallest)
+    state = make_portfolio(
+        equity=largest,
+        start_of_day_nlv=largest,
+        daily_realized_pnl=largest.copy_negate(),
+        symbol_exposures={"LEGACY": largest},
+        gross_exposure=largest,
+        held_quantities={"LEGACY": smallest},
+    )
+
+    assert limits.max_order_notional == largest
+    assert state.gross_exposure == largest

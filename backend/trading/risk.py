@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Context, Decimal, DecimalException, localcontext
 from types import MappingProxyType
 from typing import Annotated, Any, Self, cast
 
@@ -16,6 +16,7 @@ from pydantic import (
     JsonValue,
     PlainSerializer,
     field_validator,
+    model_validator,
 )
 
 from backend.trading.domain import (
@@ -25,6 +26,16 @@ from backend.trading.domain import (
     TradeProposal,
     Venue,
 )
+
+
+# Risk inputs are deliberately bounded to ordinary financial scales. Thirty-eight
+# coefficient digits and adjusted exponents from -18 through +18 cover sub-atomic
+# fractions through multi-quintillion values while making every operation below
+# exactly representable independent of the caller's Decimal context.
+_MAX_COEFFICIENT_DIGITS = 38
+_MIN_ADJUSTED_EXPONENT = -18
+_MAX_ADJUSTED_EXPONENT = 18
+_FIXED_CONTEXT = Context(prec=128, Emin=-384, Emax=384)
 
 
 class _ImmutableMapping(Mapping[str, Decimal]):
@@ -55,22 +66,33 @@ class _ImmutableMapping(Mapping[str, Decimal]):
         return repr(self._data)
 
 
+def _supported_finite(value: Decimal) -> Decimal:
+    if not value.is_finite():
+        raise ValueError("value must be finite")
+    if value and (
+        len(value.as_tuple().digits) > _MAX_COEFFICIENT_DIGITS
+        or not _MIN_ADJUSTED_EXPONENT
+        <= value.adjusted()
+        <= _MAX_ADJUSTED_EXPONENT
+    ):
+        raise ValueError("value exceeds supported financial numeric bounds")
+    return value
+
+
 def _positive_finite(value: Decimal) -> Decimal:
     if not value.is_finite() or value <= 0:
         raise ValueError("value must be finite and positive")
-    return value
+    return _supported_finite(value)
 
 
 def _nonnegative_finite(value: Decimal) -> Decimal:
     if not value.is_finite() or value < 0:
         raise ValueError("value must be finite and nonnegative")
-    return value
+    return _supported_finite(value)
 
 
 def _finite(value: Decimal) -> Decimal:
-    if not value.is_finite():
-        raise ValueError("value must be finite")
-    return value
+    return _supported_finite(value)
 
 
 def _nonblank(value: str) -> str:
@@ -138,15 +160,24 @@ class RiskLimits(_RiskModel):
     daily_loss_fraction: PositiveFiniteDecimal
     stock_crypto_max_quote_age_seconds: PositiveFiniteDecimal
     weather_max_quote_age_seconds: PositiveFiniteDecimal
-    allowed_symbols: frozenset[NonblankString]
+    allowed_stock_symbols: frozenset[NonblankString]
+    allowed_crypto_symbols: frozenset[NonblankString]
     allowed_venues: frozenset[Venue]
 
-    @field_validator("allowed_symbols", "allowed_venues")
+    @field_validator(
+        "allowed_stock_symbols", "allowed_crypto_symbols", "allowed_venues"
+    )
     @classmethod
     def require_nonempty_allowlist(cls, value: frozenset[object]) -> frozenset[object]:
         if not value:
             raise ValueError("allowlist must not be empty")
         return value
+
+    @model_validator(mode="after")
+    def require_disjoint_asset_symbol_allowlists(self) -> Self:
+        if self.allowed_stock_symbols & self.allowed_crypto_symbols:
+            raise ValueError("stock and crypto symbol allowlists must be disjoint")
+        return self
 
     def snapshot(self) -> dict[str, JsonValue]:
         """Return a detached, stable, JSON-compatible view of active limits."""
@@ -174,7 +205,8 @@ class RiskLimits(_RiskModel):
                 "weather_max_quote_age_seconds": str(
                     self.weather_max_quote_age_seconds
                 ),
-                "allowed_symbols": sorted(self.allowed_symbols),
+                "allowed_stock_symbols": sorted(self.allowed_stock_symbols),
+                "allowed_crypto_symbols": sorted(self.allowed_crypto_symbols),
                 "allowed_venues": sorted(
                     venue.value for venue in self.allowed_venues
                 ),
@@ -192,6 +224,18 @@ class PortfolioState(_RiskModel):
     gross_exposure: NonnegativeFiniteDecimal
     crypto_exposure: NonnegativeFiniteDecimal
     held_quantities: FrozenDecimalMapping = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def require_coherent_aggregate_exposure(self) -> Self:
+        with localcontext(_FIXED_CONTEXT):
+            represented_exposure = sum(
+                self.symbol_exposures.values(), Decimal("0")
+            )
+        if self.crypto_exposure > self.gross_exposure:
+            raise ValueError("crypto_exposure must not exceed gross_exposure")
+        if represented_exposure > self.gross_exposure:
+            raise ValueError("symbol_exposures must not exceed gross_exposure")
+        return self
 
 
 class RiskContext(_RiskModel):
@@ -215,13 +259,33 @@ def _effective_notional(proposal: TradeProposal) -> Decimal:
     return min(candidates)
 
 
-def _largest_implied_quantity(proposal: TradeProposal) -> Decimal:
-    candidates: list[Decimal] = []
+def _proposal_numbers_supported(proposal: TradeProposal) -> bool:
+    values = [proposal.reference_price]
     if proposal.quantity is not None:
-        candidates.append(proposal.quantity)
+        values.append(proposal.quantity)
     if proposal.notional is not None:
-        candidates.append(proposal.notional / proposal.reference_price)
-    return max(candidates)
+        values.append(proposal.notional)
+    try:
+        for value in values:
+            _supported_finite(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _is_fully_covered_sell(
+    proposal: TradeProposal, held_quantity: Decimal
+) -> bool:
+    if proposal.side is not Side.SELL:
+        return False
+    if proposal.quantity is not None and proposal.quantity > held_quantity:
+        return False
+    if (
+        proposal.notional is not None
+        and proposal.notional > held_quantity * proposal.reference_price
+    ):
+        return False
+    return True
 
 
 def _project(current: Decimal, change: Decimal, side: Side) -> Decimal:
@@ -242,7 +306,7 @@ def evaluate_proposal(
         return None
 
     reasons: list[str] = []
-    effective_notional = _effective_notional(proposal)
+    effective_notional: Decimal | None = None
 
     if context.execution_mode != "paper":
         reasons.append("execution_mode_not_paper")
@@ -261,56 +325,108 @@ def evaluate_proposal(
     if not coherent_venue:
         reasons.append("asset_venue_mismatch")
 
-    if (
-        proposal.asset_class in {AssetClass.STOCK, AssetClass.CRYPTO}
-        and proposal.symbol not in limits.allowed_symbols
-    ):
-        reasons.append("symbol_not_allowed")
+    if proposal.asset_class is AssetClass.STOCK:
+        if proposal.symbol in limits.allowed_crypto_symbols:
+            reasons.append("asset_symbol_mismatch")
+        elif proposal.symbol not in limits.allowed_stock_symbols:
+            reasons.append("symbol_not_allowed")
+    elif proposal.asset_class is AssetClass.CRYPTO:
+        if proposal.symbol in limits.allowed_stock_symbols:
+            reasons.append("asset_symbol_mismatch")
+        elif proposal.symbol not in limits.allowed_crypto_symbols:
+            reasons.append("symbol_not_allowed")
 
     if proposal.asset_class is AssetClass.PREDICTION_WEATHER and not (
         context.weather_upstream_approved and context.weather_approval_evidence
     ):
         reasons.append("weather_upstream_not_approved")
 
-    if proposal.side is Side.SELL:
-        held = portfolio.held_quantities.get(proposal.symbol, Decimal("0"))
-        if _largest_implied_quantity(proposal) > held:
-            reasons.append("opening_short_not_allowed")
+    proposal_numbers_supported = _proposal_numbers_supported(proposal)
+    if not proposal_numbers_supported:
+        reasons.append("risk_arithmetic_invalid")
 
-    order_cap = min(
-        limits.max_order_notional,
-        portfolio.equity * limits.max_order_equity_fraction,
-    )
-    if effective_notional > order_cap:
-        reasons.append("order_notional_limit")
+    try:
+        with localcontext(_FIXED_CONTEXT):
+            if proposal_numbers_supported:
+                effective_notional = _effective_notional(proposal)
+                held = portfolio.held_quantities.get(
+                    proposal.symbol, Decimal("0")
+                )
+                fully_covered_sell = _is_fully_covered_sell(proposal, held)
+                if proposal.side is Side.SELL and not fully_covered_sell:
+                    reasons.append("opening_short_not_allowed")
 
-    symbol_exposure = portfolio.symbol_exposures.get(proposal.symbol, Decimal("0"))
-    projected_symbol = _project(symbol_exposure, effective_notional, proposal.side)
-    if projected_symbol > portfolio.equity * limits.max_symbol_exposure_fraction:
-        reasons.append("symbol_exposure_limit")
+                order_cap = min(
+                    limits.max_order_notional,
+                    portfolio.equity * limits.max_order_equity_fraction,
+                )
+                if effective_notional > order_cap:
+                    reasons.append("order_notional_limit")
 
-    projected_gross = _project(
-        portfolio.gross_exposure, effective_notional, proposal.side
-    )
-    if projected_gross > portfolio.equity * limits.max_gross_exposure_fraction:
-        reasons.append("gross_exposure_limit")
+                symbol_exposure = portfolio.symbol_exposures.get(
+                    proposal.symbol, Decimal("0")
+                )
+                projected_symbol = _project(
+                    symbol_exposure, effective_notional, proposal.side
+                )
+                projected_gross = _project(
+                    portfolio.gross_exposure,
+                    effective_notional,
+                    proposal.side,
+                )
+                covered_reducing_sell = (
+                    fully_covered_sell
+                    and symbol_exposure > 0
+                    and portfolio.gross_exposure > 0
+                    and (
+                        proposal.asset_class is not AssetClass.CRYPTO
+                        or portfolio.crypto_exposure > 0
+                    )
+                )
 
-    if proposal.asset_class is AssetClass.CRYPTO:
-        projected_crypto = _project(
-            portfolio.crypto_exposure, effective_notional, proposal.side
-        )
-        if projected_crypto > portfolio.equity * limits.max_crypto_exposure_fraction:
-            reasons.append("crypto_exposure_limit")
+                if (
+                    projected_symbol
+                    > portfolio.equity
+                    * limits.max_symbol_exposure_fraction
+                    and not covered_reducing_sell
+                ):
+                    reasons.append("symbol_exposure_limit")
+                if (
+                    projected_gross
+                    > portfolio.equity * limits.max_gross_exposure_fraction
+                    and not covered_reducing_sell
+                ):
+                    reasons.append("gross_exposure_limit")
 
-    daily_loss_threshold = -(portfolio.start_of_day_nlv * limits.daily_loss_fraction)
-    if portfolio.daily_realized_pnl <= daily_loss_threshold:
-        reasons.append("daily_loss_limit")
+                if proposal.asset_class is AssetClass.CRYPTO:
+                    projected_crypto = _project(
+                        portfolio.crypto_exposure,
+                        effective_notional,
+                        proposal.side,
+                    )
+                    if (
+                        projected_crypto
+                        > portfolio.equity
+                        * limits.max_crypto_exposure_fraction
+                        and not covered_reducing_sell
+                    ):
+                        reasons.append("crypto_exposure_limit")
+
+            daily_loss_threshold = -(
+                portfolio.start_of_day_nlv * limits.daily_loss_fraction
+            )
+            if portfolio.daily_realized_pnl <= daily_loss_threshold:
+                reasons.append("daily_loss_limit")
+    except (DecimalException, OverflowError):
+        if "risk_arithmetic_invalid" not in reasons:
+            reasons.append("risk_arithmetic_invalid")
 
     quote_age = context.now - proposal.market_data_at
-    quote_age_seconds = Decimal(quote_age.days * 86_400 + quote_age.seconds) + (
-        Decimal(quote_age.microseconds) / Decimal("1000000")
+    quote_age_microseconds = (
+        (quote_age.days * 86_400 + quote_age.seconds) * 1_000_000
+        + quote_age.microseconds
     )
-    if quote_age_seconds < 0:
+    if quote_age_microseconds < 0:
         reasons.append("future_market_data")
     else:
         max_age = (
@@ -318,7 +434,14 @@ def evaluate_proposal(
             if proposal.asset_class is AssetClass.PREDICTION_WEATHER
             else limits.stock_crypto_max_quote_age_seconds
         )
-        if quote_age_seconds > max_age:
+        try:
+            with localcontext(_FIXED_CONTEXT):
+                stale = Decimal(quote_age_microseconds) > max_age * 1_000_000
+        except (DecimalException, OverflowError):
+            stale = False
+            if "risk_arithmetic_invalid" not in reasons:
+                reasons.append("risk_arithmetic_invalid")
+        if stale:
             reasons.append("stale_market_data")
 
     if reasons:
