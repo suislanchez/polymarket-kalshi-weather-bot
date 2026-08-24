@@ -527,6 +527,81 @@ def test_scenario_rejects_nonfinite_decimal_with_sanitized_validation(value):
         )
 
 
+@pytest.mark.parametrize(
+    ("status", "kwargs"),
+    [
+        ("submitted", {}),
+        ("rejected", {}),
+        (
+            "partially_filled",
+            {
+                "fill_fraction": Decimal("0.5"),
+                "average_fill_price": Decimal("1"),
+            },
+        ),
+        (
+            "filled",
+            {
+                "fill_fraction": Decimal("1"),
+                "average_fill_price": Decimal("1"),
+            },
+        ),
+        ("canceled", {}),
+    ],
+)
+def test_scenario_rejects_every_plain_string_status_with_fixed_sanitized_error(
+    status, kwargs
+):
+    with pytest.raises(ValueError, match="^invalid fake order scenario$") as caught:
+        FakeOrderScenario(status=status, **kwargs)
+
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+
+
+@pytest.mark.parametrize("status", ["unexpected", 7, None])
+def test_scenario_rejects_other_non_enum_status_types_with_fixed_sanitized_error(
+    status,
+):
+    with pytest.raises(ValueError, match="^invalid fake order scenario$") as caught:
+        FakeOrderScenario(status=status)
+
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+
+
+@pytest.mark.parametrize("hostile", [False, True])
+def test_scenario_rejects_str_subclass_status_without_invoking_caller_behavior(hostile):
+    sentinel = "scenario-status-subclass-sentinel"
+    calls = {"eq": 0, "hash": 0, "repr": 0}
+
+    class BenignStatus(str):
+        pass
+
+    class HostileStatus(str):
+        def __eq__(self, other):
+            calls["eq"] += 1
+            raise AssertionError(sentinel)
+
+        def __hash__(self):
+            calls["hash"] += 1
+            raise AssertionError(sentinel)
+
+        def __repr__(self):
+            calls["repr"] += 1
+            raise AssertionError(sentinel)
+
+    status_type = HostileStatus if hostile else BenignStatus
+    with pytest.raises(ValueError, match="^invalid fake order scenario$") as caught:
+        FakeOrderScenario(status=status_type("submitted"))
+
+    assert calls == {"eq": 0, "hash": 0, "repr": 0}
+    assert sentinel not in str(caught.value)
+    assert sentinel not in repr(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+
+
 def test_extreme_fill_arithmetic_fails_closed_without_state_mutation():
     clock = CountingClock()
     adapter = make_adapter(
@@ -818,6 +893,61 @@ def test_recursive_denied_metadata_key_is_rejected_without_leak_or_mutation(meta
     assert clock.calls == 0
     assert adapter.list_recent_orders() == ()
     assert submit(adapter).broker_order_id == "fake-paper-000001"
+
+
+REPEATED_SEPARATOR_DENIED_KEYS = [
+    variant
+    for prefix, suffix in (
+        ("api", "key"),
+        ("api", "secret"),
+        ("secret", "key"),
+        ("access", "token"),
+    )
+    for variant in (
+        f"{prefix}__{suffix}",
+        f"{prefix}--{suffix}",
+        f"{prefix}  {suffix}",
+        f"{prefix} - {suffix}",
+        f"{prefix.upper()}\t--__ {suffix.title()}",
+    )
+] + [" PASSWORD ", "CrEdEnTiAl", "\tCREDENTIALS\n"]
+
+
+@pytest.mark.parametrize("key", REPEATED_SEPARATOR_DENIED_KEYS)
+def test_repeated_mixed_separator_denied_metadata_keys_fail_closed(key):
+    sentinel = "repeated-separator-metadata-sentinel"
+    client_order_id = "repeated-separator-client"
+    clock = CountingClock()
+    adapter = make_adapter(clock)
+    metadata = {"outer": [{"safe": [{key: sentinel}]}]}
+    order = make_order(client_order_id=client_order_id, metadata=metadata)
+
+    with pytest.raises(
+        BrokerAdapterError, match="^order contains a prohibited metadata key$"
+    ) as caught:
+        submit(adapter, order)
+
+    exposed = f"{caught.value!s} {caught.value!r} {adapter!r} {adapter.__dict__!r}"
+    assert sentinel not in exposed
+    assert client_order_id not in exposed
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert FakePaperAdapter._contains_denied_metadata_key(
+        ({"safe": {key: sentinel}},)
+    )
+    assert clock.calls == 0
+    assert adapter.get_order(client_order_id) is None
+    assert adapter.list_recent_orders() == ()
+    assert submit(adapter).broker_order_id == "fake-paper-000001"
+
+
+@pytest.mark.parametrize("key", ["apikey", "my_api_key_note", "ordinary-note"])
+def test_noncanonical_metadata_key_names_remain_benign(key):
+    sentinel = "ordinary-metadata-sentinel"
+    report = submit(make_adapter(), make_order(metadata={key: sentinel}))
+
+    assert report.metadata == ORDINARY_REPORT_METADATA
+    assert sentinel not in repr(report)
 
 
 def test_benign_metadata_value_is_not_retained_or_echoed():

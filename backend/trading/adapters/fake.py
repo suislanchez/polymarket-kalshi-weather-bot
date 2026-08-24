@@ -108,6 +108,8 @@ class FakeOrderScenario:
     average_fill_price: Decimal | None = None
 
     def __post_init__(self) -> None:
+        if type(self.status) is not OrderStatus:
+            raise ValueError("invalid fake order scenario")
         if not isinstance(self.fill_fraction, Decimal):
             raise TypeError("fill_fraction must be a Decimal")
         if self.average_fill_price is not None and not isinstance(
@@ -267,7 +269,18 @@ class FakePaperAdapter:
 
     @staticmethod
     def _normalize_metadata_key(key: object) -> str:
-        return str(key).strip().lower().replace("-", "_").replace(" ", "_")
+        normalized = str(key).strip().lower()
+        result: list[str] = []
+        in_separator = False
+        for character in normalized:
+            is_separator = character in "_-" or character.isspace()
+            if is_separator:
+                if not in_separator:
+                    result.append("_")
+            else:
+                result.append(character)
+            in_separator = is_separator
+        return "".join(result)
 
     @classmethod
     def _contains_denied_metadata_key(cls, value: object) -> bool:
