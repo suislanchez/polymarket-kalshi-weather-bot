@@ -193,6 +193,8 @@ def _hash_document(document: dict[str, object]) -> str:
 
 
 def _validated_event(event: object) -> tuple[str, str, int, str, datetime, dict[str, object]]:
+    validation_failed = False
+    validated = None
     try:
         if type(event) is not LedgerEventInput:
             raise ValueError
@@ -203,9 +205,32 @@ def _validated_event(event: object) -> tuple[str, str, int, str, datetime, dict[
         event_type = _nonblank_string(event.event_type)
         occurred_at = _utc_datetime(event.occurred_at)
         payload = _plain_json_object(event.payload)
-        return event_id, aggregate_id, event.sequence, event_type, occurred_at, payload
+        validated = (event_id, aggregate_id, event.sequence, event_type, occurred_at, payload)
     except Exception:
+        validation_failed = True
+    if validation_failed or validated is None:
         raise LedgerValidationError("invalid ledger event") from None
+    return validated
+
+
+def _validated_prior_link(prior: object) -> tuple[int, str]:
+    validation_failed = False
+    validated = None
+    try:
+        if type(prior) is not TradingEvent:
+            raise ValueError
+        prior_sequence = prior.sequence
+        prior_hash = prior.event_hash
+        if type(prior_sequence) is not int or prior_sequence <= 0:
+            raise ValueError
+        if not _is_hash(prior_hash):
+            raise ValueError
+        validated = (prior_sequence, prior_hash)
+    except Exception:
+        validation_failed = True
+    if validation_failed or validated is None:
+        raise LedgerSequenceError("invalid ledger sequence") from None
+    return validated
 
 
 def _storage_scalar(session: Session, statement: object) -> Any:
@@ -269,9 +294,10 @@ def append_event(session: Session, event: LedgerEventInput) -> TradingEvent:
             raise LedgerSequenceError("invalid ledger sequence")
         previous_hash = ZERO_CHAIN_HASH
     else:
-        if sequence != prior.sequence + 1 or not _is_hash(prior.event_hash):
+        prior_sequence, prior_hash = _validated_prior_link(prior)
+        if sequence != prior_sequence + 1:
             raise LedgerSequenceError("invalid ledger sequence")
-        previous_hash = prior.event_hash
+        previous_hash = prior_hash
 
     document = _event_document(
         event_id=event_id,
@@ -298,9 +324,13 @@ def append_event(session: Session, event: LedgerEventInput) -> TradingEvent:
 
 def verify_event_chain(session: Session, aggregate_id: str) -> ChainVerification:
     """Verify one aggregate without mutation; an empty chain is valid."""
+    validation_failed = False
+    normalized_aggregate_id = None
     try:
         normalized_aggregate_id = _nonblank_string(aggregate_id)
     except Exception:
+        validation_failed = True
+    if validation_failed or normalized_aggregate_id is None:
         raise LedgerValidationError("invalid aggregate id") from None
 
     try:
@@ -358,6 +388,8 @@ def verify_event_chain(session: Session, aggregate_id: str) -> ChainVerification
 
 def upsert_order_projection(session: Session, report: ExecutionReport) -> UnifiedOrder:
     """Create or update one client-order projection, flushing without commit."""
+    validation_failed = False
+    validated = None
     try:
         if type(report) is not ExecutionReport:
             raise ValueError
@@ -372,8 +404,39 @@ def upsert_order_projection(session: Session, report: ExecutionReport) -> Unifie
             broker_order_id = _nonblank_string(broker_order_id)
         if rejection_reason is not None:
             rejection_reason = _nonblank_string(rejection_reason)
+        filled_quantity = str(report.filled_quantity)
+        filled_notional = str(report.filled_notional)
+        average_fill_price = (
+            None if report.average_fill_price is None else str(report.average_fill_price)
+        )
+        validated = (
+            client_order_id,
+            occurred_at,
+            order_metadata,
+            venue,
+            status,
+            broker_order_id,
+            rejection_reason,
+            filled_quantity,
+            filled_notional,
+            average_fill_price,
+        )
     except Exception:
+        validation_failed = True
+    if validation_failed or validated is None:
         raise LedgerValidationError("invalid execution report") from None
+    (
+        client_order_id,
+        occurred_at,
+        order_metadata,
+        venue,
+        status,
+        broker_order_id,
+        rejection_reason,
+        filled_quantity,
+        filled_notional,
+        average_fill_price,
+    ) = validated
 
     projection = _storage_scalar(
         session,
@@ -390,11 +453,9 @@ def upsert_order_projection(session: Session, report: ExecutionReport) -> Unifie
     projection.status = status
     projection.broker_order_id = broker_order_id
     projection.rejection_reason = rejection_reason
-    projection.filled_quantity = str(report.filled_quantity)
-    projection.filled_notional = str(report.filled_notional)
-    projection.average_fill_price = (
-        None if report.average_fill_price is None else str(report.average_fill_price)
-    )
+    projection.filled_quantity = filled_quantity
+    projection.filled_notional = filled_notional
+    projection.average_fill_price = average_fill_price
     projection.occurred_at = occurred_at
     projection.order_metadata = order_metadata
     _add_and_flush(session, pending, "order projection conflicts with existing data")

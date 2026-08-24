@@ -115,6 +115,16 @@ def assert_sanitized_exception(
     assert error.__context__ is None
 
 
+def deeply_nested_json(depth: int = 3000) -> dict[str, object]:
+    root: dict[str, object] = {}
+    current = root
+    for _ in range(depth):
+        child: dict[str, object] = {}
+        current["nested"] = [child]
+        current = child
+    return root
+
+
 @pytest.mark.parametrize("operation", ["append", "projection"])
 @pytest.mark.parametrize("stage", ["query", "add", "flush"])
 def test_storage_dependency_failures_are_fixed_and_fully_sanitized(operation: str, stage: str):
@@ -186,6 +196,101 @@ def test_validation_precedes_any_exploding_storage_dependency(
 
     assert fake_session.calls == []
     assert sentinel not in repr(caught.value)
+
+
+@pytest.mark.parametrize("failure_kind", ["cyclic", "deep", "hostile_datetime"])
+def test_event_validation_failures_clear_hostile_exception_context_before_storage(
+    failure_kind: str,
+):
+    sentinel = "CALLER_EVENT_VALIDATION_SENTINEL"
+    fake_session = FailingStorageSession("query", RuntimeError("storage must stay untouched"))
+    if failure_kind == "cyclic":
+        payload: dict[str, object] = {}
+        payload["cycle"] = payload
+        invalid_event = event_input(payload=payload)
+    elif failure_kind == "deep":
+        invalid_event = event_input(payload=deeply_nested_json())
+    else:
+        class HostileTimezone(tzinfo):
+            def utcoffset(self, dt):
+                raise RuntimeError(sentinel)
+
+            def dst(self, dt):
+                return timedelta(0)
+
+        invalid_event = event_input(
+            occurred_at=datetime(2026, 8, 24, 12, 30, tzinfo=HostileTimezone())
+        )
+
+    with pytest.raises(BaseException) as caught:
+        append_event(fake_session, invalid_event)  # type: ignore[arg-type]
+
+    assert_sanitized_exception(
+        caught.value,
+        LedgerValidationError,
+        "invalid ledger event",
+        (sentinel, "RecursionError"),
+    )
+    assert fake_session.calls == []
+
+
+@pytest.mark.parametrize("failure_kind", ["cyclic", "deep"])
+def test_projection_validation_failures_clear_context_before_storage(failure_kind: str):
+    sentinel = "CALLER_REPORT_VALIDATION_SENTINEL"
+    fake_session = FailingStorageSession("query", RuntimeError("storage must stay untouched"))
+    report = execution_report()
+    if failure_kind == "cyclic":
+        metadata: dict[str, object] = {"secret": sentinel}
+        metadata["cycle"] = metadata
+    else:
+        metadata = deeply_nested_json()
+    object.__setattr__(report, "metadata", metadata)
+
+    with pytest.raises(BaseException) as caught:
+        upsert_order_projection(fake_session, report)  # type: ignore[arg-type]
+
+    assert_sanitized_exception(
+        caught.value,
+        LedgerValidationError,
+        "invalid execution report",
+        (sentinel, "RecursionError"),
+    )
+    assert fake_session.calls == []
+
+
+@pytest.mark.parametrize("failure_kind", ["object", "string_subclass", "blank"])
+def test_verify_chain_aggregate_validation_clears_context_before_storage(
+    failure_kind: str,
+):
+    class StringSubclass(str):
+        pass
+
+    sentinel = "AGGREGATE_STORAGE_MUST_STAY_UNTOUCHED"
+
+    class ExplodingVerificationSession:
+        calls = 0
+
+        def scalars(self, statement):
+            self.calls += 1
+            raise RuntimeError(sentinel)
+
+    fake_session = ExplodingVerificationSession()
+    candidates = {
+        "object": object(),
+        "string_subclass": StringSubclass("order-1"),
+        "blank": "   ",
+    }
+
+    with pytest.raises(BaseException) as caught:
+        verify_event_chain(fake_session, candidates[failure_kind])  # type: ignore[arg-type]
+
+    assert_sanitized_exception(
+        caught.value,
+        LedgerValidationError,
+        "invalid aggregate id",
+        (sentinel,),
+    )
+    assert fake_session.calls == 0
 
 
 def test_storage_error_is_public_ledger_error_without_expanding_mutation_api():
@@ -335,6 +440,97 @@ def test_sequence_must_start_at_one_and_remain_contiguous(session: Session):
     append_event(session, event_input())
     with pytest.raises(LedgerSequenceError, match="^invalid ledger sequence$"):
         append_event(session, event_input(event_id="event-3", sequence=3))
+
+
+def test_corrupted_committed_sequence_is_sanitized_and_rollback_keeps_only_prior_row(
+    session: Session,
+):
+    append_event(session, event_input())
+    session.commit()
+    session.execute(
+        text("UPDATE trading_events SET sequence = :sequence WHERE event_id = :event_id"),
+        {"sequence": "oops", "event_id": "event-1"},
+    )
+    session.commit()
+
+    with pytest.raises(BaseException) as caught:
+        append_event(session, event_input(event_id="event-2", sequence=2))
+
+    assert_sanitized_exception(
+        caught.value,
+        LedgerSequenceError,
+        "invalid ledger sequence",
+        ("oops", "TypeError"),
+    )
+    session.rollback()
+    assert session.execute(
+        text("SELECT event_id, sequence FROM trading_events ORDER BY id")
+    ).all() == [("event-1", "oops")]
+
+
+class PriorReturningSession:
+    def __init__(self, prior: object):
+        self.prior = prior
+        self.scalar_calls = 0
+        self.add_calls = 0
+        self.flush_calls = 0
+
+    def scalar(self, statement):
+        self.scalar_calls += 1
+        return None if self.scalar_calls <= 2 else self.prior
+
+    def add(self, value):
+        self.add_calls += 1
+
+    def flush(self):
+        self.flush_calls += 1
+
+
+def test_nonmodel_prior_is_rejected_without_touching_hostile_properties_or_storage():
+    sentinel = "HOSTILE_PRIOR_SEQUENCE_SENTINEL"
+
+    class HostilePrior:
+        @property
+        def sequence(self):
+            raise RuntimeError(sentinel)
+
+    fake_session = PriorReturningSession(HostilePrior())
+
+    with pytest.raises(BaseException) as caught:
+        append_event(fake_session, event_input(event_id="event-2", sequence=2))  # type: ignore[arg-type]
+
+    assert_sanitized_exception(
+        caught.value,
+        LedgerSequenceError,
+        "invalid ledger sequence",
+        (sentinel,),
+    )
+    assert fake_session.scalar_calls == 3
+    assert fake_session.add_calls == 0
+    assert fake_session.flush_calls == 0
+
+
+@pytest.mark.parametrize(
+    ("prior_sequence", "prior_hash"),
+    [(0, "a" * 64), (True, "a" * 64), (1, "A" * 64), (1, "short")],
+)
+def test_malformed_exact_prior_event_has_fixed_sequence_error_without_storage_mutation(
+    prior_sequence: object, prior_hash: object
+):
+    prior = TradingEvent(sequence=prior_sequence, event_hash=prior_hash)
+    fake_session = PriorReturningSession(prior)
+
+    with pytest.raises(BaseException) as caught:
+        append_event(fake_session, event_input(event_id="event-2", sequence=2))  # type: ignore[arg-type]
+
+    assert_sanitized_exception(
+        caught.value,
+        LedgerSequenceError,
+        "invalid ledger sequence",
+        (),
+    )
+    assert fake_session.add_calls == 0
+    assert fake_session.flush_calls == 0
 
 
 @pytest.mark.parametrize(
