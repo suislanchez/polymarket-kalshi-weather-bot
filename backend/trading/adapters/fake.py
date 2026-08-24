@@ -12,9 +12,11 @@ from decimal import (
     Decimal,
     DecimalException,
     DivisionByZero,
+    Inexact,
     InvalidOperation,
     Overflow,
     ROUND_HALF_EVEN,
+    Rounded,
     localcontext,
 )
 from typing import cast
@@ -51,11 +53,11 @@ _DENIED_METADATA_KEYS = frozenset(
 _VALIDATION_TIME = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
-def _decimal_context() -> Context:
+def _decimal_context(*, precision: int = 28, exact: bool = False) -> Context:
     """Return a fresh arithmetic context independent of ambient process state."""
 
     context = Context(
-        prec=28,
+        prec=precision,
         rounding=ROUND_HALF_EVEN,
         Emin=-999999,
         Emax=999999,
@@ -66,8 +68,35 @@ def _decimal_context() -> Context:
         context.traps[signal] = False
     for signal in (InvalidOperation, DivisionByZero, Overflow):
         context.traps[signal] = True
+    if exact:
+        context.traps[Inexact] = True
+        context.traps[Rounded] = True
     context.clear_flags()
     return context
+
+
+def _coefficient_digits(value: Decimal) -> int:
+    return len(value.as_tuple().digits)
+
+
+def _exact_multiply(left: Decimal, right: Decimal) -> Decimal:
+    precision = max(28, _coefficient_digits(left) + _coefficient_digits(right))
+    with localcontext(_decimal_context(precision=precision, exact=True)):
+        return left * right
+
+
+def _deterministic_divide(numerator: Decimal, denominator: Decimal) -> Decimal:
+    if denominator == Decimal("1"):
+        return numerator
+
+    digit_budget = _coefficient_digits(numerator) + _coefficient_digits(denominator)
+    precision = max(28, 4 * digit_budget)
+    try:
+        with localcontext(_decimal_context(precision=precision, exact=True)):
+            return numerator / denominator
+    except (Inexact, Rounded):
+        with localcontext(_decimal_context(precision=precision)):
+            return numerator / denominator
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +159,8 @@ class FakePaperAdapter:
         positions: Iterable[PositionSnapshot] = (),
         scenarios: Mapping[str, FakeOrderScenario] | None = None,
     ) -> None:
+        if not isinstance(venue, Venue):
+            raise BrokerAdapterError("adapter venue must be a Venue")
         fixtures = tuple(position.model_copy(deep=True) for position in positions)
         if any(position.venue is not venue for position in fixtures):
             raise BrokerAdapterError("position fixture venue must match adapter venue")
@@ -150,6 +181,10 @@ class FakePaperAdapter:
         self._buying_power = validated.buying_power
         self._positions = fixtures
         self._scenarios = dict(scenarios) if scenarios is not None else {}
+        if not all(
+            isinstance(key, str) and bool(key.strip()) for key in self._scenarios
+        ):
+            raise BrokerAdapterError("scenario keys must be nonblank strings")
         if not all(isinstance(value, FakeOrderScenario) for value in self._scenarios.values()):
             raise TypeError("scenarios must contain FakeOrderScenario values")
         self._reports: dict[str, ExecutionReport] = {}
@@ -178,8 +213,30 @@ class FakePaperAdapter:
             for position in self._positions
         )
 
+    def _read_clock(self) -> datetime:
+        failed = False
+        value: object = None
+        try:
+            value = self._clock()
+        except Exception:
+            failed = True
+
+        if not failed:
+            try:
+                failed = not (
+                    isinstance(value, datetime)
+                    and value.tzinfo is not None
+                    and value.utcoffset() == timezone.utc.utcoffset(value)
+                )
+            except Exception:
+                failed = True
+
+        if failed:
+            raise BrokerAdapterError("adapter clock failed") from None
+        return cast(datetime, value)
+
     def get_account_snapshot(self) -> AccountSnapshot:
-        captured_at = self._clock()
+        captured_at = self._read_clock()
         return AccountSnapshot(
             venue=self._venue,
             cash=self._cash,
@@ -191,7 +248,7 @@ class FakePaperAdapter:
         )
 
     def list_positions(self) -> tuple[PositionSnapshot, ...]:
-        return self._captured_positions(self._clock())
+        return self._captured_positions(self._read_clock())
 
     @staticmethod
     def _normalize_metadata_key(key: object) -> str:
@@ -236,15 +293,20 @@ class FakePaperAdapter:
         if scenario.status in {OrderStatus.PARTIALLY_FILLED, OrderStatus.FILLED}:
             average_fill_price = cast(Decimal, scenario.average_fill_price)
             try:
-                with localcontext(_decimal_context()):
-                    if order.quantity is not None:
-                        filled_quantity = order.quantity * scenario.fill_fraction
-                        filled_notional = filled_quantity * average_fill_price
-                    else:
-                        filled_notional = (
-                            cast(Decimal, order.notional) * scenario.fill_fraction
-                        )
-                        filled_quantity = filled_notional / average_fill_price
+                if order.quantity is not None:
+                    filled_quantity = _exact_multiply(
+                        order.quantity, scenario.fill_fraction
+                    )
+                    filled_notional = _exact_multiply(
+                        filled_quantity, average_fill_price
+                    )
+                else:
+                    filled_notional = _exact_multiply(
+                        cast(Decimal, order.notional), scenario.fill_fraction
+                    )
+                    filled_quantity = _deterministic_divide(
+                        filled_notional, average_fill_price
+                    )
             except DecimalException:
                 raise BrokerAdapterError("simulated fill arithmetic failed") from None
             if (
@@ -292,7 +354,7 @@ class FakePaperAdapter:
             average_fill_price,
             rejection_reason,
         ) = self._fill_values(order, scenario)
-        occurred_at = self._clock()
+        occurred_at = self._read_clock()
 
         report = ExecutionReport(
             client_order_id=order.client_order_id,
@@ -321,7 +383,7 @@ class FakePaperAdapter:
             raise OrderNotCancelableError("order is not cancelable")
 
         canceled = report.model_copy(
-            update={"status": OrderStatus.CANCELED, "occurred_at": self._clock()}
+            update={"status": OrderStatus.CANCELED, "occurred_at": self._read_clock()}
         )
         self._record_transition(client_order_id, canceled)
         return canceled
@@ -330,6 +392,8 @@ class FakePaperAdapter:
         return self._reports.get(client_order_id)
 
     def list_recent_orders(self, *, limit: int = 100) -> tuple[ExecutionReport, ...]:
+        if type(limit) is not int:
+            raise TypeError("limit must be an int")
         if limit < 0:
             raise ValueError("limit must be non-negative")
         ordered_ids = sorted(

@@ -48,6 +48,19 @@ class CountingClock:
         return result
 
 
+class SentinelClock:
+    def __init__(self, result=None, *, error: Exception | None = None) -> None:
+        self.result = result
+        self.error = error
+        self.calls = 0
+
+    def __call__(self):
+        self.calls += 1
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+
 def order_data(**overrides):
     data = {
         "client_order_id": "client-1",
@@ -176,6 +189,38 @@ def test_constructor_rejects_position_from_another_venue_without_clock():
     clock = CountingClock()
     with pytest.raises(BrokerAdapterError, match="fixture venue"):
         FakePaperAdapter(clock=clock, positions=[make_position(venue=Venue.KALSHI_PAPER)])
+    assert clock.calls == 0
+
+
+@pytest.mark.parametrize("venue", ["alpaca_paper", 1, None])
+def test_constructor_rejects_non_venue_instead_of_retaining_false_green_value(venue):
+    with pytest.raises(BrokerAdapterError, match="adapter venue must be a Venue"):
+        FakePaperAdapter(clock=CountingClock(), venue=venue)
+
+
+def test_constructor_rejects_non_venue_before_fixtures_scenarios_or_clock():
+    sentinel = "venue-false-green-sentinel"
+
+    class ExplodingPositions:
+        def __iter__(self):
+            raise AssertionError(sentinel)
+
+    with pytest.raises(BrokerAdapterError, match="adapter venue must be a Venue") as caught:
+        FakePaperAdapter(
+            clock=SentinelClock(error=AssertionError(sentinel)),
+            venue="alpaca_paper",
+            positions=ExplodingPositions(),
+            scenarios={1: sentinel},
+        )
+    assert sentinel not in str(caught.value)
+    assert sentinel not in repr(caught.value)
+
+
+@pytest.mark.parametrize("key", [1, "", " ", "\t\n"])
+def test_constructor_rejects_malformed_scenario_keys_without_clock(key):
+    clock = CountingClock()
+    with pytest.raises(BrokerAdapterError, match="scenario keys must be nonblank strings"):
+        FakePaperAdapter(clock=clock, scenarios={key: FakeOrderScenario()})
     assert clock.calls == 0
 
 
@@ -350,6 +395,59 @@ def test_notional_order_fill_math_is_exact(fraction, expected_status, expected_n
     assert report.filled_quantity == expected_quantity
 
 
+def test_full_quantity_fill_preserves_more_than_28_digit_coefficient():
+    quantity = Decimal("12345678901234567890123456789")
+    scenario = FakeOrderScenario(
+        status=OrderStatus.FILLED,
+        fill_fraction=Decimal("1"),
+        average_fill_price=Decimal("1"),
+    )
+    report = submit(
+        make_adapter(scenarios={"client-1": scenario}),
+        make_order(quantity=quantity),
+    )
+    assert report.filled_quantity.as_tuple() == quantity.as_tuple()
+    assert report.filled_notional.as_tuple() == quantity.as_tuple()
+
+
+def test_full_notional_fill_preserves_more_than_28_digit_coefficient():
+    notional = Decimal("12345678901234567890123456789")
+    scenario = FakeOrderScenario(
+        status=OrderStatus.FILLED,
+        fill_fraction=Decimal("1"),
+        average_fill_price=Decimal("1"),
+    )
+    report = submit(
+        make_adapter(scenarios={"client-1": scenario}),
+        make_order(quantity=None, notional=notional),
+    )
+    assert report.filled_notional.as_tuple() == notional.as_tuple()
+    assert report.filled_quantity.as_tuple() == notional.as_tuple()
+
+
+def test_partial_fill_multiplication_is_exact_beyond_28_digits():
+    quantity = Decimal("12345678901234567890123456789")
+    fraction = Decimal("0.12345678901234567890123456789")
+    price = Decimal("7")
+    scenario = FakeOrderScenario(
+        status=OrderStatus.PARTIALLY_FILLED,
+        fill_fraction=fraction,
+        average_fill_price=price,
+    )
+    report = submit(
+        make_adapter(scenarios={"client-1": scenario}),
+        make_order(quantity=quantity),
+    )
+    expected_quantity = Decimal(
+        "1524157875323883675049535156.25361987875019051998750190521"
+    )
+    expected_notional = Decimal(
+        "10669105127267185725346746093.77533915125133363991251333647"
+    )
+    assert report.filled_quantity.as_tuple() == expected_quantity.as_tuple()
+    assert report.filled_notional.as_tuple() == expected_notional.as_tuple()
+
+
 def test_fill_math_is_independent_of_ambient_decimal_precision():
     scenario = FakeOrderScenario(
         status=OrderStatus.FILLED,
@@ -475,6 +573,12 @@ def test_recent_orders_negative_limit_is_rejected_with_fixed_text():
         make_adapter().list_recent_orders(limit=-1)
 
 
+@pytest.mark.parametrize("limit", [True, False, 1.0, "1", None])
+def test_recent_orders_rejects_non_exact_int_limit_with_fixed_text(limit):
+    with pytest.raises(TypeError, match="^limit must be an int$"):
+        make_adapter().list_recent_orders(limit=limit)
+
+
 @pytest.mark.parametrize("mode", ["live", "", "paper-ish", None, False])
 def test_nonpaper_mode_is_rejected_before_all_observable_side_effects(mode):
     secret = "benign-unique-sentinel-value"
@@ -515,14 +619,62 @@ def test_clock_failure_does_not_consume_broker_id_or_store_order():
     clock = FailOnceClock()
     adapter = FakePaperAdapter(clock=clock)
 
-    with pytest.raises(RuntimeError, match="injected clock failure"):
+    with pytest.raises(BrokerAdapterError, match="^adapter clock failed$") as caught:
         submit(adapter, make_order(client_order_id="failed"))
+
+    assert "injected clock failure" not in str(caught.value)
+    assert "injected clock failure" not in repr(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
 
     assert adapter.get_order("failed") is None
     assert adapter.list_recent_orders() == ()
     assert submit(adapter, make_order(client_order_id="successful")).broker_order_id == (
         "fake-paper-000001"
     )
+
+
+@pytest.mark.parametrize(
+    "clock",
+    [
+        SentinelClock("clock-invalid-sentinel"),
+        SentinelClock(datetime(2026, 8, 24, 12, 0)),
+        SentinelClock(datetime(2026, 8, 24, 12, 0, tzinfo=timezone(timedelta(hours=1)))),
+        SentinelClock(error=RuntimeError("clock-raising-sentinel")),
+    ],
+)
+@pytest.mark.parametrize("operation", ["account", "positions", "submit", "cancel"])
+def test_all_clock_paths_fail_sanitized_and_atomically(clock, operation):
+    adapter = FakePaperAdapter(clock=clock)
+    existing = None
+    if operation == "cancel":
+        adapter._clock = CountingClock()
+        existing = submit(adapter)
+        adapter._clock = clock
+
+    with pytest.raises(BrokerAdapterError, match="^adapter clock failed$") as caught:
+        if operation == "account":
+            adapter.get_account_snapshot()
+        elif operation == "positions":
+            adapter.list_positions()
+        elif operation == "submit":
+            submit(adapter, make_order(client_order_id="failed"))
+        else:
+            adapter.cancel_order("client-1")
+
+    exposed = f"{caught.value!s} {caught.value!r}"
+    assert "sentinel" not in exposed
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    if operation == "submit":
+        assert adapter.get_order("failed") is None
+        adapter._clock = CountingClock()
+        assert submit(adapter, make_order(client_order_id="successful")).broker_order_id == "fake-paper-000001"
+    elif operation == "cancel":
+        assert adapter.get_order("client-1") is existing
+        assert adapter.list_recent_orders() == (existing,)
+    else:
+        assert adapter.list_recent_orders() == ()
 
 
 def test_venue_mismatch_is_rejected_before_allocation():
@@ -587,26 +739,54 @@ def test_constructor_signature_is_keyword_only_and_credential_free():
     assert signature.parameters["scenarios"].default is None
 
 
-def test_adapter_sources_have_no_external_or_credential_machinery():
+ALLOWED_ADAPTER_IMPORTS = {
+    "__future__",
+    "typing",
+    "collections.abc",
+    "dataclasses",
+    "datetime",
+    "decimal",
+    "hashlib",
+    "json",
+    "backend.trading.adapters.base",
+    "backend.trading.adapters.fake",
+    "backend.trading.domain",
+    "backend.trading.execution_mode",
+}
+FORBIDDEN_ADAPTER_CALLS = {
+    "open", "__import__", "eval", "exec", "compile", "getenv", "environ", "urlopen"
+}
+
+
+def adapter_source_policy_violations(source: str) -> list[str]:
+    violations = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            violations.extend(
+                alias.name for alias in node.names if alias.name not in ALLOWED_ADAPTER_IMPORTS
+            )
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            if node.module not in ALLOWED_ADAPTER_IMPORTS:
+                violations.append(node.module)
+        elif isinstance(node, ast.Call):
+            called = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
+            if called in FORBIDDEN_ADAPTER_CALLS:
+                violations.append(called)
+    return violations
+
+
+@pytest.mark.parametrize("module", ["http.client", "sqlite3", "subprocess"])
+def test_adapter_source_policy_rejects_previously_false_green_imports(module):
+    assert adapter_source_policy_violations(f"import {module}\n") == [module]
+
+
+def test_adapter_sources_have_only_exact_allowed_dependencies_and_no_effect_calls():
     root = Path(__file__).parents[1]
     adapter_files = sorted((root / "backend" / "trading" / "adapters").glob("*.py"))
     assert [path.name for path in adapter_files] == ["__init__.py", "base.py", "fake.py"]
-    forbidden_import_roots = {
-        "aiohttp", "alpaca", "boto3", "database", "db", "dotenv", "httpx", "os",
-        "psycopg", "requests", "secrets", "socket", "sqlalchemy", "urllib",
-    }
-    forbidden_calls = {"getenv", "environ", "open", "urlopen"}
     for path in adapter_files:
         source = path.read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                assert all(alias.name.split(".")[0] not in forbidden_import_roots for alias in node.names)
-            if isinstance(node, ast.ImportFrom) and node.module:
-                assert node.module.split(".")[0] not in forbidden_import_roots
-            if isinstance(node, ast.Call):
-                called = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
-                assert called not in forbidden_calls
+        assert adapter_source_policy_violations(source) == [], path
 
 
 def test_get_order_and_recent_orders_return_domain_model_types():
