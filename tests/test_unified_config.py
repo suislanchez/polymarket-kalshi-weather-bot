@@ -12,6 +12,12 @@ def test_unified_paper_runtime_defaults():
     assert settings.LIVE_TRADING_ENABLED is False
     assert settings.ACTIVE_PRODUCT_SCOPE == "unified_paper"
     assert settings.STOCK_CRYPTO_LANE_ENABLED is False
+    assert settings.DATABASE_URL == (
+        "sqlite:////Volumes/Archives/Hermes-Offload/2026-08-23/trading-system/"
+        "data/ledgers/tradingbot.db"
+    )
+    assert settings.DATABASE_URL.startswith("sqlite:////Volumes/Archives/")
+    assert "sqlite:///./" not in settings.DATABASE_URL
     assert settings.TRADING_SYSTEM_ROOT == (
         "/Volumes/Archives/Hermes-Offload/2026-08-23/trading-system/"
         "unified-trading-system"

@@ -8,7 +8,10 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
     # Database (SQLite for Phase 1, PostgreSQL for production)
-    DATABASE_URL: str = "sqlite:///./tradingbot.db"
+    DATABASE_URL: str = (
+        "sqlite:////Volumes/Archives/Hermes-Offload/2026-08-23/trading-system/"
+        "data/ledgers/tradingbot.db"
+    )
 
     # Polymarket APIs
     POLYMARKET_GAMMA_API: str = "https://gamma-api.polymarket.com"
