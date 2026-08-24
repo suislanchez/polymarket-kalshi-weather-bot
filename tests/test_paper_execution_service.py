@@ -438,6 +438,52 @@ def test_adapter_report_status_maps_to_exact_lifecycle(session: Session, status:
     assert session.scalar(select(UnifiedOrder)).status == status.value
 
 
+@pytest.mark.parametrize(
+    ("filled_quantity", "filled_notional"),
+    [
+        (Decimal("5"), Decimal("0")),
+        (Decimal("0"), Decimal("50")),
+        (Decimal("5"), Decimal("50")),
+    ],
+)
+def test_canceled_report_with_fill_records_partial_fill_before_cancel(
+    session: Session,
+    filled_quantity: Decimal,
+    filled_notional: Decimal,
+):
+    def canceled_with_fill(order: NormalizedOrder) -> ExecutionReport:
+        return ExecutionReport(
+            client_order_id=order.client_order_id,
+            venue=order.venue,
+            status=OrderStatus.CANCELED,
+            broker_order_id="partially-filled-then-canceled",
+            filled_quantity=filled_quantity,
+            filled_notional=filled_notional,
+            average_fill_price=Decimal("10"),
+            occurred_at=NOW + timedelta(seconds=1),
+        )
+
+    service, _, _, _, _ = make_service(
+        session, adapter=RecordingAdapter(canceled_with_fill)
+    )
+
+    result = execute(service)
+
+    assert result.report.status is OrderStatus.CANCELED
+    assert [event.event_type for event in stored_events(session)] == [
+        "proposal_created",
+        "risk_approved",
+        "order_submitted",
+        "order_acknowledged",
+        "order_partially_filled",
+        "order_canceled",
+    ]
+    projection = session.scalar(select(UnifiedOrder))
+    assert projection.status == OrderStatus.CANCELED.value
+    assert projection.filled_quantity == str(filled_quantity)
+    assert projection.filled_notional == str(filled_notional)
+
+
 def test_risk_rejection_records_only_proposal_and_decision_and_never_calls_adapter(session: Session):
     sentinel = "RISK_SNAPSHOT_SECRET_SENTINEL"
     decision = RiskDecision(

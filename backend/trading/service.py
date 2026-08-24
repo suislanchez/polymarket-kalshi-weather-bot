@@ -309,7 +309,7 @@ class PaperExecutionService:
 
         record("order_submitted", now, self._order_payload(order))
         report = self._submit(adapter, order, now)
-        for event_type in self._report_event_types(report.status):
+        for event_type in self._report_event_types(report):
             record(event_type, report.occurred_at, self._report_payload(report, event_type))
         self._upsert_projection(self._session, report)
 
@@ -802,9 +802,18 @@ class PaperExecutionService:
         )
 
     @staticmethod
-    def _report_event_types(status: OrderStatus) -> tuple[str, ...]:
+    def _report_event_types(report: ExecutionReport) -> tuple[str, ...]:
+        status = report.status
         if status is OrderStatus.REJECTED:
             return ("order_rejected",)
+        if status is OrderStatus.CANCELED and (
+            report.filled_quantity > 0 or report.filled_notional > 0
+        ):
+            return (
+                "order_acknowledged",
+                "order_partially_filled",
+                "order_canceled",
+            )
         final = {
             OrderStatus.SUBMITTED: None,
             OrderStatus.PARTIALLY_FILLED: "order_partially_filled",
