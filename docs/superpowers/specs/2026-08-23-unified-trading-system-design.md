@@ -369,9 +369,10 @@ The initial configuration uses these conservative, visible defaults:
 - default instrument allowlist: `SPY`, `QQQ`, `BTC/USD`, and `ETH/USD`; weather contracts must separately pass the existing venue, station, liquidity, and edge gates;
 - no leverage or margin;
 - no options, futures, derivatives, staking, lending, transfers, or shorting;
-- maximum order notional: the lesser of $1,000 and 1% of current paper net liquidation value;
+- maximum order notional: the lesser of $250 and 1% of current paper net liquidation value;
 - maximum position notional per instrument: 5% of paper net liquidation value;
 - maximum aggregate gross exposure: 25% of paper net liquidation value;
+- maximum aggregate crypto exposure: 10% of paper net liquidation value;
 - maximum concurrent non-weather positions: five;
 - maximum submitted orders: 20 per UTC day across stock and crypto strategies;
 - daily-loss circuit breaker: halt new orders at a 1% decline from start-of-day paper net liquidation value;
