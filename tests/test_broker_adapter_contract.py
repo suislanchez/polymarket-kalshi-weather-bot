@@ -7,7 +7,7 @@ import inspect
 from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal, DecimalException, localcontext
 from pathlib import Path
-from typing import Protocol
+from typing import ClassVar, Protocol
 
 import pytest
 
@@ -198,6 +198,132 @@ def test_constructor_copies_position_container():
     adapter = make_adapter(positions=positions)
     positions.clear()
     assert len(adapter.list_positions()) == 1
+
+
+@pytest.mark.parametrize("hostile", [False, True])
+def test_constructor_rejects_position_snapshot_subclasses_before_virtual_copy(hostile):
+    sentinel = "position-model-copy-sentinel"
+
+    class BenignPosition(PositionSnapshot):
+        pass
+
+    class HostilePosition(PositionSnapshot):
+        copy_calls: ClassVar[int] = 0
+
+        def model_copy(self, *args, **kwargs):
+            type(self).copy_calls += 1
+            raise RuntimeError(sentinel)
+
+    position_type = HostilePosition if hostile else BenignPosition
+    clock = CountingClock()
+    position = position_type(**make_position().model_dump())
+    with pytest.raises(
+        BrokerAdapterError,
+        match="^positions must contain PositionSnapshot values$",
+    ) as caught:
+        FakePaperAdapter(clock=clock, positions=[position])
+    assert str(caught.value) == "positions must contain PositionSnapshot values"
+    assert sentinel not in str(caught.value)
+    assert sentinel not in repr(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert clock.calls == 0
+    assert HostilePosition.copy_calls == 0
+
+
+@pytest.mark.parametrize("malformed", [object(), 7, "SPY", None])
+def test_constructor_rejects_malformed_position_fixture_types_without_clock(malformed):
+    clock = CountingClock()
+    with pytest.raises(
+        BrokerAdapterError,
+        match="^positions must contain PositionSnapshot values$",
+    ) as caught:
+        FakePaperAdapter(clock=clock, positions=[malformed])
+    assert str(caught.value) == "positions must contain PositionSnapshot values"
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert clock.calls == 0
+
+
+def test_constructor_validates_all_position_types_before_copying_any_fixture(monkeypatch):
+    sentinel = "mixed-position-model-copy-sentinel"
+
+    class HostilePosition(PositionSnapshot):
+        copy_calls: ClassVar[int] = 0
+
+        def model_copy(self, *args, **kwargs):
+            type(self).copy_calls += 1
+            raise RuntimeError(sentinel)
+
+    exact_position = make_position()
+    hostile_position = HostilePosition(**make_position().model_dump())
+    original_model_copy = PositionSnapshot.model_copy
+    exact_copy_calls = 0
+
+    def counting_model_copy(self, *args, **kwargs):
+        nonlocal exact_copy_calls
+        exact_copy_calls += 1
+        return original_model_copy(self, *args, **kwargs)
+
+    monkeypatch.setattr(PositionSnapshot, "model_copy", counting_model_copy)
+    clock = CountingClock()
+    with pytest.raises(
+        BrokerAdapterError,
+        match="^positions must contain PositionSnapshot values$",
+    ) as caught:
+        FakePaperAdapter(clock=clock, positions=[exact_position, hostile_position])
+    assert sentinel not in str(caught.value)
+    assert sentinel not in repr(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert exact_copy_calls == 0
+    assert HostilePosition.copy_calls == 0
+    assert clock.calls == 0
+
+
+def test_exact_position_fixtures_are_detached_and_recaptured_as_exact_snapshots():
+    caller_metadata = {"fixture": {"source": "caller"}}
+    source = make_position(metadata=caller_metadata)
+    positions = [source]
+    clock = CountingClock()
+    adapter = make_adapter(clock, positions=positions)
+
+    positions.clear()
+    caller_metadata["fixture"]["source"] = "mutated"
+    listed = adapter.list_positions()
+    account = adapter.get_account_snapshot()
+
+    assert type(listed[0]) is PositionSnapshot
+    assert type(account.positions[0]) is PositionSnapshot
+    assert listed[0] is not source
+    assert account.positions[0] is not source
+    assert listed[0] is not account.positions[0]
+    assert listed[0].metadata == {"fixture": {"source": "caller"}}
+    assert account.positions[0].metadata == {"fixture": {"source": "caller"}}
+    assert listed[0].venue is Venue.ALPACA_PAPER
+    assert account.positions[0].venue is Venue.ALPACA_PAPER
+    assert listed[0].captured_at == NOW
+    assert account.positions[0].captured_at == NOW + timedelta(seconds=1)
+    assert listed[0].captured_at != source.captured_at
+    with pytest.raises(Exception):
+        listed[0].symbol = "QQQ"
+
+
+def test_position_fixture_copying_uses_inert_base_model_dispatch():
+    tree = ast.parse(inspect.getsource(FakePaperAdapter))
+    model_copy_dispatches = sorted(
+        ast.unparse(node.func)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "model_copy"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id in {"position", "PositionSnapshot"}
+    )
+    assert model_copy_dispatches == [
+        "PositionSnapshot.model_copy",
+        "PositionSnapshot.model_copy",
+    ]
 
 
 def test_constructor_rejects_position_from_another_venue_without_clock():

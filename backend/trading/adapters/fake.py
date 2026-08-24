@@ -165,7 +165,13 @@ class FakePaperAdapter:
     ) -> None:
         if not isinstance(venue, Venue):
             raise BrokerAdapterError("adapter venue must be a Venue")
-        fixtures = tuple(position.model_copy(deep=True) for position in positions)
+        position_items = tuple(positions)
+        if not all(type(position) is PositionSnapshot for position in position_items):
+            raise BrokerAdapterError("positions must contain PositionSnapshot values")
+        fixtures = tuple(
+            PositionSnapshot.model_copy(position, deep=True)
+            for position in position_items
+        )
         if any(position.venue is not venue for position in fixtures):
             raise BrokerAdapterError("position fixture venue must match adapter venue")
 
@@ -214,7 +220,9 @@ class FakePaperAdapter:
 
     def _captured_positions(self, captured_at: datetime) -> tuple[PositionSnapshot, ...]:
         return tuple(
-            position.model_copy(update={"captured_at": captured_at}, deep=True)
+            PositionSnapshot.model_copy(
+                position, update={"captured_at": captured_at}, deep=True
+            )
             for position in self._positions
         )
 
