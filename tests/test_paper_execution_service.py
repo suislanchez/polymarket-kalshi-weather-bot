@@ -439,12 +439,13 @@ def test_adapter_report_status_maps_to_exact_lifecycle(session: Session, status:
 
 
 def test_risk_rejection_records_only_proposal_and_decision_and_never_calls_adapter(session: Session):
+    sentinel = "RISK_SNAPSHOT_SECRET_SENTINEL"
     decision = RiskDecision(
         proposal_id="proposal-1",
         approved=False,
         reason_codes=("order_notional_limit",),
         decided_at=NOW,
-        limit_snapshot={"max_order_notional": "10"},
+        limit_snapshot={"secret": sentinel},
     )
     risk = RecordingRisk(decision)
     service, adapter, _, _, kill = make_service(session, risk=risk)
@@ -453,12 +454,65 @@ def test_risk_rejection_records_only_proposal_and_decision_and_never_calls_adapt
 
     assert result.order is None
     assert result.report is None
-    assert result.decision == decision
+    assert result.decision.reason_codes == ("order_notional_limit",)
+    assert (
+        json.loads(result.decision.model_dump_json())["limit_snapshot"]
+        == make_limits().snapshot()
+    )
     assert result.decision is not decision
     assert adapter.calls == []
     assert kill.calls == 1
-    assert [event.event_type for event in stored_events(session)] == ["proposal_created", "risk_rejected"]
+    events = stored_events(session)
+    assert [event.event_type for event in events] == [
+        "proposal_created",
+        "risk_rejected",
+    ]
+    assert sentinel not in f"{result!r}{[event.payload for event in events]!r}"
     assert session.scalar(select(func.count()).select_from(UnifiedOrder)) == 0
+
+
+def test_unknown_risk_reason_code_fails_closed_without_leaking(session: Session):
+    sentinel = "RISK_DEPENDENCY_SECRET_SENTINEL"
+    decision = RiskDecision(
+        proposal_id="proposal-1",
+        approved=False,
+        reason_codes=(sentinel,),
+        decided_at=NOW,
+        limit_snapshot={"secret": sentinel},
+    )
+    service, adapter, _, _, _ = make_service(
+        session, risk=RecordingRisk(decision)
+    )
+
+    with pytest.raises(PaperExecutionServiceError) as caught:
+        execute(service)
+
+    assert_sanitized(caught.value, "risk decision invalid")
+    assert adapter.calls == []
+    events = stored_events(session)
+    assert [event.event_type for event in events] == ["proposal_created"]
+    assert sentinel not in f"{caught.value!r}{[event.payload for event in events]!r}"
+
+
+def test_risk_decision_timestamp_must_match_risk_context(session: Session):
+    decision = RiskDecision(
+        proposal_id="proposal-1",
+        approved=True,
+        approved_notional=Decimal("100.2500"),
+        decided_at=NOW + timedelta(seconds=1),
+    )
+    service, adapter, _, _, _ = make_service(
+        session, risk=RecordingRisk(decision)
+    )
+
+    with pytest.raises(PaperExecutionServiceError) as caught:
+        execute(service)
+
+    assert_sanitized(caught.value, "risk decision invalid")
+    assert adapter.calls == []
+    assert [event.event_type for event in stored_events(session)] == [
+        "proposal_created"
+    ]
 
 
 def test_approved_quantity_is_the_only_normalized_size(session: Session):
@@ -925,7 +979,13 @@ def test_valid_exact_risk_decision_is_detached_and_accepted(session: Session):
 
     assert len(risk.calls) == 1
     assert len(adapter.calls) == 1
-    assert result.decision == decision
+    assert result.decision.proposal_id == decision.proposal_id
+    assert result.decision.approved is True
+    assert result.decision.approved_notional == decision.approved_notional
+    assert (
+        json.loads(result.decision.model_dump_json())["limit_snapshot"]
+        == make_limits().snapshot()
+    )
     assert result.decision is not decision
 
 
@@ -998,6 +1058,35 @@ def test_approved_risk_size_uses_lesser_dual_proposal_basis(
     ]
 
 
+def test_approved_risk_size_does_not_round_at_129_digits(session: Session):
+    exact_effective_notional = Decimal("1." + "0" * 127 + "6")
+    approved_notional = Decimal("1." + "0" * 126 + "1")
+    assert approved_notional > exact_effective_notional
+    proposal = make_proposal(
+        quantity=Decimal("1"),
+        notional=None,
+        reference_price=exact_effective_notional,
+    )
+    decision = RiskDecision(
+        proposal_id=proposal.proposal_id,
+        approved=True,
+        approved_notional=approved_notional,
+        decided_at=NOW,
+    )
+    service, adapter, _, _, _ = make_service(
+        session, risk=RecordingRisk(decision)
+    )
+
+    with pytest.raises(PaperExecutionServiceError) as caught:
+        execute(service, proposal)
+
+    assert_sanitized(caught.value, "risk decision invalid")
+    assert adapter.calls == []
+    assert [event.event_type for event in stored_events(session)] == [
+        "proposal_created"
+    ]
+
+
 @pytest.mark.parametrize("basis", ["notional", "quantity"])
 def test_adapter_fill_cannot_exceed_submitted_order_size(
     session: Session, basis: str
@@ -1055,6 +1144,47 @@ def test_adapter_fill_cannot_exceed_submitted_order_size(
     projection = session.scalar(select(UnifiedOrder))
     assert projection.status == OrderStatus.REJECTED.value
     assert projection.rejection_reason == "adapter_invalid_report"
+
+
+def test_adapter_fill_size_does_not_round_at_129_digits(session: Session):
+    average_fill_price = Decimal("1." + "0" * 127 + "4")
+    assert average_fill_price > Decimal("1")
+    proposal = make_proposal(
+        notional=Decimal("1"), reference_price=Decimal("1")
+    )
+    decision = RiskDecision(
+        proposal_id=proposal.proposal_id,
+        approved=True,
+        approved_notional=Decimal("1"),
+        decided_at=NOW,
+    )
+
+    def subtly_oversized_fill(order: NormalizedOrder) -> ExecutionReport:
+        return ExecutionReport(
+            client_order_id=order.client_order_id,
+            venue=order.venue,
+            status=OrderStatus.FILLED,
+            broker_order_id="precision-paper-fill",
+            filled_quantity=Decimal("1"),
+            filled_notional=Decimal("0"),
+            average_fill_price=average_fill_price,
+            occurred_at=NOW + timedelta(seconds=1),
+        )
+
+    service, adapter, _, _, _ = make_service(
+        session,
+        adapter=RecordingAdapter(subtly_oversized_fill),
+        risk=RecordingRisk(decision),
+    )
+
+    result = execute(service, proposal)
+
+    assert len(adapter.calls) == 1
+    assert result.report.status is OrderStatus.REJECTED
+    assert result.report.rejection_reason == "adapter_invalid_report"
+    projection = session.scalar(select(UnifiedOrder))
+    assert projection.filled_quantity == "0"
+    assert projection.filled_notional == "0"
 
 
 @pytest.mark.parametrize(

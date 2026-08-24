@@ -7,7 +7,19 @@ import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import Context, DecimalException, localcontext
+from decimal import (
+    Clamped,
+    Context,
+    Decimal,
+    Inexact,
+    InvalidOperation,
+    MAX_EMAX,
+    MIN_EMIN,
+    Overflow,
+    Rounded,
+    Underflow,
+    localcontext,
+)
 from typing import Protocol
 
 from sqlalchemy import event
@@ -34,7 +46,47 @@ from backend.trading.risk import (
 )
 
 
-_SERVICE_DECIMAL_CONTEXT = Context(prec=128, Emin=-384, Emax=384)
+_ALLOWED_RISK_REASON_CODES = frozenset(
+    {
+        "execution_mode_not_paper",
+        "global_kill_switch",
+        "duplicate_idempotency_key",
+        "venue_not_allowed",
+        "asset_venue_mismatch",
+        "asset_symbol_mismatch",
+        "symbol_not_allowed",
+        "weather_upstream_not_approved",
+        "risk_arithmetic_invalid",
+        "opening_short_not_allowed",
+        "order_notional_limit",
+        "symbol_exposure_limit",
+        "gross_exposure_limit",
+        "crypto_exposure_limit",
+        "daily_loss_limit",
+        "future_market_data",
+        "stale_market_data",
+    }
+)
+_EXACT_PRODUCT_TRAPS = (
+    Clamped,
+    Inexact,
+    InvalidOperation,
+    Overflow,
+    Rounded,
+    Underflow,
+)
+
+
+def _exact_product(left: Decimal, right: Decimal) -> Decimal:
+    precision = max(1, len(left.as_tuple().digits) + len(right.as_tuple().digits))
+    context = Context(prec=precision, Emin=MIN_EMIN, Emax=MAX_EMAX)
+    for signal in _EXACT_PRODUCT_TRAPS:
+        context.traps[signal] = True
+    with localcontext(context):
+        product = left * right
+    if not product.is_finite():
+        raise ArithmeticError
+    return product
 
 
 class PaperExecutionServiceError(RuntimeError):
@@ -485,11 +537,25 @@ class PaperExecutionService:
             if (
                 type(normalized) is not RiskDecision
                 or normalized.proposal_id != proposal.proposal_id
+                or normalized.decided_at != context.now
+                or any(
+                    reason not in _ALLOWED_RISK_REASON_CODES
+                    for reason in normalized.reason_codes
+                )
                 or not self._approved_size_is_valid(
                     proposal, portfolio, limits, normalized
                 )
             ):
                 raise ValueError
+            normalized = RiskDecision(
+                proposal_id=normalized.proposal_id,
+                approved=normalized.approved,
+                reason_codes=normalized.reason_codes,
+                approved_quantity=normalized.approved_quantity,
+                approved_notional=normalized.approved_notional,
+                decided_at=normalized.decided_at,
+                limit_snapshot=limits.snapshot(),
+            )
         except Exception:
             invalid = True
         if invalid or normalized is None:
@@ -506,40 +572,41 @@ class PaperExecutionService:
         if not decision.approved:
             return True
         try:
-            with localcontext(_SERVICE_DECIMAL_CONTEXT):
-                proposed_notional = proposal.notional
-                if proposal.quantity is not None:
-                    quantity_notional = (
-                        proposal.quantity * proposal.reference_price
-                    )
-                    proposed_notional = (
-                        quantity_notional
-                        if proposed_notional is None
-                        else min(proposed_notional, quantity_notional)
-                    )
-                if proposed_notional is None:
+            proposed_notional = proposal.notional
+            if proposal.quantity is not None:
+                quantity_notional = _exact_product(
+                    proposal.quantity, proposal.reference_price
+                )
+                proposed_notional = (
+                    quantity_notional
+                    if proposed_notional is None
+                    else min(proposed_notional, quantity_notional)
+                )
+            if proposed_notional is None:
+                return False
+
+            approved_notional = decision.approved_notional
+            if approved_notional is None:
+                if decision.approved_quantity is None:
                     return False
-
-                approved_notional = decision.approved_notional
-                if approved_notional is None:
-                    if decision.approved_quantity is None:
-                        return False
-                    approved_notional = (
-                        decision.approved_quantity * proposal.reference_price
-                    )
-
-                order_cap = min(
-                    limits.max_order_notional,
-                    portfolio.equity * limits.max_order_equity_fraction,
+                approved_notional = _exact_product(
+                    decision.approved_quantity, proposal.reference_price
                 )
-                return (
-                    proposed_notional.is_finite()
-                    and approved_notional.is_finite()
-                    and order_cap.is_finite()
-                    and approved_notional <= proposed_notional
-                    and approved_notional <= order_cap
-                )
-        except (DecimalException, OverflowError):
+
+            order_cap = min(
+                limits.max_order_notional,
+                _exact_product(
+                    portfolio.equity, limits.max_order_equity_fraction
+                ),
+            )
+            return (
+                proposed_notional.is_finite()
+                and approved_notional.is_finite()
+                and order_cap.is_finite()
+                and approved_notional <= proposed_notional
+                and approved_notional <= order_cap
+            )
+        except (ArithmeticError, ValueError):
             return False
 
     @staticmethod
@@ -676,27 +743,30 @@ class PaperExecutionService:
         if average_fill_price is None:
             return False
         try:
-            with localcontext(_SERVICE_DECIMAL_CONTEXT):
-                quantity_notional = filled_quantity * average_fill_price
-                if (
-                    filled_quantity > 0
-                    and filled_notional > 0
-                    and quantity_notional != filled_notional
-                ):
-                    return False
-                if order.notional is not None:
-                    return (
-                        filled_notional <= order.notional
-                        and quantity_notional <= order.notional
-                    )
-                if order.quantity is None:
-                    return False
-                maximum_notional = order.quantity * average_fill_price
+            quantity_notional = _exact_product(
+                filled_quantity, average_fill_price
+            )
+            if (
+                filled_quantity > 0
+                and filled_notional > 0
+                and quantity_notional != filled_notional
+            ):
+                return False
+            if order.notional is not None:
                 return (
-                    filled_quantity <= order.quantity
-                    and filled_notional <= maximum_notional
+                    filled_notional <= order.notional
+                    and quantity_notional <= order.notional
                 )
-        except (DecimalException, OverflowError):
+            if order.quantity is None:
+                return False
+            maximum_notional = _exact_product(
+                order.quantity, average_fill_price
+            )
+            return (
+                filled_quantity <= order.quantity
+                and filled_notional <= maximum_notional
+            )
+        except (ArithmeticError, ValueError):
             return False
 
     def _reject_before_submit(
