@@ -317,11 +317,11 @@ Fixtures use `Decimal` and a fixed UTC clock. Cover rejection for:
 2. short/sell opening exposure;
 3. non-stock/ETF/spot-crypto/weather asset;
 4. notional over 1% of equity or `$250`, whichever is lower;
-5. projected symbol exposure over 10% of equity;
+5. projected symbol exposure over 5% of equity;
 6. projected gross exposure over 25% of equity;
 7. projected crypto exposure over 10% of equity;
-8. daily realized P&L at or below `-2%`;
-9. quote older than 60 seconds;
+8. daily realized P&L at or below `-1%`;
+9. quote older than 30 seconds;
 10. duplicate idempotency key;
 11. global kill switch;
 12. any non-paper venue.
