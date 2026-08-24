@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
-from typing import Annotated
+from types import MappingProxyType
+from typing import Annotated, cast
 
 from pydantic import (
     AfterValidator,
@@ -13,6 +15,7 @@ from pydantic import (
     ConfigDict,
     Field,
     JsonValue,
+    PlainSerializer,
     model_validator,
 )
 
@@ -68,16 +71,46 @@ def _require_utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
+def _freeze_json(value: JsonValue) -> object:
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {key: _freeze_json(item) for key, item in value.items()}
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_json(item) for item in value)
+    return value
+
+
+def _freeze_json_object(value: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
+    frozen = MappingProxyType(
+        {key: _freeze_json(item) for key, item in value.items()}
+    )
+    return cast(Mapping[str, JsonValue], frozen)
+
+
+def _thaw_json(value: object) -> JsonValue:
+    if isinstance(value, Mapping):
+        return {key: _thaw_json(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_json(item) for item in value]
+    return cast(JsonValue, value)
+
+
 NonBlankString = Annotated[str, AfterValidator(_require_nonblank)]
 UtcDatetime = Annotated[datetime, AfterValidator(_require_utc)]
 PositiveDecimal = Annotated[Decimal, Field(gt=0)]
 NonNegativeDecimal = Annotated[Decimal, Field(ge=0)]
+FrozenJsonObject = Annotated[
+    Mapping[str, JsonValue],
+    AfterValidator(_freeze_json_object),
+    PlainSerializer(_thaw_json, return_type=dict[str, JsonValue]),
+]
 
 
 class DomainModel(BaseModel):
     """Shared strictness for all values crossing trading boundaries."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, validate_default=True)
 
 
 class SizedOrderModel(DomainModel):
@@ -110,7 +143,7 @@ class TradeProposal(SizedOrderModel):
     market_data_at: UtcDatetime
     created_at: UtcDatetime
     rationale: NonBlankString
-    metadata: dict[str, JsonValue] = Field(default_factory=dict)
+    metadata: FrozenJsonObject = Field(default_factory=dict)
 
 
 class RiskDecision(DomainModel):
@@ -122,7 +155,23 @@ class RiskDecision(DomainModel):
     approved_quantity: PositiveDecimal | None = None
     approved_notional: PositiveDecimal | None = None
     decided_at: UtcDatetime
-    limit_snapshot: dict[str, JsonValue] = Field(default_factory=dict)
+    limit_snapshot: FrozenJsonObject = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_decision_size(self) -> RiskDecision:
+        has_quantity = self.approved_quantity is not None
+        has_notional = self.approved_notional is not None
+        if self.approved:
+            if has_quantity == has_notional:
+                raise ValueError(
+                    "approved decisions require exactly one approved sizing field"
+                )
+        else:
+            if has_quantity or has_notional:
+                raise ValueError("rejected decisions prohibit approved sizing fields")
+            if not self.reason_codes:
+                raise ValueError("rejected decisions require at least one reason code")
+        return self
 
 
 class NormalizedOrder(SizedOrderModel):
@@ -136,7 +185,13 @@ class NormalizedOrder(SizedOrderModel):
     side: Side
     status: OrderStatus
     created_at: UtcDatetime
-    metadata: dict[str, JsonValue] = Field(default_factory=dict)
+    metadata: FrozenJsonObject = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_unambiguous_size(self) -> NormalizedOrder:
+        if (self.quantity is None) == (self.notional is None):
+            raise ValueError("normalized orders require exactly one sizing field")
+        return self
 
 
 class ExecutionReport(DomainModel):
@@ -151,7 +206,30 @@ class ExecutionReport(DomainModel):
     average_fill_price: PositiveDecimal | None = None
     rejection_reason: NonBlankString | None = None
     occurred_at: UtcDatetime
-    metadata: dict[str, JsonValue] = Field(default_factory=dict)
+    metadata: FrozenJsonObject = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_lifecycle_values(self) -> ExecutionReport:
+        rejection_statuses = {OrderStatus.RISK_REJECTED, OrderStatus.REJECTED}
+        fill_statuses = {OrderStatus.PARTIALLY_FILLED, OrderStatus.FILLED}
+        has_fill = self.filled_quantity > 0 or self.filled_notional > 0
+
+        if self.status in rejection_statuses:
+            if self.rejection_reason is None:
+                raise ValueError("rejection statuses require rejection_reason")
+            if has_fill or self.average_fill_price is not None:
+                raise ValueError("rejection statuses prohibit fills and average_fill_price")
+            return self
+
+        if self.rejection_reason is not None:
+            raise ValueError("non-rejection statuses prohibit rejection_reason")
+        if self.status in fill_statuses and not has_fill:
+            raise ValueError("fill statuses require a positive fill basis")
+        if has_fill and self.average_fill_price is None:
+            raise ValueError("positive fills require average_fill_price")
+        if self.average_fill_price is not None and not has_fill:
+            raise ValueError("average_fill_price requires a positive fill basis")
+        return self
 
 
 class PositionSnapshot(DomainModel):
@@ -168,7 +246,7 @@ class PositionSnapshot(DomainModel):
     realized_pnl: Decimal
     unrealized_pnl: Decimal
     captured_at: UtcDatetime
-    metadata: dict[str, JsonValue] = Field(default_factory=dict)
+    metadata: FrozenJsonObject = Field(default_factory=dict)
 
 
 class AccountSnapshot(DomainModel):
@@ -180,7 +258,7 @@ class AccountSnapshot(DomainModel):
     buying_power: NonNegativeDecimal
     captured_at: UtcDatetime
     positions: tuple[PositionSnapshot, ...] = ()
-    metadata: dict[str, JsonValue] = Field(default_factory=dict)
+    metadata: FrozenJsonObject = Field(default_factory=dict)
 
 
 __all__ = [

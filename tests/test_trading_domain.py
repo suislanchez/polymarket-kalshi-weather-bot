@@ -1,5 +1,6 @@
 """Contract tests for normalized, immutable paper-trading domain values."""
 
+import json
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -251,3 +252,243 @@ def test_account_and_position_snapshots_use_decimal_and_utc_values():
         PositionSnapshot(**{**position.model_dump(), "captured_at": NOW.replace(tzinfo=None)})
     with pytest.raises(ValidationError, match="Extra inputs"):
         AccountSnapshot(**{**account.model_dump(), "secret_key": "never"})
+
+
+def test_json_metadata_is_deeply_immutable_and_dumps_as_mutable_json():
+    proposal = TradeProposal(
+        **proposal_data(
+            metadata={"audit": {"sources": ["strategy", {"version": 1}]}}
+        )
+    )
+
+    with pytest.raises(TypeError):
+        proposal.metadata["new"] = "value"
+    with pytest.raises(TypeError):
+        proposal.metadata["audit"]["sources"][1]["version"] = 2
+    with pytest.raises(TypeError):
+        proposal.metadata["audit"]["sources"][0] = "adapter"
+
+    dumped = proposal.model_dump()
+    assert dumped["metadata"] == {
+        "audit": {"sources": ["strategy", {"version": 1}]}
+    }
+    assert isinstance(dumped["metadata"], dict)
+    assert isinstance(dumped["metadata"]["audit"], dict)
+    assert isinstance(dumped["metadata"]["audit"]["sources"], list)
+    assert json.loads(proposal.model_dump_json())["metadata"] == dumped["metadata"]
+
+    dumped["metadata"]["audit"]["sources"][1]["version"] = 99
+    assert proposal.metadata["audit"]["sources"][1]["version"] == 1
+
+
+def test_default_metadata_and_limit_snapshots_are_deeply_immutable():
+    proposal = TradeProposal(**proposal_data())
+    decision = RiskDecision(
+        proposal_id=proposal.proposal_id,
+        approved=False,
+        reason_codes=("position_limit",),
+        decided_at=NOW,
+        limit_snapshot={"limits": {"symbols": ["SPY"]}},
+    )
+
+    with pytest.raises(TypeError):
+        proposal.metadata["new"] = "value"
+    with pytest.raises(TypeError):
+        decision.limit_snapshot["limits"]["symbols"][0] = "QQQ"
+
+    assert decision.model_dump()["limit_snapshot"] == {
+        "limits": {"symbols": ["SPY"]}
+    }
+    assert json.loads(decision.model_dump_json())["limit_snapshot"] == {
+        "limits": {"symbols": ["SPY"]}
+    }
+
+
+@pytest.mark.parametrize(
+    ("approved_quantity", "approved_notional"),
+    [(Decimal("1"), None), (None, Decimal("100"))],
+)
+def test_approved_risk_decision_requires_exactly_one_size(
+    approved_quantity, approved_notional
+):
+    decision = RiskDecision(
+        proposal_id="trend:SPY:2026-08-23T12:00:00Z",
+        approved=True,
+        reason_codes=("capped_to_limit",),
+        approved_quantity=approved_quantity,
+        approved_notional=approved_notional,
+        decided_at=NOW,
+    )
+
+    assert decision.approved_quantity == approved_quantity
+    assert decision.approved_notional == approved_notional
+
+
+@pytest.mark.parametrize(
+    ("approved_quantity", "approved_notional"),
+    [(None, None), (Decimal("1"), Decimal("100"))],
+)
+def test_approved_risk_decision_rejects_missing_or_ambiguous_size(
+    approved_quantity, approved_notional
+):
+    with pytest.raises(ValidationError, match="exactly one"):
+        RiskDecision(
+            proposal_id="trend:SPY:2026-08-23T12:00:00Z",
+            approved=True,
+            approved_quantity=approved_quantity,
+            approved_notional=approved_notional,
+            decided_at=NOW,
+        )
+
+
+def test_rejected_risk_decision_requires_reason_and_prohibits_approved_size():
+    decision = RiskDecision(
+        proposal_id="trend:SPY:2026-08-23T12:00:00Z",
+        approved=False,
+        reason_codes=("position_limit",),
+        decided_at=NOW,
+    )
+    assert decision.reason_codes == ("position_limit",)
+
+    with pytest.raises(ValidationError, match="reason code"):
+        RiskDecision(
+            proposal_id=decision.proposal_id,
+            approved=False,
+            reason_codes=(),
+            decided_at=NOW,
+        )
+    with pytest.raises(ValidationError, match="prohibit"):
+        RiskDecision(
+            proposal_id=decision.proposal_id,
+            approved=False,
+            reason_codes=("position_limit",),
+            approved_notional=Decimal("100"),
+            decided_at=NOW,
+        )
+
+
+@pytest.mark.parametrize(
+    ("quantity", "notional"),
+    [(Decimal("1"), None), (None, Decimal("100"))],
+)
+def test_normalized_order_accepts_exactly_one_positive_size(quantity, notional):
+    order = NormalizedOrder(**order_data(quantity=quantity, notional=notional))
+    assert order.quantity == quantity
+    assert order.notional == notional
+
+
+@pytest.mark.parametrize(
+    ("quantity", "notional"),
+    [
+        (None, None),
+        (Decimal("0"), None),
+        (None, Decimal("0")),
+        (Decimal("1"), Decimal("100")),
+    ],
+)
+def test_normalized_order_rejects_missing_nonpositive_or_ambiguous_size(
+    quantity, notional
+):
+    with pytest.raises(ValidationError):
+        NormalizedOrder(**order_data(quantity=quantity, notional=notional))
+
+
+@pytest.mark.parametrize("status", [OrderStatus.RISK_REJECTED, OrderStatus.REJECTED])
+def test_rejected_execution_report_requires_reason_and_prohibits_fills(status):
+    report = ExecutionReport(
+        client_order_id="order:trend:SPY:2026-08-23T12:00:00Z",
+        venue=Venue.ALPACA_PAPER,
+        status=status,
+        rejection_reason="risk or venue rejection",
+        occurred_at=NOW,
+    )
+    assert report.rejection_reason == "risk or venue rejection"
+
+    with pytest.raises(ValidationError, match="rejection_reason"):
+        ExecutionReport(
+            client_order_id=report.client_order_id,
+            venue=report.venue,
+            status=status,
+            occurred_at=NOW,
+        )
+    with pytest.raises(ValidationError, match="prohibit fills"):
+        ExecutionReport(
+            client_order_id=report.client_order_id,
+            venue=report.venue,
+            status=status,
+            rejection_reason="rejected",
+            filled_quantity=Decimal("1"),
+            average_fill_price=Decimal("10"),
+            occurred_at=NOW,
+        )
+
+
+def test_non_rejected_execution_report_prohibits_rejection_reason():
+    with pytest.raises(ValidationError, match="prohibit rejection_reason"):
+        ExecutionReport(
+            client_order_id="order:trend:SPY:2026-08-23T12:00:00Z",
+            venue=Venue.ALPACA_PAPER,
+            status=OrderStatus.SUBMITTED,
+            rejection_reason="contradictory",
+            occurred_at=NOW,
+        )
+
+
+@pytest.mark.parametrize("status", [OrderStatus.PARTIALLY_FILLED, OrderStatus.FILLED])
+def test_fill_status_requires_positive_fill_basis_and_average_price(status):
+    report = ExecutionReport(
+        client_order_id="order:trend:SPY:2026-08-23T12:00:00Z",
+        venue=Venue.ALPACA_PAPER,
+        status=status,
+        filled_notional=Decimal("50"),
+        average_fill_price=Decimal("10"),
+        occurred_at=NOW,
+    )
+    assert report.filled_notional == Decimal("50")
+
+    with pytest.raises(ValidationError, match="positive fill basis"):
+        ExecutionReport(
+            client_order_id=report.client_order_id,
+            venue=report.venue,
+            status=status,
+            occurred_at=NOW,
+        )
+    with pytest.raises(ValidationError, match="average_fill_price"):
+        ExecutionReport(
+            client_order_id=report.client_order_id,
+            venue=report.venue,
+            status=status,
+            filled_quantity=Decimal("1"),
+            occurred_at=NOW,
+        )
+
+
+def test_execution_report_rejects_average_price_without_fill_basis():
+    with pytest.raises(ValidationError, match="positive fill basis"):
+        ExecutionReport(
+            client_order_id="order:trend:SPY:2026-08-23T12:00:00Z",
+            venue=Venue.ALPACA_PAPER,
+            status=OrderStatus.SUBMITTED,
+            average_fill_price=Decimal("10"),
+            occurred_at=NOW,
+        )
+
+
+def test_execution_report_allows_submitted_no_fill_and_canceled_partial_fill():
+    submitted = ExecutionReport(
+        client_order_id="order:trend:SPY:2026-08-23T12:00:00Z",
+        venue=Venue.ALPACA_PAPER,
+        status=OrderStatus.SUBMITTED,
+        occurred_at=NOW,
+    )
+    canceled = ExecutionReport(
+        client_order_id=submitted.client_order_id,
+        venue=submitted.venue,
+        status=OrderStatus.CANCELED,
+        filled_quantity=Decimal("0.5"),
+        average_fill_price=Decimal("10"),
+        occurred_at=NOW,
+    )
+
+    assert submitted.average_fill_price is None
+    assert canceled.filled_quantity == Decimal("0.5")
