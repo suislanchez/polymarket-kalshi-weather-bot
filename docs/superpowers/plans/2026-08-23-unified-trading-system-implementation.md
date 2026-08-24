@@ -151,6 +151,7 @@ This task creates the canonical checkout but does not alter tracked files. Do no
 - Modify: `.env.example`
 - Create: `tests/test_execution_mode.py`
 - Create: `tests/test_unified_config.py`
+- Modify: `tests/test_scheduler_autostart.py`
 
 **Step 1: Write failing mode tests**
 
@@ -181,6 +182,11 @@ assert settings.ACTIVE_PRODUCT_SCOPE == "unified_paper"
 assert settings.TRADING_DATA_ROOT.startswith("/Volumes/Archives/")
 ```
 
+Rename/update the existing weather-only default assertion in
+`tests/test_scheduler_autostart.py` to expect `unified_paper`, while retaining
+the assertions that scheduler autostart is explicit and the legacy BTC
+prediction-market lane is disabled by default.
+
 **Step 2: Run tests to verify RED**
 
 Run:
@@ -205,7 +211,18 @@ def require_paper_mode(mode: str, live_enabled: bool = False) -> None:
         raise ExecutionModeError("Unified trading runtime is paper-only")
 ```
 
-Add settings for `EXECUTION_MODE`, `LIVE_TRADING_ENABLED`, `STOCK_CRYPTO_LANE_ENABLED`, archive roots, initial symbols, limits, Alpaca paper endpoint, and optional Alpaca keys. Call `require_paper_mode` at application startup before database initialization or schedulers.
+Add settings for `EXECUTION_MODE`, `LIVE_TRADING_ENABLED`,
+`STOCK_CRYPTO_LANE_ENABLED`, `TRADING_SYSTEM_ROOT`, `TRADING_DATA_ROOT`,
+`TRADING_ARTIFACTS_ROOT`, `TRADING_LOG_ROOT`, `TRADING_SYMBOL_ALLOWLIST`,
+`MAX_ORDER_NOTIONAL_USD`, `MAX_ORDER_EQUITY_FRACTION`,
+`MAX_SYMBOL_EXPOSURE_FRACTION`, `MAX_GROSS_EXPOSURE_FRACTION`,
+`MAX_CRYPTO_EXPOSURE_FRACTION`, `MAX_DAILY_LOSS_FRACTION`,
+`MAX_MARKET_DATA_AGE_SECONDS`, `GLOBAL_TRADING_KILL_SWITCH`,
+`ALPACA_PAPER_BASE_URL`, and optional `ALPACA_API_KEY` / `ALPACA_API_SECRET`.
+Call `require_paper_mode` at application startup before database initialization
+or schedulers. Defaults must match the approved design: unified-paper scope,
+lane disabled, paper endpoint only, `SPY,QQQ,BTC/USD,ETH/USD`, `$250`, 1%, 10%,
+25%, 10%, 2%, and 60 seconds respectively.
 
 `.env.example` contains names and safe dummy/blank values only. It must not contain a usable credential.
 
@@ -222,7 +239,7 @@ Expected: pass.
 **Step 5: Commit**
 
 ```bash
-git add backend/trading backend/config.py .env.example tests/test_execution_mode.py tests/test_unified_config.py
+git add backend/trading backend/config.py .env.example tests/test_execution_mode.py tests/test_unified_config.py tests/test_scheduler_autostart.py
 git diff --cached --check
 git commit -m "feat: enforce paper-only unified runtime"
 ```
