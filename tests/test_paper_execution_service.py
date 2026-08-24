@@ -462,11 +462,11 @@ def test_risk_rejection_records_only_proposal_and_decision_and_never_calls_adapt
 
 
 def test_approved_quantity_is_the_only_normalized_size(session: Session):
-    proposal = make_proposal(quantity=Decimal("2.5"), notional=None)
+    proposal = make_proposal(quantity=Decimal("0.5"), notional=None)
     decision = RiskDecision(
         proposal_id="proposal-1",
         approved=True,
-        approved_quantity=Decimal("2.25"),
+        approved_quantity=Decimal("0.45"),
         decided_at=NOW,
     )
     service, adapter, _, _, _ = make_service(session, risk=RecordingRisk(decision))
@@ -474,7 +474,7 @@ def test_approved_quantity_is_the_only_normalized_size(session: Session):
     execute(service, proposal)
 
     order = adapter.calls[0][0]
-    assert order.quantity == Decimal("2.25")
+    assert order.quantity == Decimal("0.45")
     assert order.notional is None
 
 
@@ -708,6 +708,118 @@ def test_commit_keeps_completed_replay_without_new_effects(session: Session):
     assert session.scalar(select(func.count()).select_from(UnifiedOrder)) == 1
 
 
+def test_unrelated_rollback_preserves_prior_committed_duplicate_result(
+    session: Session,
+):
+    service, adapter, risk, clock, kill = make_service(session)
+    first_proposal = make_proposal()
+    first_context = make_context()
+    first = service.execute(
+        first_proposal,
+        portfolio=make_portfolio(),
+        context=first_context,
+        limits=make_limits(),
+    )
+    session.commit()
+
+    second_proposal = make_proposal(proposal_id="proposal-2")
+    second_context = make_context(idempotency_key="paper:proposal-2")
+    service.execute(
+        second_proposal,
+        portfolio=make_portfolio(),
+        context=second_context,
+        limits=make_limits(),
+    )
+    session.rollback()
+    counts = (len(adapter.calls), len(risk.calls), clock.calls, kill.calls)
+
+    replay = service.execute(
+        first_proposal,
+        portfolio=make_portfolio(),
+        context=first_context,
+        limits=make_limits(),
+    )
+
+    assert replay is first
+    assert (len(adapter.calls), len(risk.calls), clock.calls, kill.calls) == counts
+    assert session.scalar(select(func.count()).select_from(TradingEvent)) == 5
+    assert session.scalar(select(func.count()).select_from(UnifiedOrder)) == 1
+
+
+def test_nested_rollback_preserves_prior_outer_transaction_duplicate_result(
+    session: Session,
+):
+    service, adapter, risk, clock, kill = make_service(session)
+    first_proposal = make_proposal()
+    first_context = make_context()
+    first = service.execute(
+        first_proposal,
+        portfolio=make_portfolio(),
+        context=first_context,
+        limits=make_limits(),
+    )
+
+    nested = session.begin_nested()
+    second_proposal = make_proposal(proposal_id="proposal-2")
+    second_context = make_context(idempotency_key="paper:proposal-2")
+    service.execute(
+        second_proposal,
+        portfolio=make_portfolio(),
+        context=second_context,
+        limits=make_limits(),
+    )
+    nested.rollback()
+    counts = (len(adapter.calls), len(risk.calls), clock.calls, kill.calls)
+
+    replay = service.execute(
+        first_proposal,
+        portfolio=make_portfolio(),
+        context=first_context,
+        limits=make_limits(),
+    )
+
+    assert replay is first
+    assert (len(adapter.calls), len(risk.calls), clock.calls, kill.calls) == counts
+    assert session.scalar(select(func.count()).select_from(TradingEvent)) == 5
+    assert session.scalar(select(func.count()).select_from(UnifiedOrder)) == 1
+
+
+def test_nested_commit_then_root_rollback_invalidates_all_pending_results(
+    session: Session,
+):
+    service, adapter, _, _, _ = make_service(session)
+    first_proposal = make_proposal()
+    first_context = make_context()
+    first = service.execute(
+        first_proposal,
+        portfolio=make_portfolio(),
+        context=first_context,
+        limits=make_limits(),
+    )
+
+    nested = session.begin_nested()
+    service.execute(
+        make_proposal(proposal_id="proposal-2"),
+        portfolio=make_portfolio(),
+        context=make_context(idempotency_key="paper:proposal-2"),
+        limits=make_limits(),
+    )
+    nested.commit()
+    session.rollback()
+
+    replay = service.execute(
+        first_proposal,
+        portfolio=make_portfolio(),
+        context=first_context,
+        limits=make_limits(),
+    )
+
+    assert replay is not first
+    assert len(adapter.calls) == 3
+    assert session.scalar(select(func.count()).select_from(TradingEvent)) == 5
+    assert session.scalar(select(func.count()).select_from(UnifiedOrder)) == 1
+
+
 def test_adapter_rejection_reason_and_metadata_are_replaced_everywhere(session: Session):
     sentinel = "BROKER_SECRET_SENTINEL"
     source_metadata = {"api_key": sentinel, "nested": {"password": sentinel}}
@@ -815,6 +927,99 @@ def test_valid_exact_risk_decision_is_detached_and_accepted(session: Session):
     assert len(adapter.calls) == 1
     assert result.decision == decision
     assert result.decision is not decision
+
+
+@pytest.mark.parametrize(
+    ("proposal_notional", "approved_notional"),
+    [
+        (Decimal("100.2500"), Decimal("1000")),
+        (Decimal("300"), Decimal("300")),
+    ],
+)
+def test_approved_risk_size_cannot_exceed_proposal_or_active_order_cap(
+    session: Session,
+    proposal_notional: Decimal,
+    approved_notional: Decimal,
+):
+    proposal = make_proposal(notional=proposal_notional)
+    decision = RiskDecision(
+        proposal_id=proposal.proposal_id,
+        approved=True,
+        approved_notional=approved_notional,
+        decided_at=NOW,
+    )
+    service, adapter, risk, _, _ = make_service(
+        session, risk=RecordingRisk(decision)
+    )
+
+    with pytest.raises(PaperExecutionServiceError) as caught:
+        execute(service, proposal)
+
+    assert_sanitized(caught.value, "risk decision invalid")
+    assert len(risk.calls) == 1
+    assert adapter.calls == []
+    assert [event.event_type for event in stored_events(session)] == [
+        "proposal_created"
+    ]
+
+
+@pytest.mark.parametrize("basis", ["notional", "quantity"])
+def test_adapter_fill_cannot_exceed_submitted_order_size(
+    session: Session, basis: str
+):
+    if basis == "notional":
+        proposal = make_proposal(notional=Decimal("100"))
+        decision = RiskDecision(
+            proposal_id=proposal.proposal_id,
+            approved=True,
+            approved_notional=Decimal("100"),
+            decided_at=NOW,
+        )
+    else:
+        proposal = make_proposal(quantity=Decimal("0.4"), notional=None)
+        decision = RiskDecision(
+            proposal_id=proposal.proposal_id,
+            approved=True,
+            approved_quantity=Decimal("0.4"),
+            decided_at=NOW,
+        )
+
+    def oversized_fill(order: NormalizedOrder) -> ExecutionReport:
+        return ExecutionReport(
+            client_order_id=order.client_order_id,
+            venue=order.venue,
+            status=OrderStatus.FILLED,
+            broker_order_id="oversized-paper-fill",
+            filled_quantity=(
+                Decimal("3") if basis == "notional" else Decimal("0.6")
+            ),
+            filled_notional=(
+                Decimal("1500") if basis == "notional" else Decimal("300")
+            ),
+            average_fill_price=Decimal("500"),
+            occurred_at=NOW + timedelta(seconds=1),
+        )
+
+    service, adapter, _, _, _ = make_service(
+        session,
+        adapter=RecordingAdapter(oversized_fill),
+        risk=RecordingRisk(decision),
+    )
+
+    result = execute(service, proposal)
+
+    assert len(adapter.calls) == 1
+    assert result.report.status is OrderStatus.REJECTED
+    assert result.report.rejection_reason == "adapter_invalid_report"
+    assert [event.event_type for event in stored_events(session)] == [
+        "proposal_created",
+        "risk_approved",
+        "order_submitted",
+        "order_rejected",
+    ]
+    projection = session.scalar(select(UnifiedOrder))
+    assert projection.status == OrderStatus.REJECTED.value
+    assert projection.rejection_reason == "adapter_invalid_report"
 
 
 @pytest.mark.parametrize(

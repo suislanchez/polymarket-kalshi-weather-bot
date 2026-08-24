@@ -7,10 +7,11 @@ import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from decimal import Context, DecimalException, localcontext
 from typing import Protocol
 
 from sqlalchemy import event
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, SessionTransaction
 
 from backend.trading.domain import (
     ExecutionReport,
@@ -31,6 +32,9 @@ from backend.trading.risk import (
     RiskLimits,
     evaluate_proposal,
 )
+
+
+_SERVICE_DECIMAL_CONTEXT = Context(prec=128, Emin=-384, Emax=384)
 
 
 class PaperExecutionServiceError(RuntimeError):
@@ -122,9 +126,14 @@ class PaperExecutionService:
         self._kill_switch = kill_switch
         self._append_event = append_event_fn
         self._upsert_projection = upsert_order_projection_fn
-        self._completed: dict[str, tuple[str, PaperExecutionResult]] = {}
-        self._completed_idempotency: dict[str, str] = {}
-        self._rollback_listener_registered = False
+        self._pending_completed: dict[
+            str, tuple[str, PaperExecutionResult, SessionTransaction]
+        ] = {}
+        self._pending_idempotency: dict[str, tuple[str, SessionTransaction]] = {}
+        self._committed_completed: dict[str, tuple[str, PaperExecutionResult]] = {}
+        self._committed_idempotency: dict[str, str] = {}
+        self._transaction_listeners_registered = False
+        self._commit_listener = self._handle_commit
         self._rollback_listener = self._handle_rollback
 
     def execute(
@@ -145,13 +154,22 @@ class PaperExecutionService:
         limits = self._normalize_request_model(limits, RiskLimits)
 
         identity = self._identity(proposal, context.idempotency_key)
-        self._ensure_rollback_listener()
-        prior = self._completed.get(proposal.proposal_id)
+        self._ensure_transaction_listeners()
+        prior = self._pending_completed.get(proposal.proposal_id)
+        if prior is None:
+            prior = self._committed_completed.get(proposal.proposal_id)
         if prior is not None:
             if prior[0] != identity:
                 raise PaperExecutionServiceError("proposal identity conflict")
             return prior[1]
-        prior_proposal_id = self._completed_idempotency.get(context.idempotency_key)
+        pending_proposal = self._pending_idempotency.get(context.idempotency_key)
+        prior_proposal_id = (
+            None if pending_proposal is None else pending_proposal[0]
+        )
+        if prior_proposal_id is None:
+            prior_proposal_id = self._committed_idempotency.get(
+                context.idempotency_key
+            )
         if prior_proposal_id is not None and prior_proposal_id != proposal.proposal_id:
             raise PaperExecutionServiceError("proposal identity conflict")
 
@@ -202,8 +220,9 @@ class PaperExecutionService:
 
         if not decision.approved:
             result = PaperExecutionResult(proposal, decision, None, None)
-            self._completed[proposal.proposal_id] = (identity, result)
-            self._completed_idempotency[context.idempotency_key] = proposal.proposal_id
+            self._cache_pending_result(
+                proposal.proposal_id, context.idempotency_key, identity, result
+            )
             return result
 
         order = self._build_order(proposal, decision, context.idempotency_key, now)
@@ -217,8 +236,9 @@ class PaperExecutionService:
                 now,
                 record,
             )
-            self._completed[proposal.proposal_id] = (identity, result)
-            self._completed_idempotency[context.idempotency_key] = proposal.proposal_id
+            self._cache_pending_result(
+                proposal.proposal_id, context.idempotency_key, identity, result
+            )
             return result
 
         if self._read_kill_switch():
@@ -230,8 +250,9 @@ class PaperExecutionService:
                 now,
                 record,
             )
-            self._completed[proposal.proposal_id] = (identity, result)
-            self._completed_idempotency[context.idempotency_key] = proposal.proposal_id
+            self._cache_pending_result(
+                proposal.proposal_id, context.idempotency_key, identity, result
+            )
             return result
 
         record("order_submitted", now, self._order_payload(order))
@@ -241,9 +262,30 @@ class PaperExecutionService:
         self._upsert_projection(self._session, report)
 
         result = PaperExecutionResult(proposal, decision, order, report)
-        self._completed[proposal.proposal_id] = (identity, result)
-        self._completed_idempotency[context.idempotency_key] = proposal.proposal_id
+        self._cache_pending_result(
+            proposal.proposal_id, context.idempotency_key, identity, result
+        )
         return result
+
+    def _cache_pending_result(
+        self,
+        proposal_id: str,
+        idempotency_key: str,
+        identity: str,
+        result: PaperExecutionResult,
+    ) -> None:
+        failed = False
+        transaction: SessionTransaction | None = None
+        try:
+            transaction = self._session.get_nested_transaction()
+            if transaction is None:
+                transaction = self._session.get_transaction()
+        except Exception:
+            failed = True
+        if failed or transaction is None:
+            raise PaperExecutionServiceError("transaction state invalid") from None
+        self._pending_completed[proposal_id] = (identity, result, transaction)
+        self._pending_idempotency[idempotency_key] = (proposal_id, transaction)
 
     @staticmethod
     def _normalize_request_model(value: object, model_type):
@@ -290,31 +332,81 @@ class PaperExecutionService:
             raise PaperExecutionServiceError("invalid execution request") from None
         return digest
 
-    def _ensure_rollback_listener(self) -> None:
-        if self._rollback_listener_registered:
+    def _ensure_transaction_listeners(self) -> None:
+        if self._transaction_listeners_registered:
             return
         failed = False
-        after_rollback_added = False
+        added: list[tuple[str, Callable[..., object]]] = []
+        listeners = (
+            ("after_commit", self._commit_listener),
+            ("after_soft_rollback", self._rollback_listener),
+        )
         try:
-            event.listen(self._session, "after_rollback", self._rollback_listener)
-            after_rollback_added = True
-            event.listen(self._session, "after_soft_rollback", self._rollback_listener)
+            for event_name, listener in listeners:
+                event.listen(self._session, event_name, listener)
+                added.append((event_name, listener))
         except Exception:
             failed = True
         if failed:
-            if after_rollback_added:
+            for event_name, listener in reversed(added):
                 try:
-                    event.remove(
-                        self._session, "after_rollback", self._rollback_listener
-                    )
+                    event.remove(self._session, event_name, listener)
                 except Exception:
                     pass
             raise PaperExecutionServiceError("transaction listener failed") from None
-        self._rollback_listener_registered = True
+        self._transaction_listeners_registered = True
 
-    def _handle_rollback(self, *unused: object) -> None:
-        self._completed.clear()
-        self._completed_idempotency.clear()
+    def _handle_commit(self, *unused: object) -> None:
+        try:
+            if self._session.in_nested_transaction():
+                return
+        except Exception:
+            return
+        for proposal_id, (identity, result, _) in self._pending_completed.items():
+            self._committed_completed[proposal_id] = (identity, result)
+        for idempotency_key, (
+            proposal_id,
+            _,
+        ) in self._pending_idempotency.items():
+            self._committed_idempotency[idempotency_key] = proposal_id
+        self._pending_completed.clear()
+        self._pending_idempotency.clear()
+
+    def _handle_rollback(self, *event_arguments: object) -> None:
+        rolled_back = event_arguments[-1] if event_arguments else None
+        if not isinstance(rolled_back, SessionTransaction):
+            self._pending_completed.clear()
+            self._pending_idempotency.clear()
+            return
+        for proposal_id, (_, _, transaction) in tuple(
+            self._pending_completed.items()
+        ):
+            if self._transaction_is_within(transaction, rolled_back):
+                self._pending_completed.pop(proposal_id, None)
+        for idempotency_key, (_, transaction) in tuple(
+            self._pending_idempotency.items()
+        ):
+            if self._transaction_is_within(transaction, rolled_back):
+                self._pending_idempotency.pop(idempotency_key, None)
+
+    @staticmethod
+    def _transaction_is_within(
+        transaction: SessionTransaction, ancestor: SessionTransaction
+    ) -> bool:
+        seen: set[int] = set()
+        current: SessionTransaction | None = transaction
+        try:
+            while current is not None:
+                if current is ancestor:
+                    return True
+                marker = id(current)
+                if marker in seen:
+                    return True
+                seen.add(marker)
+                current = current.parent
+        except Exception:
+            return True
+        return False
 
     @staticmethod
     def _event_id(aggregate_id: str, sequence: int, event_type: str) -> str:
@@ -393,6 +485,9 @@ class PaperExecutionService:
             if (
                 type(normalized) is not RiskDecision
                 or normalized.proposal_id != proposal.proposal_id
+                or not self._approved_size_is_valid(
+                    proposal, portfolio, limits, normalized
+                )
             ):
                 raise ValueError
         except Exception:
@@ -400,6 +495,45 @@ class PaperExecutionService:
         if invalid or normalized is None:
             raise PaperExecutionServiceError("risk decision invalid") from None
         return normalized
+
+    @staticmethod
+    def _approved_size_is_valid(
+        proposal: TradeProposal,
+        portfolio: PortfolioState,
+        limits: RiskLimits,
+        decision: RiskDecision,
+    ) -> bool:
+        if not decision.approved:
+            return True
+        try:
+            with localcontext(_SERVICE_DECIMAL_CONTEXT):
+                proposed_notional = proposal.notional
+                if proposed_notional is None:
+                    if proposal.quantity is None:
+                        return False
+                    proposed_notional = proposal.quantity * proposal.reference_price
+
+                approved_notional = decision.approved_notional
+                if approved_notional is None:
+                    if decision.approved_quantity is None:
+                        return False
+                    approved_notional = (
+                        decision.approved_quantity * proposal.reference_price
+                    )
+
+                order_cap = min(
+                    limits.max_order_notional,
+                    portfolio.equity * limits.max_order_equity_fraction,
+                )
+                return (
+                    proposed_notional.is_finite()
+                    and approved_notional.is_finite()
+                    and order_cap.is_finite()
+                    and approved_notional <= proposed_notional
+                    and approved_notional <= order_cap
+                )
+        except (DecimalException, OverflowError):
+            return False
 
     @staticmethod
     def _build_order(
@@ -497,6 +631,8 @@ class PaperExecutionService:
             )
             boundary_encoded = ExecutionReport.model_dump_json(boundary_candidate)
             boundary_report = ExecutionReport.model_validate_json(boundary_encoded)
+            if not self._report_size_is_valid(order, boundary_report):
+                raise ValueError
             normalized = ExecutionReport(
                 client_order_id=boundary_report.client_order_id,
                 venue=boundary_report.venue,
@@ -520,6 +656,41 @@ class PaperExecutionService:
                 order, "adapter_invalid_report", occurred_at
             )
         return normalized
+
+    @staticmethod
+    def _report_size_is_valid(
+        order: NormalizedOrder, report: ExecutionReport
+    ) -> bool:
+        filled_quantity = report.filled_quantity
+        filled_notional = report.filled_notional
+        if filled_quantity == 0 and filled_notional == 0:
+            return True
+        average_fill_price = report.average_fill_price
+        if average_fill_price is None:
+            return False
+        try:
+            with localcontext(_SERVICE_DECIMAL_CONTEXT):
+                quantity_notional = filled_quantity * average_fill_price
+                if (
+                    filled_quantity > 0
+                    and filled_notional > 0
+                    and quantity_notional != filled_notional
+                ):
+                    return False
+                if order.notional is not None:
+                    return (
+                        filled_notional <= order.notional
+                        and quantity_notional <= order.notional
+                    )
+                if order.quantity is None:
+                    return False
+                maximum_notional = order.quantity * average_fill_price
+                return (
+                    filled_quantity <= order.quantity
+                    and filled_notional <= maximum_notional
+                )
+        except (DecimalException, OverflowError):
+            return False
 
     def _reject_before_submit(
         self,
