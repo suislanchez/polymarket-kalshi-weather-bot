@@ -763,6 +763,33 @@ def test_risk_models_reject_unsupported_finite_numeric_bounds(factory, overrides
         factory(**{**base, **overrides})
 
 
+@pytest.mark.parametrize("zero", [Decimal("0E+999999"), Decimal("0E-999999")])
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"daily_realized_pnl": Decimal("0")},
+        {"gross_exposure": Decimal("0")},
+        {"crypto_exposure": Decimal("0")},
+        {"symbol_exposures": {"SPY": Decimal("0")}},
+        {"held_quantities": {"SPY": Decimal("0")}},
+    ],
+)
+def test_portfolio_rejects_extreme_exponent_zero_in_every_zero_capable_field(
+    zero, overrides
+):
+    field = next(iter(overrides))
+    value = {"SPY": zero} if isinstance(overrides[field], dict) else zero
+    with pytest.raises(ValidationError, match="supported"):
+        make_portfolio(**{field: value})
+
+
+@pytest.mark.parametrize("zero", [Decimal("0E+999999"), Decimal("0E-999999")])
+def test_model_copy_rejects_extreme_exponent_zero(zero):
+    state = make_portfolio()
+    with pytest.raises(ValidationError, match="supported"):
+        state.model_copy(update={"gross_exposure": zero})
+
+
 def test_risk_models_accept_explicit_supported_numeric_boundaries():
     largest = Decimal("9.9999999999999999999999999999999999999E+18")
     smallest = Decimal("1E-18")

@@ -69,7 +69,7 @@ class _ImmutableMapping(Mapping[str, Decimal]):
 def _supported_finite(value: Decimal) -> Decimal:
     if not value.is_finite():
         raise ValueError("value must be finite")
-    if value and (
+    if (
         len(value.as_tuple().digits) > _MAX_COEFFICIENT_DIGITS
         or not _MIN_ADJUSTED_EXPONENT
         <= value.adjusted()
