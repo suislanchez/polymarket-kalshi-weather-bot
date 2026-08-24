@@ -12,10 +12,12 @@ from typing import ClassVar
 
 import pytest
 from sqlalchemy import create_engine, func, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from backend.models.database import Base, Signal, Trade, TradingEvent, UnifiedOrder
 from backend.trading.domain import ExecutionReport, OrderStatus, Venue
+from backend.trading import ledger as ledger_module
 from backend.trading.ledger import (
     ZERO_CHAIN_HASH,
     ChainVerification,
@@ -70,6 +72,141 @@ def execution_report(**overrides: object) -> ExecutionReport:
     }
     values.update(overrides)
     return ExecutionReport(**values)
+
+
+class FailingStorageSession:
+    def __init__(self, stage: str, failure: Exception):
+        self.stage = stage
+        self.failure = failure
+        self.calls: list[str] = []
+
+    def scalar(self, statement):
+        self.calls.append("scalar")
+        if self.stage == "query":
+            raise self.failure
+        return None
+
+    def add(self, value):
+        self.calls.append("add")
+        if self.stage == "add":
+            raise self.failure
+
+    def flush(self):
+        self.calls.append("flush")
+        if self.stage == "flush":
+            raise self.failure
+
+
+def call_storage_operation(operation: str, session: object):
+    if operation == "append":
+        return append_event(session, event_input())  # type: ignore[arg-type]
+    return upsert_order_projection(session, execution_report())  # type: ignore[arg-type]
+
+
+def assert_sanitized_exception(
+    error: BaseException, expected_type: type, message: str, secrets: tuple[str, ...]
+):
+    assert type(error) is expected_type
+    assert str(error) == message
+    rendered = f"{str(error)} {repr(error)}"
+    for secret in secrets:
+        assert secret not in rendered
+    assert error.__cause__ is None
+    assert error.__context__ is None
+
+
+@pytest.mark.parametrize("operation", ["append", "projection"])
+@pytest.mark.parametrize("stage", ["query", "add", "flush"])
+def test_storage_dependency_failures_are_fixed_and_fully_sanitized(operation: str, stage: str):
+    sentinel = f"DB_PASSWORD_{operation.upper()}_{stage.upper()}_SENTINEL"
+    fake_session = FailingStorageSession(stage, RuntimeError(sentinel))
+
+    with pytest.raises(BaseException) as caught:
+        call_storage_operation(operation, fake_session)
+
+    storage_error = getattr(ledger_module, "LedgerStorageError", object)
+    assert_sanitized_exception(
+        caught.value,
+        storage_error,
+        "ledger storage failed",
+        (sentinel, "RuntimeError"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("operation", "conflict_message"),
+    [
+        ("append", "ledger event conflicts with existing data"),
+        ("projection", "order projection conflicts with existing data"),
+    ],
+)
+def test_integrity_failures_keep_fixed_conflicts_without_exception_context(
+    operation: str, conflict_message: str
+):
+    sentinel = f"DB_PASSWORD_{operation.upper()}_INTEGRITY_SENTINEL"
+    secret_statement = f"INSERT SECRET_STATEMENT_{sentinel}"
+    secret_parameter = f"SECRET_PARAM_{sentinel}"
+    failure = IntegrityError(
+        secret_statement,
+        {"password": secret_parameter},
+        RuntimeError(f"SECRET_ORIGINAL_{sentinel}"),
+    )
+    fake_session = FailingStorageSession("flush", failure)
+
+    with pytest.raises(BaseException) as caught:
+        call_storage_operation(operation, fake_session)
+
+    assert_sanitized_exception(
+        caught.value,
+        LedgerConflictError,
+        conflict_message,
+        (sentinel, secret_statement, secret_parameter, "SECRET_ORIGINAL"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("operation", "invalid_value", "message"),
+    [
+        ("append", object(), "invalid ledger event"),
+        ("append", event_input(sequence=0), "invalid ledger event"),
+        ("projection", object(), "invalid execution report"),
+    ],
+)
+def test_validation_precedes_any_exploding_storage_dependency(
+    operation: str, invalid_value: object, message: str
+):
+    sentinel = f"DB_PASSWORD_{operation.upper()}_VALIDATION_SENTINEL"
+    fake_session = FailingStorageSession("query", RuntimeError(sentinel))
+
+    with pytest.raises(LedgerValidationError, match=f"^{message}$") as caught:
+        if operation == "append":
+            append_event(fake_session, invalid_value)  # type: ignore[arg-type]
+        else:
+            upsert_order_projection(fake_session, invalid_value)  # type: ignore[arg-type]
+
+    assert fake_session.calls == []
+    assert sentinel not in repr(caught.value)
+
+
+def test_storage_error_is_public_ledger_error_without_expanding_mutation_api():
+    storage_error = getattr(ledger_module, "LedgerStorageError", None)
+    assert isinstance(storage_error, type)
+    assert issubclass(storage_error, LedgerError)
+    assert "LedgerStorageError" in ledger_module.__all__
+    assert "update_event" not in ledger_module.__all__
+    assert "delete_event" not in ledger_module.__all__
+
+
+def test_verify_chain_storage_failure_keeps_database_error_result():
+    sentinel = "DB_PASSWORD_VERIFY_CHAIN_SENTINEL"
+
+    class FailingVerificationSession:
+        def scalars(self, statement):
+            raise RuntimeError(sentinel)
+
+    result = verify_event_chain(FailingVerificationSession(), "order-1")  # type: ignore[arg-type]
+
+    assert result == ChainVerification("order-1", False, 0, "database_error")
 
 
 def canonical_hash(event: TradingEvent) -> str:
@@ -180,7 +317,10 @@ def test_database_uniqueness_conflicts_are_sanitized(
         append_event(session, second)
     assert str(caught.value) == "ledger event conflicts with existing data"
     assert "sqlite" not in str(caught.value).lower()
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
     session.rollback()
+    assert session.scalar(select(func.count()).select_from(TradingEvent)) == 0
 
 
 @pytest.mark.parametrize("sequence", [0, -1, True, 1.0, "1"])

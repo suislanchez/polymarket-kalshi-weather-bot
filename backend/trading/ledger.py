@@ -42,6 +42,10 @@ class LedgerConflictError(LedgerError):
     """A unique ledger identity already exists."""
 
 
+class LedgerStorageError(LedgerError):
+    """A ledger storage dependency failed."""
+
+
 @dataclasses.dataclass(frozen=True, slots=True)
 class LedgerEventInput:
     event_id: str
@@ -204,14 +208,47 @@ def _validated_event(event: object) -> tuple[str, str, int, str, datetime, dict[
         raise LedgerValidationError("invalid ledger event") from None
 
 
+def _storage_scalar(session: Session, statement: object) -> Any:
+    failed = False
+    result = None
+    try:
+        result = session.scalar(statement)
+    except Exception:
+        failed = True
+    if failed:
+        raise LedgerStorageError("ledger storage failed") from None
+    return result
+
+
+def _add_and_flush(
+    session: Session, pending: object | None, conflict_message: str
+) -> None:
+    conflict = False
+    storage_failure = False
+    try:
+        if pending is not None:
+            session.add(pending)
+        session.flush()
+    except IntegrityError:
+        conflict = True
+    except Exception:
+        storage_failure = True
+    if conflict:
+        raise LedgerConflictError(conflict_message) from None
+    if storage_failure:
+        raise LedgerStorageError("ledger storage failed") from None
+
+
 def append_event(session: Session, event: LedgerEventInput) -> TradingEvent:
     """Append one contiguous event and flush it without committing."""
     event_id, aggregate_id, sequence, event_type, occurred_at, payload = _validated_event(event)
 
-    duplicate_id = session.scalar(
+    duplicate_id = _storage_scalar(
+        session,
         sqlalchemy.select(TradingEvent.id).where(TradingEvent.event_id == event_id)
     )
-    duplicate_sequence = session.scalar(
+    duplicate_sequence = _storage_scalar(
+        session,
         sqlalchemy.select(TradingEvent.id).where(
             TradingEvent.aggregate_id == aggregate_id,
             TradingEvent.sequence == sequence,
@@ -220,7 +257,8 @@ def append_event(session: Session, event: LedgerEventInput) -> TradingEvent:
     if duplicate_id is not None or duplicate_sequence is not None:
         raise LedgerConflictError("ledger event conflicts with existing data")
 
-    prior = session.scalar(
+    prior = _storage_scalar(
+        session,
         sqlalchemy.select(TradingEvent)
         .where(TradingEvent.aggregate_id == aggregate_id)
         .order_by(TradingEvent.sequence.desc())
@@ -254,11 +292,7 @@ def append_event(session: Session, event: LedgerEventInput) -> TradingEvent:
         previous_hash=previous_hash,
         event_hash=_hash_document(document),
     )
-    session.add(stored)
-    try:
-        session.flush()
-    except IntegrityError:
-        raise LedgerConflictError("ledger event conflicts with existing data") from None
+    _add_and_flush(session, stored, "ledger event conflicts with existing data")
     return stored
 
 
@@ -341,14 +375,16 @@ def upsert_order_projection(session: Session, report: ExecutionReport) -> Unifie
     except Exception:
         raise LedgerValidationError("invalid execution report") from None
 
-    projection = session.scalar(
+    projection = _storage_scalar(
+        session,
         sqlalchemy.select(UnifiedOrder).where(
             UnifiedOrder.client_order_id == client_order_id
         )
     )
+    pending = None
     if projection is None:
         projection = UnifiedOrder(client_order_id=client_order_id)
-        session.add(projection)
+        pending = projection
 
     projection.venue = venue
     projection.status = status
@@ -361,10 +397,7 @@ def upsert_order_projection(session: Session, report: ExecutionReport) -> Unifie
     )
     projection.occurred_at = occurred_at
     projection.order_metadata = order_metadata
-    try:
-        session.flush()
-    except IntegrityError:
-        raise LedgerConflictError("order projection conflicts with existing data") from None
+    _add_and_flush(session, pending, "order projection conflicts with existing data")
     return projection
 
 
@@ -375,6 +408,7 @@ __all__ = [
     "LedgerError",
     "LedgerEventInput",
     "LedgerSequenceError",
+    "LedgerStorageError",
     "LedgerValidationError",
     "append_event",
     "upsert_order_projection",
