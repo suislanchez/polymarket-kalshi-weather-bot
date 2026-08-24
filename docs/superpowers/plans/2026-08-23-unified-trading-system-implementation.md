@@ -148,6 +148,7 @@ This task creates the canonical checkout but does not alter tracked files. Do no
 - Create: `backend/trading/__init__.py`
 - Create: `backend/trading/execution_mode.py`
 - Modify: `backend/config.py`
+- Modify: `backend/api/main.py`
 - Modify: `.env.example`
 - Create: `tests/test_execution_mode.py`
 - Create: `tests/test_unified_config.py`
@@ -221,8 +222,8 @@ Add settings for `EXECUTION_MODE`, `LIVE_TRADING_ENABLED`,
 `ALPACA_PAPER_BASE_URL`, and optional `ALPACA_API_KEY` / `ALPACA_API_SECRET`.
 Call `require_paper_mode` at application startup before database initialization
 or schedulers. Defaults must match the approved design: unified-paper scope,
-lane disabled, paper endpoint only, `SPY,QQQ,BTC/USD,ETH/USD`, `$250`, 1%, 10%,
-25%, 10%, 2%, and 60 seconds respectively.
+lane disabled, paper endpoint only, `SPY,QQQ,BTC/USD,ETH/USD`, `$250`, 1%, 5%,
+25%, 10%, 1%, and 30 seconds respectively.
 
 `.env.example` contains names and safe dummy/blank values only. It must not contain a usable credential.
 
@@ -239,7 +240,7 @@ Expected: pass.
 **Step 5: Commit**
 
 ```bash
-git add backend/trading backend/config.py .env.example tests/test_execution_mode.py tests/test_unified_config.py tests/test_scheduler_autostart.py
+git add backend/trading backend/config.py backend/api/main.py .env.example tests/test_execution_mode.py tests/test_unified_config.py tests/test_scheduler_autostart.py
 git diff --cached --check
 git commit -m "feat: enforce paper-only unified runtime"
 ```
