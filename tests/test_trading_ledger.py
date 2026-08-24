@@ -125,6 +125,45 @@ def deeply_nested_json(depth: int = 3000) -> dict[str, object]:
     return root
 
 
+def deeply_nested_plain_dict(depth: int) -> dict[str, object]:
+    root: dict[str, object] = {}
+    current = root
+    for _ in range(depth):
+        child: dict[str, object] = {}
+        current["nested"] = child
+        current = child
+    return root
+
+
+def canonical_encoder_boundary_payload() -> dict[str, object]:
+    for depth in range(900, 1051):
+        payload = deeply_nested_plain_dict(depth)
+        try:
+            copied_payload = ledger_module._plain_json_object(payload)
+        except RecursionError:
+            continue
+        canonical_document = ledger_module._event_document(
+            event_id="event-1",
+            aggregate_id="order-1",
+            sequence=1,
+            event_type="order_submitted",
+            occurred_at=NOW,
+            payload=copied_payload,
+            previous_hash=ZERO_CHAIN_HASH,
+        )
+        try:
+            json.dumps(
+                canonical_document,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                allow_nan=False,
+            )
+        except RecursionError:
+            return payload
+    raise AssertionError("no defensive-copy/canonical-encoder recursion boundary found")
+
+
 @pytest.mark.parametrize("operation", ["append", "projection"])
 @pytest.mark.parametrize("stage", ["query", "add", "flush"])
 def test_storage_dependency_failures_are_fixed_and_fully_sanitized(operation: str, stage: str):
@@ -232,6 +271,28 @@ def test_event_validation_failures_clear_hostile_exception_context_before_storag
         (sentinel, "RecursionError"),
     )
     assert fake_session.calls == []
+
+
+def test_event_canonical_encoder_failure_is_sanitized_before_storage():
+    payload = canonical_encoder_boundary_payload()
+
+    fake_session = FailingStorageSession("never", RuntimeError("storage must stay untouched"))
+    with pytest.raises(BaseException) as caught:
+        append_event(fake_session, event_input(payload=payload))  # type: ignore[arg-type]
+
+    assert_sanitized_exception(
+        caught.value,
+        LedgerValidationError,
+        "invalid ledger event",
+        ("RecursionError", "maximum recursion depth"),
+    )
+    assert fake_session.calls == []
+
+
+def test_event_well_below_encoder_boundary_keeps_canonical_hash(session: Session):
+    stored = append_event(session, event_input(payload=deeply_nested_plain_dict(100)))
+
+    assert stored.event_hash == canonical_hash(stored)
 
 
 @pytest.mark.parametrize("failure_kind", ["cyclic", "deep"])
@@ -366,7 +427,11 @@ def test_second_event_links_to_first_and_hash_is_deterministic(session: Session)
             sequence=2,
             event_type="order_acknowledged",
             occurred_at=NOW + timedelta(seconds=1),
-            payload={"broker_order_id": "paper-123", "unicode": "café"},
+            payload={
+                "unicode": "café",
+                "negative_zero": -0.0,
+                "broker_order_id": "paper-123",
+            },
         ),
     )
 

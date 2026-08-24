@@ -181,15 +181,18 @@ def _event_document(
     }
 
 
-def _hash_document(document: dict[str, object]) -> str:
-    encoded = json.dumps(
-        document,
+def _encode_json(value: object) -> bytes:
+    return json.dumps(
+        value,
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=True,
         allow_nan=False,
     ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+
+
+def _hash_document(document: dict[str, object]) -> str:
+    return hashlib.sha256(_encode_json(document)).hexdigest()
 
 
 def _validated_event(event: object) -> tuple[str, str, int, str, datetime, dict[str, object]]:
@@ -205,6 +208,17 @@ def _validated_event(event: object) -> tuple[str, str, int, str, datetime, dict[
         event_type = _nonblank_string(event.event_type)
         occurred_at = _utc_datetime(event.occurred_at)
         payload = _plain_json_object(event.payload)
+        _encode_json(
+            _event_document(
+                event_id=event_id,
+                aggregate_id=aggregate_id,
+                sequence=event.sequence,
+                event_type=event_type,
+                occurred_at=occurred_at,
+                payload=payload,
+                previous_hash=ZERO_CHAIN_HASH,
+            )
+        )
         validated = (event_id, aggregate_id, event.sequence, event_type, occurred_at, payload)
     except Exception:
         validation_failed = True
@@ -396,6 +410,7 @@ def upsert_order_projection(session: Session, report: ExecutionReport) -> Unifie
         client_order_id = _nonblank_string(report.client_order_id)
         occurred_at = _utc_datetime(report.occurred_at)
         order_metadata = _domain_json_object(report.metadata)
+        _encode_json(order_metadata)
         venue = _nonblank_string(report.venue.value)
         status = _nonblank_string(report.status.value)
         broker_order_id = report.broker_order_id
