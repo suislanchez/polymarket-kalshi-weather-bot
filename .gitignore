@@ -57,3 +57,6 @@ logs/
 htmlcov/
 .pytest_cache/
 *.pem
+
+# Scraper cache — never commit (handoff constraint: do not stage .firecrawl/)
+.firecrawl/
