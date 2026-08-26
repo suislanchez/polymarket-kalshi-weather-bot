@@ -208,6 +208,7 @@ class PaperExecutionService:
 
         identity = self._identity(proposal, context.idempotency_key)
         self._ensure_transaction_listeners()
+        self._discard_pending_if_session_inactive()
         prior = self._pending_completed.get(proposal.proposal_id)
         if prior is None:
             prior = self._committed_completed.get(proposal.proposal_id)
@@ -490,6 +491,30 @@ class PaperExecutionService:
             except Exception:
                 discarded = True
         if not discarded:
+            return
+        self._pending_completed.clear()
+        self._pending_idempotency.clear()
+
+    def _discard_pending_if_session_inactive(self) -> None:
+        """Drop pending replay state when the session is in pending-rollback state.
+
+        A failed ``Session.flush()`` runs inside a flush SUBTRANSACTION. Its rollback
+        walks up and issues a real rollback on the ROOT connection -- discarding every
+        write made in the root -- but only the subtransaction is closed. Both
+        ``after_transaction_end`` and ``after_soft_rollback`` are therefore dispatched
+        with the subtransaction, so neither the root-end guard nor the subtree guard
+        matches and pending results outlive the ledger rows behind them.
+
+        ``Session.is_active`` is false in exactly that state and true for every case the
+        listeners already handle correctly, including savepoint release.
+        """
+
+        inactive = False
+        try:
+            inactive = self._session.is_active is False
+        except Exception:
+            inactive = True
+        if not inactive:
             return
         self._pending_completed.clear()
         self._pending_idempotency.clear()

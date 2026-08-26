@@ -11,7 +11,8 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy import create_engine
 
@@ -1035,6 +1036,56 @@ def test_session_discard_after_savepoint_release_still_invalidates_pending_repla
     assert len(adapter.calls) == 3
     assert session.scalar(select(func.count()).select_from(TradingEvent)) == 5
     assert session.scalar(select(func.count()).select_from(UnifiedOrder)) == 1
+
+
+@pytest.mark.parametrize("inside_savepoint", [False, True])
+def test_flush_failure_discards_pending_replay_instead_of_returning_phantom(
+    session: Session, inside_savepoint: bool
+):
+    service, adapter, risk, _, _ = make_service(session)
+    first = execute(service)
+    assert first.report.status is OrderStatus.FILLED
+    assert len(stored_events(session)) == 5
+
+    remaining = {"failures": 1}
+
+    @event.listens_for(session.get_bind(), "before_cursor_execute")
+    def fail_next_event_insert(conn, cursor, statement, parameters, context, executemany):
+        lowered = statement.lower().lstrip()
+        if (
+            lowered.startswith("insert")
+            and "trading_events" in lowered
+            and remaining["failures"]
+        ):
+            remaining["failures"] -= 1
+            raise OperationalError("insert", {}, Exception("database is locked"))
+
+    if inside_savepoint:
+        session.begin_nested()
+
+    with pytest.raises((PaperExecutionServiceError, LedgerStorageError)):
+        service.execute(
+            make_proposal(proposal_id="proposal-2"),
+            portfolio=make_portfolio(),
+            context=make_context(idempotency_key="paper:proposal-2"),
+            limits=make_limits(),
+        )
+
+    # The failed flush rolled the root transaction back at the DBAPI level, so every
+    # ledger row written for proposal-1 is gone even though no listener saw the root end.
+    assert session.is_active is False
+
+    adapter_calls = len(adapter.calls)
+
+    # Replaying proposal-1 must never hand back the discarded result.
+    replayed = None
+    try:
+        replayed = execute(service)
+    except (PaperExecutionServiceError, LedgerStorageError):
+        replayed = None
+
+    assert replayed is None
+    assert len(adapter.calls) == adapter_calls
 
 
 def test_adapter_rejection_reason_and_metadata_are_replaced_everywhere(session: Session):
