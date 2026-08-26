@@ -187,6 +187,7 @@ class PaperExecutionService:
         self._transaction_listeners_registered = False
         self._commit_listener = self._handle_commit
         self._rollback_listener = self._handle_rollback
+        self._transaction_end_listener = self._handle_transaction_end
 
     def execute(
         self,
@@ -419,6 +420,7 @@ class PaperExecutionService:
         listeners = (
             ("after_commit", self._commit_listener),
             ("after_soft_rollback", self._rollback_listener),
+            ("after_transaction_end", self._transaction_end_listener),
         )
         try:
             for event_name, listener in listeners:
@@ -467,6 +469,30 @@ class PaperExecutionService:
         ):
             if self._transaction_is_within(transaction, rolled_back):
                 self._pending_idempotency.pop(idempotency_key, None)
+
+    def _handle_transaction_end(self, *event_arguments: object) -> None:
+        """Invalidate pending replay state when a root transaction is discarded.
+
+        ``after_commit`` promotes pending results before this event fires, and
+        ``after_soft_rollback`` clears a rolled-back subtree. Neither is emitted by
+        ``Session.close()`` or ``Session.reset()``, which discard the transaction
+        outright. Anything still pending once the root transaction ends therefore has
+        no durable ledger behind it and must never be replayed.
+        """
+
+        ended = event_arguments[-1] if event_arguments else None
+        discarded = False
+        if not isinstance(ended, SessionTransaction):
+            discarded = True
+        else:
+            try:
+                discarded = ended.nested is False and ended.parent is None
+            except Exception:
+                discarded = True
+        if not discarded:
+            return
+        self._pending_completed.clear()
+        self._pending_idempotency.clear()
 
     @staticmethod
     def _transaction_is_within(

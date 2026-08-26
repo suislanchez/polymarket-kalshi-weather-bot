@@ -969,6 +969,74 @@ def test_nested_commit_then_root_rollback_invalidates_all_pending_results(
     assert session.scalar(select(func.count()).select_from(UnifiedOrder)) == 1
 
 
+@pytest.mark.parametrize("discard", ["close", "reset"])
+def test_session_discard_clears_completed_replay_and_reexecutes_the_proposal(
+    session: Session, discard: str
+):
+    service, adapter, risk, clock, kill = make_service(session)
+    first = execute(service)
+    assert len(stored_events(session)) == 5
+
+    getattr(session, discard)()
+
+    assert session.scalar(select(func.count()).select_from(TradingEvent)) == 0
+    assert session.scalar(select(func.count()).select_from(UnifiedOrder)) == 0
+
+    second = execute(service)
+
+    assert second is not first
+    assert len(adapter.calls) == 2
+    assert len(risk.calls) == 2
+    assert clock.calls == 2
+    assert kill.calls == 4
+    assert [event.event_type for event in stored_events(session)] == [
+        "proposal_created",
+        "risk_approved",
+        "order_submitted",
+        "order_acknowledged",
+        "order_filled",
+    ]
+    assert verify_event_chain(session, "proposal-1").valid is True
+    assert session.scalar(select(func.count()).select_from(UnifiedOrder)) == 1
+
+
+@pytest.mark.parametrize("discard", ["close", "reset"])
+def test_session_discard_after_savepoint_release_still_invalidates_pending_replay(
+    session: Session, discard: str
+):
+    service, adapter, _, _, _ = make_service(session)
+    first_proposal = make_proposal()
+    first_context = make_context()
+    first = service.execute(
+        first_proposal,
+        portfolio=make_portfolio(),
+        context=first_context,
+        limits=make_limits(),
+    )
+
+    nested = session.begin_nested()
+    service.execute(
+        make_proposal(proposal_id="proposal-2"),
+        portfolio=make_portfolio(),
+        context=make_context(idempotency_key="paper:proposal-2"),
+        limits=make_limits(),
+    )
+    nested.commit()
+    getattr(session, discard)()
+
+    replay = service.execute(
+        first_proposal,
+        portfolio=make_portfolio(),
+        context=first_context,
+        limits=make_limits(),
+    )
+
+    assert replay is not first
+    assert len(adapter.calls) == 3
+    assert session.scalar(select(func.count()).select_from(TradingEvent)) == 5
+    assert session.scalar(select(func.count()).select_from(UnifiedOrder)) == 1
+
+
 def test_adapter_rejection_reason_and_metadata_are_replaced_everywhere(session: Session):
     sentinel = "BROKER_SECRET_SENTINEL"
     source_metadata = {"api_key": sentinel, "nested": {"password": sentinel}}
