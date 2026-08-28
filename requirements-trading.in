@@ -1,0 +1,14 @@
+# Unified paper-trading runtime dependencies, isolated from the weather/API stack.
+#
+# LumiBot is GPL-3.0. It is consumed as an unmodified, unvendored dependency and
+# the current use is private/internal. Review the GPL implications before
+# distributing any LumiBot-combined work.
+#
+# LumiBot is a strategy/backtest framework here, not an execution path: orders
+# route through PaperExecutionService and the deterministic risk gate. No broker
+# is constructed at import time and no credentials are required.
+#
+# Compile with:
+#   env -u PYTHONPATH "$ENVS/unified-trading-py311/bin/pip-compile" \
+#       requirements-trading.in --output-file requirements-trading.txt
+lumibot

@@ -263,3 +263,20 @@ This is a **simulation tool** for educational purposes. It does not place real t
 ## License
 
 MIT - do whatever you want with it.
+
+## Trading runtime dependencies (Task 8 — DEFERRED)
+
+`requirements-trading.in` / `requirements-trading.txt` pin the LumiBot paper-trading runtime.
+The compiled tree resolves to **lumibot==4.5.86** with alpaca-py==0.44.0 (310 pins).
+
+**LumiBot is GPL-3.0.** It is consumed as an unmodified, unvendored dependency; current use is
+private/internal. Review the GPL implications before distributing any LumiBot-combined work.
+
+**These pins are NOT installed.** Installing them into the shared environment would change 19
+already-installed packages (including a breaking numpy 1 -> 2 upgrade and a certifi downgrade),
+introduce 25 known vulnerabilities, and pull an LLM stack (chromadb, langgraph, litellm) into the
+trading dependency tree. See `docs/blockers/2026-08-28-lumibot-dependency.md` for the full
+measurement and the recorded options.
+
+LumiBot is not required for the adapter work: `backend/trading/adapters/` takes an injected
+client factory, and its tests use fakes with no network and no credentials.
