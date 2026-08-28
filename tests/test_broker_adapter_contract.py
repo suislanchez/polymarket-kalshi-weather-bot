@@ -1799,6 +1799,7 @@ ALLOWED_ADAPTER_IMPORTS = {
     "decimal",
     "hashlib",
     "json",
+    "backend.trading.adapters.alpaca_paper",
     "backend.trading.adapters.base",
     "backend.trading.adapters.fake",
     "backend.trading.domain",
@@ -1834,7 +1835,12 @@ def test_adapter_source_policy_rejects_previously_false_green_imports(module):
 def test_adapter_sources_have_only_exact_allowed_dependencies_and_no_effect_calls():
     root = Path(__file__).parents[1]
     adapter_files = sorted((root / "backend" / "trading" / "adapters").glob("*.py"))
-    assert [path.name for path in adapter_files] == ["__init__.py", "base.py", "fake.py"]
+    assert [path.name for path in adapter_files] == [
+        "__init__.py",
+        "alpaca_paper.py",
+        "base.py",
+        "fake.py",
+    ]
     for path in adapter_files:
         source = path.read_text(encoding="utf-8")
         assert adapter_source_policy_violations(source) == [], path
@@ -1863,3 +1869,61 @@ def test_fills_do_not_mutate_accounting_or_positions():
     submit(adapter)
     after = adapter.get_account_snapshot()
     assert before.model_copy(update={"captured_at": after.captured_at, "positions": after.positions}) == after
+
+
+def test_alpaca_paper_adapter_satisfies_the_shared_contract_without_network():
+    """The guarded Alpaca adapter is contract-compatible using an injected fake client."""
+    from datetime import datetime, timezone
+
+    from backend.trading.adapters.alpaca_paper import (
+        PAPER_BASE_URL,
+        AlpacaPaperAdapter,
+        AlpacaPaperAdapterError,
+    )
+
+    class _Client:
+        def get_account(self):
+            raise AssertionError("not called")
+
+        def list_positions(self):
+            return []
+
+        def submit_order(self, **_payload):
+            raise AssertionError("not called")
+
+        def cancel_order_by_client_id(self, client_order_id):
+            raise AssertionError("not called")
+
+        def get_order_by_client_id(self, client_order_id):
+            return None
+
+        def list_orders(self, *, limit=100):
+            return []
+
+    adapter = AlpacaPaperAdapter(
+        client_factory=lambda **_kw: _Client(),
+        base_url=PAPER_BASE_URL,
+        execution_mode="paper",
+        api_key="",
+        api_secret="",
+        clock=lambda: datetime(2026, 8, 28, tzinfo=timezone.utc),
+    )
+
+    assert isinstance(adapter, BrokerAdapter)
+    assert adapter.paper_only is True
+    assert isinstance(adapter.name, str) and adapter.name.strip()
+    assert adapter.list_positions() == ()
+    assert adapter.get_order("paper:absent") is None
+    assert adapter.list_recent_orders() == ()
+    assert issubclass(AlpacaPaperAdapterError, BrokerAdapterError)
+
+    # A live endpoint must be refused before any client is built.
+    with pytest.raises(AlpacaPaperAdapterError):
+        AlpacaPaperAdapter(
+            client_factory=lambda **_kw: _Client(),
+            base_url="https://api.alpaca.markets",
+            execution_mode="paper",
+            api_key="",
+            api_secret="",
+            clock=lambda: datetime(2026, 8, 28, tzinfo=timezone.utc),
+        )
