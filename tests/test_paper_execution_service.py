@@ -22,12 +22,18 @@ from backend.trading.domain import (
     ExecutionReport,
     NormalizedOrder,
     OrderStatus,
+    OrderType,
     RiskDecision,
     Side,
     TradeProposal,
     Venue,
 )
-from backend.trading.ledger import LedgerStorageError, verify_event_chain
+from backend.trading.ledger import (
+    LedgerEventInput,
+    LedgerStorageError,
+    append_event,
+    verify_event_chain,
+)
 from backend.trading.risk import PortfolioState, RiskContext, RiskLimits
 from backend.trading.service import (
     PaperExecutionResult,
@@ -1086,6 +1092,281 @@ def test_flush_failure_discards_pending_replay_instead_of_returning_phantom(
 
     assert replayed is None
     assert len(adapter.calls) == adapter_calls
+
+
+
+
+def _report_with(broker_order_id: str, status: OrderStatus = OrderStatus.FILLED):
+    def factory(order: NormalizedOrder) -> ExecutionReport:
+        partial = status is OrderStatus.PARTIALLY_FILLED
+        return ExecutionReport(
+            client_order_id=order.client_order_id,
+            venue=order.venue,
+            status=status,
+            broker_order_id=broker_order_id,
+            filled_quantity=Decimal("0.1000") if partial else Decimal("0.2000"),
+            filled_notional=Decimal("50.1250") if partial else Decimal("100.2500"),
+            average_fill_price=Decimal("501.2500"),
+            occurred_at=NOW + timedelta(seconds=1),
+            metadata={"adapter": "recording-paper"},
+        )
+
+    return factory
+
+
+def test_discarded_savepoint_replay_is_refused_after_conflicting_limit_writer(
+    session: Session,
+):
+    service_a, adapter_a, _, _, _ = make_service(session)
+    proposal_a = make_proposal(
+        order_type=OrderType.LIMIT, limit_price=Decimal("400.00")
+    )
+    nested = session.begin_nested()
+    service_a.execute(
+        proposal_a,
+        portfolio=make_portfolio(),
+        context=make_context(),
+        limits=make_limits(),
+    )
+    nested.close()
+    session.commit()
+    assert session.scalar(select(func.count()).select_from(TradingEvent)) == 0
+
+    service_b, adapter_b, _, _, _ = make_service(session)
+    service_b.execute(
+        make_proposal(order_type=OrderType.LIMIT, limit_price=Decimal("600.00")),
+        portfolio=make_portfolio(),
+        context=make_context(),
+        limits=make_limits(),
+    )
+    session.commit()
+    assert session.scalar(select(func.count()).select_from(TradingEvent)) == 5
+
+    adapter_calls = len(adapter_a.calls)
+    with pytest.raises(PaperExecutionServiceError) as caught:
+        service_a.execute(
+            proposal_a,
+            portfolio=make_portfolio(),
+            context=make_context(),
+            limits=make_limits(),
+        )
+    assert_sanitized(caught.value, "ledger replay conflict", "400.00")
+    assert len(adapter_a.calls) == adapter_calls
+    assert len(adapter_b.calls) == 1
+
+
+def test_discarded_replay_is_refused_when_equal_shape_writer_owns_the_ledger(
+    session: Session,
+):
+    service_a, adapter_a, _, _, _ = make_service(session)
+    nested = session.begin_nested()
+    first = execute(service_a)
+    nested.close()
+    session.commit()
+
+    service_b, adapter_b, _, _, _ = make_service(
+        session, adapter=RecordingAdapter(report_factory=_report_with("paper-broker-B"))
+    )
+    execute(service_b)
+    session.commit()
+
+    with pytest.raises(PaperExecutionServiceError) as caught:
+        execute(service_a)
+    assert_sanitized(caught.value, "ledger replay conflict", "paper-broker-1")
+    assert first.report.broker_order_id == "paper-broker-1"
+    assert len(adapter_a.calls) == 1
+    assert len(adapter_b.calls) == 1
+
+
+def test_discarded_filled_replay_is_refused_over_durable_partial_fill(
+    session: Session,
+):
+    service_a, adapter_a, _, _, _ = make_service(session)
+    nested = session.begin_nested()
+    execute(service_a)
+    nested.close()
+    session.commit()
+
+    service_b, _, _, _, _ = make_service(
+        session,
+        adapter=RecordingAdapter(
+            report_factory=_report_with(
+                "paper-broker-B", status=OrderStatus.PARTIALLY_FILLED
+            )
+        ),
+    )
+    execute(service_b)
+    session.commit()
+    terminal = stored_events(session)[-1]
+    assert terminal.event_type == "order_partially_filled"
+
+    with pytest.raises(PaperExecutionServiceError) as caught:
+        execute(service_a)
+    assert_sanitized(caught.value, "ledger replay conflict")
+    assert len(adapter_a.calls) == 1
+
+
+def test_discarded_savepoint_result_reexecutes_when_no_writer_conflicts(
+    session: Session,
+):
+    service, adapter, risk, _, _ = make_service(session)
+    nested = session.begin_nested()
+    first = execute(service)
+    nested.close()
+    session.commit()
+    assert session.scalar(select(func.count()).select_from(TradingEvent)) == 0
+
+    second = execute(service)
+
+    assert second is not first
+    assert second.report.status is OrderStatus.FILLED
+    assert len(adapter.calls) == 2
+    assert len(risk.calls) == 2
+    assert [event.event_type for event in stored_events(session)] == [
+        "proposal_created",
+        "risk_approved",
+        "order_submitted",
+        "order_acknowledged",
+        "order_filled",
+    ]
+    assert verify_event_chain(session, "proposal-1").valid is True
+
+
+def test_replay_survives_legitimate_lifecycle_extension_beyond_terminal_event(
+    session: Session,
+):
+    service, adapter, _, _, _ = make_service(session)
+    first = execute(service)
+    session.commit()
+
+    append_event(
+        session,
+        LedgerEventInput(
+            event_id="paper-event-settlement-proposal-1-6",
+            aggregate_id="proposal-1",
+            sequence=6,
+            event_type="order_settled",
+            occurred_at=NOW + timedelta(seconds=3),
+            payload={"proposal_id": "proposal-1", "settled": True},
+        ),
+    )
+    session.commit()
+
+    replay = execute(service)
+
+    assert replay == first
+    assert replay is not first
+    assert len(adapter.calls) == 1
+    assert session.scalar(select(func.count()).select_from(TradingEvent)) == 6
+
+
+def test_savepoint_flush_failure_defers_then_serves_root_replay_after_recovery(
+    session: Session,
+):
+    service, adapter, _, _, _ = make_service(session)
+    first = execute(service)
+    assert len(stored_events(session)) == 5
+
+    remaining = {"failures": 1}
+
+    @event.listens_for(session.get_bind(), "before_cursor_execute")
+    def fail_next_event_insert(conn, cursor, statement, parameters, context, executemany):
+        lowered = statement.lower().lstrip()
+        if (
+            lowered.startswith("insert")
+            and "trading_events" in lowered
+            and remaining["failures"]
+        ):
+            remaining["failures"] -= 1
+            raise OperationalError("insert", {}, Exception("database is locked"))
+
+    nested = session.begin_nested()
+    with pytest.raises((PaperExecutionServiceError, LedgerStorageError)):
+        service.execute(
+            make_proposal(proposal_id="proposal-2"),
+            portfolio=make_portfolio(),
+            context=make_context(idempotency_key="paper:proposal-2"),
+            limits=make_limits(),
+        )
+    assert session.is_active is False
+
+    with pytest.raises(PaperExecutionServiceError) as deferred:
+        execute(service)
+    assert_sanitized(deferred.value, "replay durability unverifiable")
+    assert len(adapter.calls) == 1
+
+    nested.rollback()
+    assert session.is_active is True
+
+    replay = execute(service)
+
+    assert replay == first
+    assert replay is not first
+    assert len(adapter.calls) == 1
+    assert [event.event_type for event in stored_events(session)] == [
+        "proposal_created",
+        "risk_approved",
+        "order_submitted",
+        "order_acknowledged",
+        "order_filled",
+    ]
+
+
+def test_replay_verification_ignores_caller_staged_dirty_state(session: Session):
+    service, adapter, _, _, _ = make_service(session)
+    first = execute(service)
+    session.commit()
+
+    poison = TradingEvent(
+        event_id="poison-event",
+        aggregate_id="poison",
+        sequence=None,
+        event_type="poison",
+    )
+    session.add(poison)
+    try:
+        replay = execute(service)
+    finally:
+        session.expunge(poison)
+
+    assert replay == first
+    assert len(adapter.calls) == 1
+
+
+def test_ledger_payloads_record_identity_digest_and_limit_price(session: Session):
+    service, _, _, _, _ = make_service(session)
+    service.execute(
+        make_proposal(order_type=OrderType.LIMIT, limit_price=Decimal("400.00")),
+        portfolio=make_portfolio(),
+        context=make_context(),
+        limits=make_limits(),
+    )
+    events = stored_events(session)
+    identity = events[0].payload["identity"]
+    assert type(identity) is str
+    assert len(identity) == 64
+    assert set(identity) <= set("0123456789abcdef")
+    assert events[2].payload["limit_price"] == "400.00"
+    assert "must-not-be-copied" not in json.dumps([e.payload for e in events])
+
+    other_service, _, _, _, _ = make_service(session)
+    other_service.execute(
+        make_proposal(
+            proposal_id="proposal-2",
+            order_type=OrderType.LIMIT,
+            limit_price=Decimal("400.00"),
+            rationale="a different rationale",
+        ),
+        portfolio=make_portfolio(),
+        context=make_context(idempotency_key="paper:proposal-2"),
+        limits=make_limits(),
+    )
+    other_created = [
+        e for e in stored_events(session) if e.aggregate_id == "proposal-2"
+    ][0]
+    other_identity = other_created.payload["identity"]
+    assert other_identity != identity
+
 
 
 def test_adapter_rejection_reason_and_metadata_are_replaced_everywhere(session: Session):

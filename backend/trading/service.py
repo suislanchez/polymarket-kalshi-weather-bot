@@ -22,8 +22,10 @@ from decimal import (
 )
 from typing import Protocol
 
-from sqlalchemy import event
+from sqlalchemy import event, select
 from sqlalchemy.orm import Session, SessionTransaction
+
+from backend.models.database import TradingEvent
 
 from backend.trading.domain import (
     ExecutionReport,
@@ -34,6 +36,7 @@ from backend.trading.domain import (
     Venue,
 )
 from backend.trading.ledger import (
+    LedgerConflictError,
     LedgerEventInput,
     append_event,
     upsert_order_projection,
@@ -179,10 +182,19 @@ class PaperExecutionService:
         self._append_event = append_event_fn
         self._upsert_projection = upsert_order_projection_fn
         self._pending_completed: dict[
-            str, tuple[str, PaperExecutionResult, SessionTransaction]
+            str,
+            tuple[
+                str,
+                PaperExecutionResult,
+                tuple[str, int, str, str, str] | None,
+                SessionTransaction,
+            ],
         ] = {}
         self._pending_idempotency: dict[str, tuple[str, SessionTransaction]] = {}
-        self._committed_completed: dict[str, tuple[str, PaperExecutionResult]] = {}
+        self._committed_completed: dict[
+            str,
+            tuple[str, PaperExecutionResult, tuple[str, int, str, str, str] | None],
+        ] = {}
         self._committed_idempotency: dict[str, str] = {}
         self._transaction_listeners_registered = False
         self._commit_listener = self._handle_commit
@@ -208,14 +220,23 @@ class PaperExecutionService:
 
         identity = self._identity(proposal, context.idempotency_key)
         self._ensure_transaction_listeners()
-        self._discard_pending_if_session_inactive()
+        stale_replay_dropped = False
         prior = self._pending_completed.get(proposal.proposal_id)
         if prior is None:
             prior = self._committed_completed.get(proposal.proposal_id)
         if prior is not None:
             if prior[0] != identity:
                 raise PaperExecutionServiceError("proposal identity conflict")
-            return self._detach_result(prior[1])
+            durability = self._verify_replay_durability(prior[2])
+            if durability == "found":
+                return self._detach_result(prior[1])
+            if durability != "absent":
+                raise PaperExecutionServiceError(
+                    "replay durability unverifiable"
+                ) from None
+            self._pending_completed.pop(proposal.proposal_id, None)
+            self._committed_completed.pop(proposal.proposal_id, None)
+            stale_replay_dropped = True
         pending_proposal = self._pending_idempotency.get(context.idempotency_key)
         prior_proposal_id = (
             None if pending_proposal is None else pending_proposal[0]
@@ -240,6 +261,7 @@ class PaperExecutionService:
         )
 
         sequence = 0
+        terminal_row: dict[str, object] = {"key": None}
 
         def record(event_type: str, occurred_at: datetime, payload: dict[str, object]) -> None:
             nonlocal sequence
@@ -247,7 +269,7 @@ class PaperExecutionService:
             event_id = self._event_id(
                 proposal.proposal_id, next_sequence, event_type
             )
-            self._append_event(
+            stored = self._append_event(
                 self._session,
                 LedgerEventInput(
                     event_id=event_id,
@@ -259,12 +281,33 @@ class PaperExecutionService:
                 ),
             )
             sequence = next_sequence
+            try:
+                stored_hash = stored.event_hash
+                if type(stored_hash) is not str or len(stored_hash) != 64:
+                    raise ValueError
+                terminal_row["key"] = (
+                    proposal.proposal_id,
+                    next_sequence,
+                    event_type,
+                    event_id,
+                    stored_hash,
+                )
+            except Exception:
+                terminal_row["key"] = None
 
-        record(
-            "proposal_created",
-            proposal.created_at,
-            self._proposal_payload(proposal),
-        )
+        replay_conflict = False
+        try:
+            record(
+                "proposal_created",
+                proposal.created_at,
+                self._proposal_payload(proposal, identity),
+            )
+        except LedgerConflictError:
+            if not stale_replay_dropped:
+                raise
+            replay_conflict = True
+        if replay_conflict:
+            raise PaperExecutionServiceError("ledger replay conflict") from None
         decision = self._evaluate_risk(proposal, portfolio, risk_context, limits)
         record(
             "risk_approved" if decision.approved else "risk_rejected",
@@ -275,7 +318,11 @@ class PaperExecutionService:
         if not decision.approved:
             result = PaperExecutionResult(proposal, decision, None, None)
             self._cache_pending_result(
-                proposal.proposal_id, context.idempotency_key, identity, result
+                proposal.proposal_id,
+                context.idempotency_key,
+                identity,
+                result,
+                terminal_row["key"],
             )
             return result
 
@@ -291,7 +338,11 @@ class PaperExecutionService:
                 record,
             )
             self._cache_pending_result(
-                proposal.proposal_id, context.idempotency_key, identity, result
+                proposal.proposal_id,
+                context.idempotency_key,
+                identity,
+                result,
+                terminal_row["key"],
             )
             return result
 
@@ -305,7 +356,11 @@ class PaperExecutionService:
                 record,
             )
             self._cache_pending_result(
-                proposal.proposal_id, context.idempotency_key, identity, result
+                proposal.proposal_id,
+                context.idempotency_key,
+                identity,
+                result,
+                terminal_row["key"],
             )
             return result
 
@@ -317,7 +372,11 @@ class PaperExecutionService:
 
         result = PaperExecutionResult(proposal, decision, order, report)
         self._cache_pending_result(
-            proposal.proposal_id, context.idempotency_key, identity, result
+            proposal.proposal_id,
+            context.idempotency_key,
+            identity,
+            result,
+            terminal_row["key"],
         )
         return result
 
@@ -327,6 +386,7 @@ class PaperExecutionService:
         idempotency_key: str,
         identity: str,
         result: PaperExecutionResult,
+        terminal_key: tuple[str, int, str, str, str] | None,
     ) -> None:
         cached_result = self._detach_result(result)
         failed = False
@@ -339,7 +399,12 @@ class PaperExecutionService:
             failed = True
         if failed or transaction is None:
             raise PaperExecutionServiceError("transaction state invalid") from None
-        self._pending_completed[proposal_id] = (identity, cached_result, transaction)
+        self._pending_completed[proposal_id] = (
+            identity,
+            cached_result,
+            terminal_key,
+            transaction,
+        )
         self._pending_idempotency[idempotency_key] = (proposal_id, transaction)
 
     @classmethod
@@ -444,8 +509,13 @@ class PaperExecutionService:
                 return
         except Exception:
             return
-        for proposal_id, (identity, result, _) in self._pending_completed.items():
-            self._committed_completed[proposal_id] = (identity, result)
+        for proposal_id, (
+            identity,
+            result,
+            terminal_key,
+            _,
+        ) in self._pending_completed.items():
+            self._committed_completed[proposal_id] = (identity, result, terminal_key)
         for idempotency_key, (
             proposal_id,
             _,
@@ -460,7 +530,7 @@ class PaperExecutionService:
             self._pending_completed.clear()
             self._pending_idempotency.clear()
             return
-        for proposal_id, (_, _, transaction) in tuple(
+        for proposal_id, (_, _, _, transaction) in tuple(
             self._pending_completed.items()
         ):
             if self._transaction_is_within(transaction, rolled_back):
@@ -495,29 +565,48 @@ class PaperExecutionService:
         self._pending_completed.clear()
         self._pending_idempotency.clear()
 
-    def _discard_pending_if_session_inactive(self) -> None:
-        """Drop pending replay state when the session is in pending-rollback state.
+    def _verify_replay_durability(
+        self, terminal_key: tuple[str, int, str, str, str] | None
+    ) -> str:
+        """Check that the cached result's own terminal ledger row is still visible.
 
-        A failed ``Session.flush()`` runs inside a flush SUBTRANSACTION. Its rollback
-        walks up and issues a real rollback on the ROOT connection -- discarding every
-        write made in the root -- but only the subtransaction is closed. Both
-        ``after_transaction_end`` and ``after_soft_rollback`` are therefore dispatched
-        with the subtransaction, so neither the root-end guard nor the subtree guard
-        matches and pending results outlive the ledger rows behind them.
+        Session and transaction state cannot answer whether a write set survived:
+        SQLAlchemy discards work on paths that emit no session event and leave every
+        state flag untouched (a failed flush subtransaction, ``Connection.invalidate``
+        behind the session, a closed savepoint). Instead of inferring, look for the
+        exact terminal event this cached result produced -- its aggregate, sequence,
+        type, deterministic event id, and chain hash, remembered at write time. The
+        hash folds the whole prior chain including the request identity digest, so a
+        different execution of the same proposal can never satisfy the probe.
 
-        ``Session.is_active`` is false in exactly that state and true for every case the
-        listeners already handle correctly, including savepoint release.
+        The query selects columns only, never entities: after a discard the identity
+        map still holds the stale rows and an entity get would serve them without
+        touching the database. ``no_autoflush`` keeps a caller's unrelated dirty
+        state from turning a read into a failed flush.
+
+        Returns "found", "absent", or "unverifiable"; on "unverifiable" the caches
+        are left untouched and the caller must fail closed.
         """
 
-        inactive = False
+        if type(terminal_key) is not tuple or len(terminal_key) != 5:
+            return "unverifiable"
+        aggregate_id, sequence, event_type, event_id, event_hash = terminal_key
         try:
-            inactive = self._session.is_active is False
+            with self._session.no_autoflush:
+                found = self._session.execute(
+                    select(TradingEvent.id)
+                    .where(
+                        TradingEvent.aggregate_id == aggregate_id,
+                        TradingEvent.sequence == sequence,
+                        TradingEvent.event_type == event_type,
+                        TradingEvent.event_id == event_id,
+                        TradingEvent.event_hash == event_hash,
+                    )
+                    .limit(1)
+                ).first()
         except Exception:
-            inactive = True
-        if not inactive:
-            return
-        self._pending_completed.clear()
-        self._pending_idempotency.clear()
+            return "unverifiable"
+        return "found" if found is not None else "absent"
 
     @staticmethod
     def _transaction_is_within(
@@ -924,8 +1013,11 @@ class PaperExecutionService:
         return value.isoformat().replace("+00:00", "Z")
 
     @classmethod
-    def _proposal_payload(cls, proposal: TradeProposal) -> dict[str, object]:
+    def _proposal_payload(
+        cls, proposal: TradeProposal, identity: str
+    ) -> dict[str, object]:
         return {
+            "identity": identity,
             "proposal_id": proposal.proposal_id,
             "strategy_id": proposal.strategy_id,
             "venue": proposal.venue.value,
@@ -968,6 +1060,9 @@ class PaperExecutionService:
             "side": order.side.value,
             "quantity": None if order.quantity is None else str(order.quantity),
             "notional": None if order.notional is None else str(order.notional),
+            "limit_price": (
+                None if order.limit_price is None else str(order.limit_price)
+            ),
             "created_at": cls._timestamp(order.created_at),
         }
 
