@@ -583,7 +583,7 @@ def _persist_weather_review_candidates(signals: list):
     )
     if not rows:
         return
-    db_path = "/Users/kayvonai/.hermes/research/prediction-market-edge-snapshots.sqlite"
+    db_path = settings.RESEARCH_DATABASE_PATH
     try:
         with sqlite3.connect(db_path) as conn:
             inserted = persist_weather_signal_review_candidate_rows_to_sqlite(conn, rows)

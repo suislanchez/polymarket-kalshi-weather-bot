@@ -9,7 +9,12 @@ import json
 import os
 
 from backend.config import settings
-from backend.trading.execution_mode import require_paper_mode
+from pathlib import Path
+
+from backend.trading.execution_mode import (
+    require_archives_runtime,
+    require_paper_mode,
+)
 from backend.models.database import (
     get_db, init_db, SessionLocal,
     Signal, Trade, BotState, AILog, ScanLog, RottenTomatoesSourceState
@@ -355,9 +360,45 @@ def _maybe_start_scheduler() -> bool:
     return True
 
 
+def _sqlite_path(database_url: object) -> str:
+    """Return the on-disk path behind a sqlite URL, or the value unchanged."""
+    if type(database_url) is not str:
+        return ""
+    for prefix in ("sqlite:////", "sqlite:///", "sqlite://"):
+        if database_url.startswith(prefix):
+            remainder = database_url[len(prefix):]
+            return remainder if remainder.startswith("/") else f"/{remainder}"
+    return database_url
+
+
+def archives_runtime_paths(active_settings) -> list[str]:
+    """Every mutable runtime location that must live on Archives."""
+    return [
+        _sqlite_path(active_settings.DATABASE_URL),
+        active_settings.RESEARCH_DATABASE_PATH,
+        active_settings.RESEARCH_SNAPSHOT_ROOT,
+        active_settings.TRADING_DATA_ROOT,
+        active_settings.TRADING_ARTIFACTS_ROOT,
+        active_settings.TRADING_LOG_ROOT,
+    ]
+
+
+def archives_required_directories(active_settings) -> list[str]:
+    """Runtime directories that must already exist before startup proceeds."""
+    return [
+        str(Path(_sqlite_path(active_settings.DATABASE_URL)).parent),
+        str(Path(active_settings.RESEARCH_DATABASE_PATH).parent),
+    ]
+
+
 @app.on_event("startup")
 async def startup():
     require_paper_mode(settings.EXECUTION_MODE, settings.LIVE_TRADING_ENABLED)
+    require_archives_runtime(
+        settings.TRADING_ARCHIVES_ROOT,
+        archives_runtime_paths(settings),
+        required_directories=archives_required_directories(settings),
+    )
 
     print("=" * 60)
     print("BTC 5-MIN TRADING BOT v3.0")
@@ -445,7 +486,7 @@ def _load_bot_weather_signal_calibration_rows(limit: int = 500) -> list[dict]:
     outcomes and never writes trades or upgrades actionability.
     """
     app_db_path = _sqlite_path_from_database_url(settings.DATABASE_URL)
-    research_db_path = "/Users/kayvonai/.hermes/research/prediction-market-edge-snapshots.sqlite"
+    research_db_path = settings.RESEARCH_DATABASE_PATH
     scored_at = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
     return load_bot_weather_signal_calibration_rows_from_sqlite(
         app_db_path,
@@ -822,7 +863,7 @@ def _load_latest_weather_calibration_summary() -> Optional[WeatherCalibrationSum
     This is read-only observability. Missing DB/table should not break the live
     dashboard and never creates paper trades/actionability.
     """
-    db_path = "/Users/kayvonai/.hermes/research/prediction-market-edge-snapshots.sqlite"
+    db_path = settings.RESEARCH_DATABASE_PATH
     summary = load_latest_weather_calibration_summary_from_sqlite(db_path)
     if summary is None:
         return None
@@ -837,7 +878,7 @@ def _load_latest_weather_calibration_rows(limit: int = 5) -> List[WeatherCalibra
     Rows are highest-error market-implied quote scores from the newest batch
     only. They are diagnostics for review, not paper entries or actionability.
     """
-    db_path = "/Users/kayvonai/.hermes/research/prediction-market-edge-snapshots.sqlite"
+    db_path = settings.RESEARCH_DATABASE_PATH
     rows = load_latest_weather_calibration_rows_from_sqlite(db_path, limit=limit)
     if hasattr(WeatherCalibrationRowResponse, "model_validate"):
         return [WeatherCalibrationRowResponse.model_validate(row) for row in rows]
@@ -850,7 +891,7 @@ def _load_latest_weather_bot_calibration_summary() -> Optional[WeatherCalibratio
     This is read-only model QA telemetry, separate from market-implied quote
     calibration and paper ledger PnL/actionability.
     """
-    db_path = "/Users/kayvonai/.hermes/research/prediction-market-edge-snapshots.sqlite"
+    db_path = settings.RESEARCH_DATABASE_PATH
     summary = load_latest_weather_bot_signal_calibration_summary_from_sqlite(db_path)
     if summary is None:
         return None
@@ -865,7 +906,7 @@ def _load_latest_weather_bot_calibration_rows(limit: int = 5) -> List[WeatherBot
     Rows are newest-batch model QA diagnostics only and remain non-actionable /
     non-executed. They are separate from market-implied weather calibration rows.
     """
-    db_path = "/Users/kayvonai/.hermes/research/prediction-market-edge-snapshots.sqlite"
+    db_path = settings.RESEARCH_DATABASE_PATH
     rows = load_latest_weather_bot_signal_calibration_rows_from_sqlite(db_path, limit=limit)
     if hasattr(WeatherBotCalibrationRowResponse, "model_validate"):
         return [WeatherBotCalibrationRowResponse.model_validate(row) for row in rows]
@@ -878,7 +919,7 @@ def _load_latest_weather_signal_review_candidates(limit: int = 5) -> List[Weathe
     These are review-only diagnostics exported from live weather scans. The
     loader normalizes rows as non-actionable, non-executed, and zero-size.
     """
-    db_path = "/Users/kayvonai/.hermes/research/prediction-market-edge-snapshots.sqlite"
+    db_path = settings.RESEARCH_DATABASE_PATH
     rows = load_latest_weather_signal_review_candidate_rows_from_sqlite(db_path, limit=limit)
     if hasattr(WeatherSignalReviewCandidateResponse, "model_validate"):
         return [WeatherSignalReviewCandidateResponse.model_validate(row) for row in rows]
@@ -896,7 +937,7 @@ def _load_latest_polymarket_weather_source_states(
     remain non-actionable until final source, model, liquidity, and sizing gates
     are independently satisfied.
     """
-    db_path = "/Users/kayvonai/.hermes/research/prediction-market-edge-snapshots.sqlite"
+    db_path = settings.RESEARCH_DATABASE_PATH
     rows = load_latest_polymarket_weather_source_state_rows_from_sqlite(
         db_path,
         limit=limit,
@@ -934,7 +975,7 @@ async def get_polymarket_weather_source_states(
 
 def _load_latest_polymarket_weather_source_state_summary() -> Optional[PolymarketWeatherSourceStateSummaryResponse]:
     """Load newest Polymarket weather source-state coverage summary read-only."""
-    db_path = "/Users/kayvonai/.hermes/research/prediction-market-edge-snapshots.sqlite"
+    db_path = settings.RESEARCH_DATABASE_PATH
     summary = load_latest_polymarket_weather_source_state_summary_from_sqlite(db_path)
     if summary is None:
         return None
@@ -949,7 +990,7 @@ def _load_latest_btc_calibration_summary() -> Optional[BtcCalibrationSummaryResp
     This is read-only observability for Chainlink-boundary/outcome join quality;
     it never creates paper trades or actionability.
     """
-    db_path = "/Users/kayvonai/.hermes/research/prediction-market-edge-snapshots.sqlite"
+    db_path = settings.RESEARCH_DATABASE_PATH
     summary = load_latest_btc_calibration_summary_from_sqlite(db_path)
     if summary is None:
         return None
@@ -965,7 +1006,7 @@ def _load_latest_btc_calibration_rows(limit: int = 16) -> List[BtcCalibrationRow
     only. Default to 16 rows so the dashboard can show the complete 8-window
     Up/Down BTC batch before any UI display limiting.
     """
-    db_path = "/Users/kayvonai/.hermes/research/prediction-market-edge-snapshots.sqlite"
+    db_path = settings.RESEARCH_DATABASE_PATH
     rows = load_latest_btc_calibration_rows_from_sqlite(db_path, limit=limit)
     if hasattr(BtcCalibrationRowResponse, "model_validate"):
         return [BtcCalibrationRowResponse.model_validate(row) for row in rows]
@@ -978,7 +1019,7 @@ def _load_latest_entertainment_calibration_summary() -> Optional[EntertainmentCa
     This is read-only source-resolution/outcome-score observability; missing
     calibration rows are expected until final-source watchers are built.
     """
-    db_path = "/Users/kayvonai/.hermes/research/prediction-market-edge-snapshots.sqlite"
+    db_path = settings.RESEARCH_DATABASE_PATH
     summary = load_latest_entertainment_calibration_summary_from_sqlite(db_path)
     if summary is None:
         return None

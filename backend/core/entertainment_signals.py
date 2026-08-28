@@ -13,9 +13,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Any, Optional
 
+from backend.config import settings
+
 logger = logging.getLogger("trading_bot")
 
-DEFAULT_RT_ENTERTAINMENT_SNAPSHOT_DIR = Path("/Users/kayvonai/.hermes/research/.snapshots")
+# Entertainment remains disabled; its snapshot root is still bound to Archives so
+# no internal-disk path can be recreated if the lane is ever re-enabled.
+DEFAULT_RT_ENTERTAINMENT_SNAPSHOT_DIR = Path(settings.RESEARCH_SNAPSHOT_ROOT)
 
 KNOWN_ROTTEN_TOMATOES_SOURCE_URLS = {
     "backrooms-rotten-tomatoes-score": "https://www.rottentomatoes.com/m/backrooms",

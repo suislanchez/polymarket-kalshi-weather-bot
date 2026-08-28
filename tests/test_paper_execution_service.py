@@ -28,6 +28,7 @@ from backend.trading.domain import (
     TradeProposal,
     Venue,
 )
+from backend.trading.execution_mode import ArchivesRuntimeError
 from backend.trading.ledger import (
     LedgerEventInput,
     LedgerStorageError,
@@ -219,6 +220,7 @@ def make_service(
     risk: RecordingRisk | None = None,
     clock: CountingClock | None = None,
     kill_switch: SequenceKillSwitch | None = None,
+    archives_guard=None,
     append_event_fn=None,
     upsert_order_projection_fn=None,
 ) -> tuple[PaperExecutionService, RecordingAdapter, RecordingRisk, CountingClock, SequenceKillSwitch]:
@@ -228,6 +230,8 @@ def make_service(
     selected_kill = kill_switch or SequenceKillSwitch(False, False)
     registry = adapters if adapters is not None else {Venue.ALPACA_PAPER: selected_adapter}
     kwargs = {}
+    if archives_guard is not None:
+        kwargs["archives_guard"] = archives_guard
     if append_event_fn is not None:
         kwargs["append_event_fn"] = append_event_fn
     if upsert_order_projection_fn is not None:
@@ -1367,6 +1371,85 @@ def test_ledger_payloads_record_identity_digest_and_limit_price(session: Session
     other_identity = other_created.payload["identity"]
     assert other_identity != identity
 
+
+
+class SequenceArchivesGuard:
+    def __init__(self, *outcomes: object) -> None:
+        self.outcomes = outcomes
+        self.calls = 0
+
+    def __call__(self) -> None:
+        self.calls += 1
+        index = min(self.calls - 1, len(self.outcomes) - 1)
+        outcome = self.outcomes[index]
+        if isinstance(outcome, BaseException):
+            raise outcome
+
+
+def test_unavailable_archives_rejects_before_risk_ledger_or_adapter(session: Session):
+    guard = SequenceArchivesGuard(ArchivesRuntimeError("archives offline"))
+    service, adapter, risk, clock, kill = make_service(session, archives_guard=guard)
+
+    with pytest.raises(PaperExecutionServiceError) as caught:
+        execute(service)
+
+    assert_sanitized(caught.value, "archives runtime unavailable", "archives offline")
+    assert guard.calls == 1
+    assert risk.calls == []
+    assert adapter.calls == []
+    assert clock.calls == 0
+    assert kill.calls == 0
+    assert stored_events(session) == []
+    assert session.scalar(select(func.count()).select_from(UnifiedOrder)) == 0
+
+
+def test_archives_lost_between_authorization_and_submit_blocks_the_adapter(
+    session: Session,
+):
+    guard = SequenceArchivesGuard(None, ArchivesRuntimeError("mount lost"))
+    service, adapter, risk, _, _ = make_service(session, archives_guard=guard)
+
+    with pytest.raises(PaperExecutionServiceError) as caught:
+        execute(service)
+
+    assert_sanitized(caught.value, "archives runtime unavailable", "mount lost")
+    assert guard.calls == 2
+    assert len(risk.calls) == 1
+    assert adapter.calls == []
+    assert [event.event_type for event in stored_events(session)] == [
+        "proposal_created",
+        "risk_approved",
+    ]
+    assert session.scalar(select(func.count()).select_from(UnifiedOrder)) == 0
+
+
+def test_archives_guard_raising_a_non_archives_error_still_fails_closed(
+    session: Session,
+):
+    guard = SequenceArchivesGuard(RuntimeError("SECRET-MOUNT-DETAIL"))
+    service, adapter, _, _, _ = make_service(session, archives_guard=guard)
+
+    with pytest.raises(PaperExecutionServiceError) as caught:
+        execute(service)
+
+    assert_sanitized(
+        caught.value, "archives runtime unavailable", "SECRET-MOUNT-DETAIL"
+    )
+    assert adapter.calls == []
+    assert stored_events(session) == []
+
+
+def test_available_archives_guard_is_checked_twice_and_permits_execution(
+    session: Session,
+):
+    guard = SequenceArchivesGuard(None)
+    service, adapter, _, _, _ = make_service(session, archives_guard=guard)
+
+    result = execute(service)
+
+    assert result.report.status is OrderStatus.FILLED
+    assert guard.calls == 2
+    assert len(adapter.calls) == 1
 
 
 def test_adapter_rejection_reason_and_metadata_are_replaced_everywhere(session: Session):

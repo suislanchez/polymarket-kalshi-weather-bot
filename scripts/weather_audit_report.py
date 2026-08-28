@@ -162,11 +162,27 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Generate a read-only weather paper-trade audit from SQLite."
     )
-    parser.add_argument("--db", default="tradingbot.db", help="Path to SQLite DB")
+    parser.add_argument(
+        "--db",
+        default=_default_audit_db(),
+        help="Path to SQLite DB (defaults to the configured Archives app ledger)",
+    )
     parser.add_argument("--window-hours", type=int, default=72, help="Strict audit window")
     parser.add_argument("--format", choices=["markdown", "json"], default="markdown")
     parser.add_argument("--output", default="", help="Optional output path")
     return parser.parse_args()
+
+
+def _default_audit_db() -> str:
+    """Default to the configured Archives application ledger, never a local file."""
+    from backend.config import settings
+
+    database_url = settings.DATABASE_URL
+    for prefix in ("sqlite:////", "sqlite:///", "sqlite://"):
+        if database_url.startswith(prefix):
+            remainder = database_url[len(prefix):]
+            return remainder if remainder.startswith("/") else f"/{remainder}"
+    return database_url
 
 
 def main() -> int:

@@ -56,10 +56,13 @@ class Settings(BaseSettings):
     LIVE_TRADING_ENABLED: bool = False
     ACTIVE_PRODUCT_SCOPE: str = "unified_paper"
     STOCK_CRYPTO_LANE_ENABLED: bool = False
+    TRADING_ARCHIVES_ROOT: str = "/Volumes/Archives"
     TRADING_SYSTEM_ROOT: str = "/Volumes/Archives/Hermes-Offload/2026-08-23/trading-system/unified-trading-system"
     TRADING_DATA_ROOT: str = "/Volumes/Archives/Hermes-Offload/2026-08-23/trading-system/data"
     TRADING_ARTIFACTS_ROOT: str = "/Volumes/Archives/Hermes-Offload/2026-08-23/trading-system/artifacts"
     TRADING_LOG_ROOT: str = "/Volumes/Archives/Hermes-Offload/2026-08-23/trading-system/logs"
+    RESEARCH_DATABASE_PATH: str = "/Volumes/Archives/Hermes-Offload/2026-08-23/trading-system/data/research/prediction-market-edge-snapshots.sqlite"
+    RESEARCH_SNAPSHOT_ROOT: str = "/Volumes/Archives/Hermes-Offload/2026-08-23/trading-system/data/research/snapshots"
     TRADING_SYMBOL_ALLOWLIST: str = "SPY,QQQ,BTC/USD,ETH/USD"
 
     # Unified risk controls

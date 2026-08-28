@@ -35,6 +35,7 @@ from backend.trading.domain import (
     TradeProposal,
     Venue,
 )
+from backend.trading.execution_mode import ArchivesRuntimeError
 from backend.trading.ledger import (
     LedgerConflictError,
     LedgerEventInput,
@@ -143,6 +144,7 @@ AppendEvent = Callable[[Session, LedgerEventInput], object]
 UpsertProjection = Callable[[Session, ExecutionReport], object]
 Clock = Callable[[], datetime]
 KillSwitch = Callable[[], bool]
+ArchivesGuard = Callable[[], None]
 
 
 class PaperExecutionService:
@@ -157,6 +159,7 @@ class PaperExecutionService:
         settings: PaperExecutionSettings,
         clock: Clock,
         kill_switch: KillSwitch,
+        archives_guard: ArchivesGuard | None = None,
         append_event_fn: AppendEvent = append_event,
         upsert_order_projection_fn: UpsertProjection = upsert_order_projection,
     ) -> None:
@@ -179,6 +182,7 @@ class PaperExecutionService:
         self._settings = settings_snapshot
         self._clock = clock
         self._kill_switch = kill_switch
+        self._archives_guard = archives_guard
         self._append_event = append_event_fn
         self._upsert_projection = upsert_order_projection_fn
         self._pending_completed: dict[
@@ -248,6 +252,7 @@ class PaperExecutionService:
         if prior_proposal_id is not None and prior_proposal_id != proposal.proposal_id:
             raise PaperExecutionServiceError("proposal identity conflict")
 
+        self._require_archives()
         now = self._read_clock()
         initial_kill_switch = self._read_kill_switch()
         risk_context = RiskContext(
@@ -364,6 +369,7 @@ class PaperExecutionService:
             )
             return result
 
+        self._require_archives()
         record("order_submitted", now, self._order_payload(order))
         report = self._submit(adapter, order, now)
         for event_type in self._report_event_types(report):
@@ -631,6 +637,25 @@ class PaperExecutionService:
     def _event_id(aggregate_id: str, sequence: int, event_type: str) -> str:
         encoded = f"{aggregate_id}\x1f{sequence}\x1f{event_type}".encode("utf-8")
         return f"paper-event-{hashlib.sha256(encoded).hexdigest()}"
+
+    def _require_archives(self) -> None:
+        """Reject execution whenever Archives-backed runtime state is unavailable.
+
+        Checked before any risk evaluation or ledger mutation, and again immediately
+        before adapter submission so a mount lost mid-execution is not written
+        through. Any failure from the injected guard is treated as unavailable.
+        """
+
+        guard = self._archives_guard
+        if guard is None:
+            return
+        failed = False
+        try:
+            guard()
+        except Exception:
+            failed = True
+        if failed:
+            raise PaperExecutionServiceError("archives runtime unavailable") from None
 
     def _read_clock(self) -> datetime:
         failed = False
