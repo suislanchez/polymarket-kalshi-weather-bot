@@ -16,10 +16,7 @@ from backend.trading.adapters.alpaca_paper import (
     AlpacaPaperAdapter,
     AlpacaPaperAdapterError,
 )
-from backend.trading.adapters.base import (
-    BrokerAdapter,
-    OrderNotFoundError,
-)
+from backend.trading.adapters.base import BrokerAdapter
 from backend.trading.domain import (
     AssetClass,
     NormalizedOrder,
@@ -357,3 +354,147 @@ def test_submit_errors_are_sanitized_and_never_leak_credentials():
 def test_repr_and_str_never_expose_credentials():
     adapter, _ = make_adapter(api_key=SECRET, api_secret=SECRET)
     assert SECRET not in f"{adapter!r} {adapter!s}"
+
+
+# --- post-review hardening ----------------------------------------------------
+
+class RaisingAttributeClient(FakeClient):
+    """A client whose ATTRIBUTE LOOKUP raises, not just its call."""
+
+    def __init__(self, attr: str, message: str) -> None:
+        super().__init__()
+        self._raising_attr = attr
+        self._message = message
+
+    def __getattribute__(self, name):
+        if name in {"_raising_attr", "_message", "calls"}:
+            return object.__getattribute__(self, name)
+        if name == object.__getattribute__(self, "_raising_attr"):
+            raise RuntimeError(object.__getattribute__(self, "_message"))
+        return object.__getattribute__(self, name)
+
+
+@pytest.mark.parametrize(
+    "attr,method",
+    [("get_account", "get_account_snapshot"), ("list_positions", "list_positions")],
+)
+def test_raising_attribute_lookup_is_sanitized_like_a_raising_call(attr, method):
+    client = RaisingAttributeClient(attr, f"boom key={SECRET}")
+    adapter, _ = make_adapter(client_factory=lambda **_kw: client)
+    with pytest.raises(AlpacaPaperAdapterError) as caught:
+        getattr(adapter, method)()
+    rendered = f"{caught.value!r} {caught.value!s}"
+    assert SECRET not in rendered
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+
+
+@pytest.mark.parametrize(
+    "method,args,broken",
+    [
+        ("get_account_snapshot", (), "account"),
+        ("list_positions", (), "positions"),
+        ("submit_order", None, "order"),
+    ],
+)
+def test_malformed_response_errors_carry_no_exception_context(method, args, broken):
+    class Boom:
+        def __getattr__(self, name):
+            raise RuntimeError(f"attr blew up key={SECRET}")
+
+    kw = {broken: Boom()} if broken != "positions" else {"positions": [Boom()]}
+    adapter, _ = make_adapter(**kw)
+    with pytest.raises(AlpacaPaperAdapterError) as caught:
+        if method == "submit_order":
+            adapter.submit_order(make_order(), execution_mode="paper")
+        else:
+            getattr(adapter, method)(*args)
+    rendered = f"{caught.value!r} {caught.value!s}"
+    assert SECRET not in rendered
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+
+
+@pytest.mark.parametrize("bad", ["NaN", "Infinity", "-Infinity", "sNaN"])
+def test_non_finite_decimals_are_rejected_as_adapter_errors(bad):
+    adapter, _ = make_adapter(order=FakeOrder(filled_avg_price=bad))
+    with pytest.raises(AlpacaPaperAdapterError):
+        adapter.submit_order(make_order(), execution_mode="paper")
+
+
+def test_filled_notional_is_exact_under_a_hostile_decimal_context():
+    from decimal import localcontext
+
+    qty, price = Decimal("123456789.123456789"), Decimal("987654321.987654321")
+    # Compute the true product at a precision high enough to be exact; the default
+    # 28-digit context would itself round this 36-digit result.
+    with localcontext() as exact:
+        exact.prec = 80
+        expected = qty * price
+
+    order = FakeOrder(filled_qty=str(qty), filled_avg_price=str(price))
+    adapter, _ = make_adapter(order=order)
+    with localcontext() as ctx:
+        ctx.prec = 1
+        report = adapter.submit_order(make_order(), execution_mode="paper")
+
+    assert report.filled_notional == expected
+    assert len(report.filled_notional.as_tuple().digits) > 28
+
+
+def test_float_response_values_are_rejected_rather_than_silently_stringified():
+    account = FakeAccount()
+    account.cash = 10000.1
+    adapter, _ = make_adapter(account=account)
+    with pytest.raises(AlpacaPaperAdapterError):
+        adapter.get_account_snapshot()
+
+
+def test_crypto_orders_use_a_time_in_force_alpaca_accepts_for_crypto():
+    adapter, created = make_adapter()
+    adapter.submit_order(
+        make_order(symbol="BTC/USD", asset_class=AssetClass.CRYPTO, quantity=Decimal("0.5"), notional=None),
+        execution_mode="paper",
+    )
+    payload = [c for c in created["client"].calls if c[0] == "submit_order"][0][1]
+    assert payload["time_in_force"] == "gtc"
+
+
+def test_stock_orders_keep_day_time_in_force():
+    adapter, created = make_adapter()
+    adapter.submit_order(make_order(), execution_mode="paper")
+    payload = [c for c in created["client"].calls if c[0] == "submit_order"][0][1]
+    assert payload["time_in_force"] == "day"
+
+
+@pytest.mark.parametrize(
+    "in_flight",
+    ["pending_new", "pending_cancel", "pending_replace", "accepted_for_bidding",
+     "calculated", "held", "stopped", "suspended", "pending_review"],
+)
+def test_in_flight_statuses_are_never_reported_as_terminal(in_flight):
+    """Misreporting a live order as terminal would let the ledger close it wrongly."""
+    adapter, _ = make_adapter(
+        order=FakeOrder(status=in_flight, filled_qty="0.0000", filled_avg_price=None)
+    )
+    report = adapter.submit_order(make_order(), execution_mode="paper")
+    assert report.status is OrderStatus.SUBMITTED
+
+
+def test_adapter_does_not_retain_plaintext_credentials():
+    adapter, _ = make_adapter(api_key=SECRET, api_secret=SECRET)
+    assert SECRET not in repr(vars(adapter))
+
+
+def test_account_snapshot_uses_a_single_clock_reading():
+    reads: list[int] = []
+
+    def counting_clock():
+        reads.append(1)
+        return NOW
+
+    adapter, _ = make_adapter(clock=counting_clock)
+    snapshot = adapter.get_account_snapshot()
+    assert snapshot.captured_at == NOW
+    assert all(p.captured_at == snapshot.captured_at for p in snapshot.positions)
+    assert len(reads) == 1

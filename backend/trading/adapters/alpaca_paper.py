@@ -14,7 +14,17 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import (
+    Clamped,
+    Context,
+    Decimal,
+    Inexact,
+    InvalidOperation,
+    Overflow,
+    Rounded,
+    Underflow,
+    localcontext,
+)
 
 from backend.trading.adapters.base import BrokerAdapterError
 from backend.trading.domain import (
@@ -34,6 +44,15 @@ _STATUS_MAP = {
     "accepted": OrderStatus.SUBMITTED,
     "pending_new": OrderStatus.SUBMITTED,
     "accepted_for_bidding": OrderStatus.SUBMITTED,
+    # In-flight states map to SUBMITTED. Reporting a live order as terminal would let
+    # the ledger close it while the broker still holds it, so these fail SAFE, not closed.
+    "pending_cancel": OrderStatus.SUBMITTED,
+    "pending_replace": OrderStatus.SUBMITTED,
+    "pending_review": OrderStatus.SUBMITTED,
+    "calculated": OrderStatus.SUBMITTED,
+    "held": OrderStatus.SUBMITTED,
+    "stopped": OrderStatus.SUBMITTED,
+    "suspended": OrderStatus.SUBMITTED,
     "partially_filled": OrderStatus.PARTIALLY_FILLED,
     "filled": OrderStatus.FILLED,
     "canceled": OrderStatus.CANCELED,
@@ -41,9 +60,7 @@ _STATUS_MAP = {
     "expired": OrderStatus.CANCELED,
     "done_for_day": OrderStatus.CANCELED,
     "replaced": OrderStatus.CANCELED,
-    "stopped": OrderStatus.CANCELED,
     "rejected": OrderStatus.REJECTED,
-    "suspended": OrderStatus.REJECTED,
 }
 
 _ASSET_CLASS_MAP = {
@@ -97,7 +114,6 @@ class AlpacaPaperAdapter:
             ) from None
 
         self._clock = clock
-        self._secrets = tuple(v for v in (api_key, api_secret) if v)
         failed = False
         client: object | None = None
         try:
@@ -144,22 +160,64 @@ class AlpacaPaperAdapter:
 
     @staticmethod
     def _decimal(raw: object, field: str) -> Decimal:
+        """Parse an exact decimal. Floats are refused: they cannot represent money.
+
+        Non-finite values (NaN/Infinity) construct successfully as Decimals, so they are
+        rejected explicitly here rather than escaping as a raw pydantic ValidationError
+        that callers' BrokerAdapterError handlers would miss.
+        """
+
+        failed = False
+        value: Decimal | None = None
         try:
-            if isinstance(raw, Decimal):
-                return raw
-            if type(raw) is not str or not raw.strip():
-                raise ValueError
-            return Decimal(raw)
+            if type(raw) is Decimal:
+                value = raw
+            elif type(raw) is str and raw.strip():
+                value = Decimal(raw)
+            else:
+                failed = True
+            if value is not None and not value.is_finite():
+                failed = True
         except (InvalidOperation, ValueError, ArithmeticError):
+            failed = True
+        if failed or value is None:
             raise AlpacaPaperAdapterError(
-                f"Alpaca response field {field} was not an exact decimal."
+                f"Alpaca response field {field} was not an exact finite decimal."
             ) from None
+        return value
+
+    @staticmethod
+    def _exact_product(left: Decimal, right: Decimal) -> Decimal:
+        """Multiply in a context sized from both operands, trapping any inexactness.
+
+        The ambient process context is not trusted: a caller running under reduced
+        precision must never silently round a fill notional that reaches the ledger.
+        """
+
+        failed = False
+        product: Decimal | None = None
+        try:
+            digits = len(left.as_tuple().digits) + len(right.as_tuple().digits) + 4
+            with localcontext(
+                Context(
+                    prec=max(digits, 28),
+                    traps=[Inexact, Rounded, Clamped, Overflow, Underflow, InvalidOperation],
+                )
+            ):
+                product = left * right
+        except Exception:
+            failed = True
+        if failed or product is None or not product.is_finite():
+            raise AlpacaPaperAdapterError(
+                "Alpaca fill notional could not be computed exactly."
+            ) from None
+        return product
 
     @classmethod
     def _status(cls, raw: object) -> OrderStatus:
-        if type(raw) is not str:
-            raise AlpacaPaperAdapterError("Alpaca order status was not a string.") from None
-        mapped = _STATUS_MAP.get(raw.strip().lower())
+        mapped = None
+        if type(raw) is str:
+            mapped = _STATUS_MAP.get(raw.strip().lower())
         if mapped is None:
             # Fail closed: an unrecognized status is never guessed into a terminal one.
             raise AlpacaPaperAdapterError("Alpaca order status is unrecognized.") from None
@@ -187,28 +245,32 @@ class AlpacaPaperAdapter:
         return result
 
     def _report(self, raw: object, fallback_client_order_id: str | None = None) -> ExecutionReport:
+        malformed = False
+        client_order_id: object = None
+        broker_order_id: object = None
+        status_raw: object = None
+        filled_qty_raw: object = None
+        price_raw: object = None
         try:
             client_order_id = getattr(raw, "client_order_id", None) or fallback_client_order_id
             broker_order_id = getattr(raw, "id", None)
-            status = self._status(getattr(raw, "status", None))
+            status_raw = getattr(raw, "status", None)
             filled_qty_raw = getattr(raw, "filled_qty", None) or "0"
             price_raw = getattr(raw, "filled_avg_price", None)
-        except AlpacaPaperAdapterError:
-            raise
         except Exception:
+            malformed = True
+        if malformed or type(client_order_id) is not str or not client_order_id.strip():
             raise self._fail("Alpaca order response was malformed.") from None
 
-        if type(client_order_id) is not str or not client_order_id.strip():
-            raise self._fail("Alpaca order response was malformed.") from None
-
-        filled_quantity = self._decimal(str(filled_qty_raw), "filled_qty")
+        status = self._status(status_raw)
+        filled_quantity = self._decimal(filled_qty_raw, "filled_qty")
         average_fill_price = (
-            None if price_raw in (None, "") else self._decimal(str(price_raw), "filled_avg_price")
+            None if price_raw in (None, "") else self._decimal(price_raw, "filled_avg_price")
         )
         filled_notional = (
             Decimal("0")
             if average_fill_price is None
-            else filled_quantity * average_fill_price
+            else self._exact_product(filled_quantity, average_fill_price)
         )
         return ExecutionReport(
             client_order_id=client_order_id,
@@ -230,52 +292,65 @@ class AlpacaPaperAdapter:
     def get_account_snapshot(self) -> AccountSnapshot:
         captured_at = self._now()
         account = self._call(
-            self._client.get_account, "Alpaca account could not be read."
+            lambda: self._client.get_account(), "Alpaca account could not be read."
         )
+        failed = False
+        fields: tuple[object, object, object] | None = None
         try:
-            cash, equity, buying_power = (
-                str(account.cash),
-                str(account.equity),
-                str(account.buying_power),
-            )
+            fields = (account.cash, account.equity, account.buying_power)
         except Exception:
+            failed = True
+        if failed or fields is None:
             raise self._fail("Alpaca account response was malformed.") from None
         return AccountSnapshot(
             venue=Venue.ALPACA_PAPER,
-            cash=self._decimal(cash, "cash"),
-            equity=self._decimal(equity, "equity"),
-            buying_power=self._decimal(buying_power, "buying_power"),
+            cash=self._decimal(fields[0], "cash"),
+            equity=self._decimal(fields[1], "equity"),
+            buying_power=self._decimal(fields[2], "buying_power"),
             captured_at=captured_at,
-            positions=self.list_positions(),
+            # One clock reading for the whole snapshot: positions must not carry a
+            # different instant from the balances they accompany.
+            positions=self._positions_at(captured_at),
             metadata={"adapter": self.name},
         )
 
     def list_positions(self) -> tuple[PositionSnapshot, ...]:
-        captured_at = self._now()
+        return self._positions_at(self._now())
+
+    def _positions_at(self, captured_at: datetime) -> tuple[PositionSnapshot, ...]:
         raw_positions = self._call(
-            self._client.list_positions, "Alpaca positions could not be read."
+            lambda: self._client.list_positions(),
+            "Alpaca positions could not be read.",
         )
         snapshots: list[PositionSnapshot] = []
+        failed = False
+        iterator: list[object] = []
         try:
             iterator = list(raw_positions)  # type: ignore[arg-type]
         except Exception:
+            failed = True
+        if failed:
             raise self._fail("Alpaca positions response was malformed.") from None
         for raw in iterator:
+            row_failed = False
+            symbol: object = None
+            asset_class_raw: object = None
+            fields: tuple[object, ...] = ()
             try:
                 symbol = raw.symbol
                 asset_class_raw = getattr(raw, "asset_class", None)
                 fields = (
-                    str(raw.qty),
-                    str(raw.cost_basis),
-                    str(raw.market_value),
-                    str(raw.avg_entry_price),
-                    str(raw.current_price),
-                    str(raw.realized_pl),
-                    str(raw.unrealized_pl),
+                    raw.qty,
+                    raw.cost_basis,
+                    raw.market_value,
+                    raw.avg_entry_price,
+                    raw.current_price,
+                    raw.realized_pl,
+                    raw.unrealized_pl,
                 )
             except Exception:
-                raise self._fail("Alpaca position response was malformed.") from None
-            if type(symbol) is not str or not symbol.strip():
+                row_failed = True
+            if row_failed or type(symbol) is not str or not symbol.strip():
                 raise self._fail("Alpaca position response was malformed.") from None
             snapshots.append(
                 PositionSnapshot(
@@ -310,7 +385,8 @@ class AlpacaPaperAdapter:
             "symbol": order.symbol,
             "side": order.side.value,
             "type": order.order_type.value,
-            "time_in_force": "day",
+            # Alpaca rejects time_in_force='day' for crypto; crypto must be gtc.
+            "time_in_force": "gtc" if order.asset_class is AssetClass.CRYPTO else "day",
         }
         if order.quantity is not None:
             payload["qty"] = str(order.quantity)
