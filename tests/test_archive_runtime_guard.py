@@ -175,3 +175,58 @@ def test_database_url_default_points_inside_archives():
     path = settings.DATABASE_URL.removeprefix("sqlite:///")
     assert Path(path).is_absolute()
     assert path.startswith(f"{ARCHIVES_ROOT}/")
+
+
+def test_root_filesystem_as_archives_root_is_rejected():
+    """'/' is a mount point and contains everything, which would void containment."""
+    with pytest.raises(ArchivesRuntimeError):
+        require_archives_runtime("/", ["/etc/passwd"], mount_check=mounted)
+
+
+def test_exhausted_iterator_of_runtime_paths_does_not_pass_vacuously(archives: Path):
+    outside = iter(["/Users/kayvonai/.hermes/research.sqlite"])
+    list(outside)  # exhaust it before the guard sees it
+    with pytest.raises(ArchivesRuntimeError):
+        require_archives_runtime(str(archives), outside, mount_check=mounted)
+
+
+def test_symlink_inside_archives_targeting_internal_disk_is_rejected(
+    archives: Path, tmp_path: Path
+):
+    internal = tmp_path / "internal"
+    internal.mkdir()
+    escape = archives / "data" / "escape"
+    escape.symlink_to(internal, target_is_directory=True)
+
+    with pytest.raises(ArchivesRuntimeError):
+        require_archives_runtime(
+            str(archives), [str(escape / "tradingbot.db")], mount_check=mounted
+        )
+    with pytest.raises(ArchivesRuntimeError):
+        require_archives_runtime(
+            str(archives), [], required_directories=[str(escape)], mount_check=mounted
+        )
+
+
+def test_symlink_staying_inside_archives_is_still_accepted(archives: Path):
+    inner = archives / "data" / "real"
+    inner.mkdir()
+    link = archives / "data" / "link"
+    link.symlink_to(inner, target_is_directory=True)
+    require_archives_runtime(
+        str(archives),
+        [str(link / "tradingbot.db")],
+        required_directories=[str(link)],
+        mount_check=mounted,
+    )
+
+
+def test_env_example_documents_the_archives_settings():
+    root = Path(__file__).resolve().parent.parent
+    text = (root / ".env.example").read_text()
+    for name in (
+        "TRADING_ARCHIVES_ROOT",
+        "RESEARCH_DATABASE_PATH",
+        "RESEARCH_SNAPSHOT_ROOT",
+    ):
+        assert name in text

@@ -1,7 +1,7 @@
 """Fail-closed execution-mode and Archives-runtime validation for the paper runtime."""
 
 import os
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 
@@ -47,6 +47,32 @@ def _is_within(path: Path, root: Path) -> bool:
     return root in path.parents
 
 
+def _resolved(path: Path) -> Path:
+    """Resolve symlinks without requiring the path to exist yet."""
+    try:
+        return Path(os.path.realpath(str(path)))
+    except OSError:
+        raise ArchivesRuntimeError(
+            "An Archives runtime path could not be resolved; refusing to start."
+        ) from None
+
+
+def _require_contained(candidate: object, root: Path, resolved_root: Path, message: str) -> Path:
+    """Reject a path unless it is inside the root both lexically and after symlinks.
+
+    The lexical check stops ".." escapes and sibling-prefix lookalikes. The resolved
+    check stops a symlink planted inside Archives from redirecting mutable state onto
+    internal storage. Both must hold.
+    """
+
+    path = _absolute_path(candidate)
+    if not _is_within(path, root):
+        raise ArchivesRuntimeError(message)
+    if not _is_within(_resolved(path), resolved_root):
+        raise ArchivesRuntimeError(message)
+    return path
+
+
 def require_archives_runtime(
     archives_root: object,
     runtime_paths: object = (),
@@ -63,6 +89,10 @@ def require_archives_runtime(
     """
 
     root = _absolute_path(archives_root)
+    if root == Path(root.anchor):
+        raise ArchivesRuntimeError(
+            "The filesystem root cannot be the Archives root; containment would be void."
+        )
 
     probe: Callable[[str], bool] = (
         os.path.ismount if mount_check is None else mount_check  # type: ignore[assignment]
@@ -84,30 +114,38 @@ def require_archives_runtime(
         raise ArchivesRuntimeError(
             "Archives root does not exist or is not a directory."
         )
+    resolved_root = _resolved(root)
 
+    # A concrete sequence is required, never a one-shot iterator: an already-consumed
+    # generator would otherwise be indistinguishable from a legitimately empty list and
+    # would pass vacuously.
     if isinstance(runtime_paths, (str, bytes)) or not isinstance(
-        runtime_paths, Iterable
+        runtime_paths, Sequence
     ):
-        raise ArchivesRuntimeError("Archives runtime paths must be a sequence.")
+        raise ArchivesRuntimeError("Archives runtime paths must be a concrete sequence.")
     for candidate in runtime_paths:
-        resolved = _absolute_path(candidate)
-        if not _is_within(resolved, root):
-            raise ArchivesRuntimeError(
-                "Mutable runtime state must live under the Archives root; "
-                "internal-disk fallbacks are not permitted."
-            )
+        _require_contained(
+            candidate,
+            root,
+            resolved_root,
+            "Mutable runtime state must live under the Archives root; "
+            "internal-disk fallbacks are not permitted.",
+        )
 
     if isinstance(required_directories, (str, bytes)) or not isinstance(
-        required_directories, Iterable
+        required_directories, Sequence
     ):
-        raise ArchivesRuntimeError("Archives required directories must be a sequence.")
+        raise ArchivesRuntimeError(
+            "Archives required directories must be a concrete sequence."
+        )
     for candidate in required_directories:
-        resolved = _absolute_path(candidate)
-        if not _is_within(resolved, root):
-            raise ArchivesRuntimeError(
-                "Required runtime directories must live under the Archives root."
-            )
-        if not resolved.is_dir():
+        directory = _require_contained(
+            candidate,
+            root,
+            resolved_root,
+            "Required runtime directories must live under the Archives root.",
+        )
+        if not directory.is_dir():
             raise ArchivesRuntimeError(
                 "A required Archives runtime directory is missing or is not a directory."
             )
