@@ -264,19 +264,29 @@ This is a **simulation tool** for educational purposes. It does not place real t
 
 MIT - do whatever you want with it.
 
-## Trading runtime dependencies (Task 8 — DEFERRED)
+## Trading runtime dependencies
 
-`requirements-trading.in` / `requirements-trading.txt` pin the LumiBot paper-trading runtime.
-The compiled tree resolves to **lumibot==4.5.86** with alpaca-py==0.44.0 (310 pins).
+`requirements-trading.in` / `requirements-trading.txt` pin the paper-trading runtime.
+The compiled tree resolves to **alpaca-py==0.44.0** (19 pins, no known vulnerabilities).
 
-**LumiBot is GPL-3.0.** It is consumed as an unmodified, unvendored dependency; current use is
-private/internal. Review the GPL implications before distributing any LumiBot-combined work.
+Alpaca's own SDK is used directly rather than a broker framework. The project already owns its
+broker abstraction — typed domain contracts, a deterministic risk gate, an append-only ledger,
+the execution service, and the broker protocol — so a second abstraction layer would be
+redundant. LumiBot was evaluated and **dropped**; see
+`docs/blockers/2026-08-28-lumibot-dependency.md` for the measured comparison.
 
-**These pins are NOT installed.** Installing them into the shared environment would change 19
-already-installed packages (including a breaking numpy 1 -> 2 upgrade and a certifi downgrade),
-introduce 25 known vulnerabilities, and pull an LLM stack (chromadb, langgraph, litellm) into the
-trading dependency tree. See `docs/blockers/2026-08-28-lumibot-dependency.md` for the full
-measurement and the recorded options.
+The trading pins are compiled against the application stack as a constraint, so installing them
+cannot move a version the app depends on:
 
-LumiBot is not required for the adapter work: `backend/trading/adapters/` takes an injected
-client factory, and its tests use fakes with no network and no credentials.
+```bash
+env -u PYTHONPATH "$ENVS/unified-trading-py311/bin/pip-compile" \
+    requirements-trading.in --constraint requirements.txt \
+    --constraint constraints-runtime.txt --output-file requirements-trading.txt
+```
+
+`tests/test_trading_runtime.py` enforces that invariant, so a future dependency bump cannot
+silently disturb the app stack.
+
+The Alpaca adapter (`backend/trading/adapters/alpaca_paper.py`) takes an injected client factory
+and accepts only `https://paper-api.alpaca.markets`, so the entire test suite runs with no
+network, no credentials, and no live client.

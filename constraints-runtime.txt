@@ -1,0 +1,5 @@
+# Transitive versions the application relies on that requirements.txt does not pin
+# directly. Constrained so the trading runtime cannot downgrade them -- certifi in
+# particular is the CA trust bundle.
+certifi==2026.7.22
+websockets==17.0.1

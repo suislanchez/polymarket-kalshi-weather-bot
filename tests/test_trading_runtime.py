@@ -1,57 +1,47 @@
-"""LumiBot runtime smoke checks.
+"""Trading runtime dependency checks for the Alpaca paper SDK.
 
-Import-only: this must never read credentials, construct a broker, or start
-network I/O. LumiBot is a pinned dependency of the paper runtime, not an
-execution path -- orders route through PaperExecutionService and the deterministic
-risk gate, never through a LumiBot broker.
+Import-only: nothing here performs network I/O or reads credentials. alpaca-py is
+a pinned SDK used to build a real paper client at runtime, not an execution path
+-- orders route through PaperExecutionService and the deterministic risk gate, and
+the adapter takes an injected client factory so the whole suite runs without a
+live client.
 """
 
 from __future__ import annotations
 
 import os
 import socket
+from pathlib import Path
 
 import pytest
 
-lumibot = pytest.importorskip(
-    "lumibot",
-    reason=(
-        "LumiBot install is DEFERRED: see docs/blockers/2026-08-28-lumibot-dependency.md. "
-        "requirements-trading.txt pins the resolved tree; installing it into the shared "
-        "environment would change 19 packages, downgrade certifi, and add 25 CVEs. These "
-        "checks run as soon as the dependency decision is made."
-    ),
-)
+ROOT = Path(__file__).resolve().parent.parent
 
 
-def test_lumibot_imports_without_starting_a_broker():
-    import lumibot
+def test_alpaca_sdk_imports_without_constructing_a_client():
+    import alpaca
 
-    assert lumibot.__version__
+    assert alpaca.__version__
 
 
-def test_lumibot_import_does_not_open_network_connections(monkeypatch):
-    """Importing LumiBot must not perform network I/O."""
-    opened: list[object] = []
+def test_alpaca_import_does_not_open_network_connections(monkeypatch):
+    """Importing the SDK must not perform network I/O."""
+    attempted: list[object] = []
 
-    real_connect = socket.socket.connect
-
-    def recording_connect(self, address):  # pragma: no cover - guard path
-        opened.append(address)
+    def refusing_connect(self, address):  # pragma: no cover - guard path
+        attempted.append(address)
         raise AssertionError(f"network connection attempted during import: {address!r}")
 
-    monkeypatch.setattr(socket.socket, "connect", recording_connect)
+    monkeypatch.setattr(socket.socket, "connect", refusing_connect)
     import importlib
 
-    import lumibot
+    import alpaca
 
-    importlib.reload(lumibot)
-    monkeypatch.setattr(socket.socket, "connect", real_connect)
-    assert opened == []
+    importlib.reload(alpaca)
+    assert attempted == []
 
 
-def test_lumibot_import_does_not_require_broker_credentials():
-    """No Alpaca or broker credential may be needed to import the runtime."""
+def test_alpaca_import_does_not_require_broker_credentials():
     for name in (
         "ALPACA_API_KEY",
         "ALPACA_API_SECRET",
@@ -60,25 +50,43 @@ def test_lumibot_import_does_not_require_broker_credentials():
     ):
         assert not os.environ.get(name), f"{name} must not be required or set in tests"
 
-    import lumibot
+    import alpaca
 
-    assert lumibot.__version__
-
-
-def test_pinned_requirements_file_exists_and_pins_lumibot():
-    from pathlib import Path
-
-    root = Path(__file__).resolve().parent.parent
-    compiled = (root / "requirements-trading.txt").read_text()
-    assert "lumibot==" in compiled.lower()
-    source = (root / "requirements-trading.in").read_text()
-    assert "lumibot" in source.lower()
+    assert alpaca.__version__
 
 
-def test_readme_records_the_resolved_lumibot_version():
-    from pathlib import Path
+def test_pinned_requirements_pin_alpaca_and_not_lumibot():
+    compiled = (ROOT / "requirements-trading.txt").read_text().lower()
+    source = (ROOT / "requirements-trading.in").read_text().lower()
+    assert "alpaca-py==" in compiled
+    assert "alpaca-py" in source
+    # LumiBot was dropped deliberately; it must not creep back in transitively.
+    assert "lumibot" not in compiled
 
-    root = Path(__file__).resolve().parent.parent
-    readme = (root / "README.md").read_text()
-    assert lumibot.__version__ in readme
-    assert "GPL" in readme
+
+def test_trading_runtime_does_not_disturb_the_application_stack():
+    """The trading pins must never move a version the application pins."""
+    app: dict[str, str] = {}
+    for line in (ROOT / "requirements.txt").read_text().splitlines():
+        line = line.split("#")[0].strip()
+        if "==" in line:
+            name, version = line.split("==", 1)
+            app[name.split("[")[0].strip().lower()] = version.strip()
+
+    for line in (ROOT / "requirements-trading.txt").read_text().splitlines():
+        line = line.split("#")[0].strip()
+        if "==" not in line:
+            continue
+        name, version = line.split("==", 1)
+        key = name.split("[")[0].strip().lower()
+        if key in app:
+            assert version.strip() == app[key], (
+                f"trading runtime would move {key} from {app[key]} to {version.strip()}"
+            )
+
+
+def test_readme_records_the_resolved_alpaca_version():
+    import alpaca
+
+    readme = (ROOT / "README.md").read_text()
+    assert alpaca.__version__ in readme

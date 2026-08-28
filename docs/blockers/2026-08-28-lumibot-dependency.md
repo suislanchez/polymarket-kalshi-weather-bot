@@ -1,6 +1,8 @@
 # BLOCKER — Task 8: LumiBot cannot be installed into the shared runtime
 
-**Status:** OPEN — Task 8 deferred by explicit user decision on 2026-08-28.
+**Status:** RESOLVED 2026-08-28 — LumiBot dropped; the runtime uses alpaca-py directly.
+See the resolution at the end of this document. The measurement below is retained because it
+is the evidence the decision rests on.
 **Raised by:** dependency resolution + `pip-audit`, per Task 8 Step 5 ("Any vulnerability must
 be triaged and resolved or documented as a blocker before continuing; do not suppress it
 silently").
@@ -60,3 +62,50 @@ caused two resolver runs to die with `OSError: [Errno 28] No space left on devic
 cache was purged (freeing to ~699Mi) and pip cache/tmp were redirected to
 `/Volumes/Archives/Hermes-Offload/2026-08-24/pip-workspace`. The underlying disk pressure is a
 pre-existing system condition and remains unresolved.
+
+---
+
+# RESOLUTION — 2026-08-28: LumiBot dropped, alpaca-py adopted
+
+User decision after reviewing the measurement above: **drop LumiBot, use alpaca-py directly.**
+
+The deciding argument was that LumiBot's purpose — "the common strategy and broker-abstraction
+layer" — is already served by code this project owns and has independently reviewed
+(domain contracts, deterministic risk gate, append-only ledger, execution service, broker
+protocol). LumiBot would have been a second abstraction beneath a closed one. Confirmed by
+inspection: **no task after Task 9 references LumiBot at all**, and the Alpaca adapter was written
+against an injected client factory, so it already worked with LumiBot absent.
+
+## Outcome, measured
+
+                      LumiBot 4.5.86        alpaca-py 0.44.0
+    pins              310                   19
+    new packages      256                   5
+    existing changed  19                    0
+    certifi           DOWNGRADED            unchanged
+    numpy             1.26.3 -> 2.4.6       unchanged
+    known vulns       25                    0
+    LLM stack pulled  chromadb, langgraph,  none
+                      litellm, openai
+
+`pip check`: no broken requirements. `pip-audit`: **No known vulnerabilities found.**
+Full suite unchanged at 948 passed.
+
+## How the zero-disruption result is held
+The trading pins are compiled against `requirements.txt` (the app's pinned stack) plus
+`constraints-runtime.txt` (transitive versions the app relies on that requirements.txt does not
+pin directly — notably certifi, the CA trust bundle). Without those constraints the resolver
+opportunistically upgraded six packages it did not actually require, including the breaking
+numpy 1 -> 2 jump. `tests/test_trading_runtime.py` asserts the invariant directly, so a future
+bump cannot silently move an app-pinned version.
+
+## Robinhood was considered and rejected as an alternative venue
+Robinhood's official Agentic Trading MCP has **no paper or sandbox environment**, so every order
+would be real money in a paper-only system. It is additionally not a member of the `Venue` enum,
+so the deterministic risk gate would reject any proposal naming it, and the design already lists
+the connector as disabled precisely because it exposes real-money actions. Read-only holdings
+mirroring remains on the deferred roadmap as a separate, non-executing track.
+
+## Status of the original blocker
+CLOSED. Task 8's deliverables are satisfied by the alpaca-py tree: pinned, installed, `pip check`
+clean, audited with zero vulnerabilities, and covered by tests/test_trading_runtime.py.

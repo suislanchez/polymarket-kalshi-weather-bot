@@ -564,3 +564,49 @@ Implementation rollback occurs per track through small commits. The pre-unificat
 - NautilusTrader Coinbase integration: https://nautilustrader.io/docs/latest/integrations/coinbase/
 - NautilusTrader Polymarket integration: https://nautilustrader.io/docs/latest/integrations/polymarket/
 - PrimoAgent: https://github.com/ivebotunac/PrimoAgent
+
+---
+
+## Amendment 1 — 2026-08-28: LumiBot dropped in favour of alpaca-py
+
+**Supersedes:** the "LumiBot hybrid" decision and the "Selected foundation" row of the framework
+comparison table, for the execution-venue dependency only. Everything else in this document
+stands.
+
+**Decision:** use `alpaca-py` (Alpaca's own SDK) directly. Do not depend on LumiBot.
+
+**Why the original decision no longer holds.** LumiBot was selected as "the common strategy and
+broker-abstraction layer". That layer has since been built in this repository and independently
+reviewed: `backend/trading/domain.py` (typed contracts), `risk.py` (deterministic risk gate),
+`ledger.py` (append-only hash-chained audit), `service.py` (execution orchestration) and
+`adapters/base.py` (broker protocol). LumiBot would now be a second, redundant abstraction
+beneath one that is already closed and reviewed.
+
+**Measured cost of keeping it** (2026-08-28, resolved and audited, never installed):
+- 310 pins, 256 new packages; would have changed 19 already-installed packages including a
+  breaking numpy 1 -> 2 upgrade and the whole FastAPI/pydantic/starlette stack;
+- would have DOWNGRADED certifi (the CA trust bundle), websockets and click;
+- 25 known vulnerabilities;
+- pulled chromadb, langgraph, litellm, openai and tiktoken — an LLM/vector-DB stack — into the
+  trading dependency tree, in tension with the standing rule that research/LLM components may
+  propose only and never hold credentials, authorize, submit, cancel, or bypass risk;
+- the only version that coexisted with the app stack was lumibot 1.5.5, three majors behind,
+  carrying urllib3 1.24.3 with nine CVEs.
+
+**Cost of the replacement:** alpaca-py 0.44.0 (latest), 19 pins, 5 new packages, **zero** changes
+to any already-installed package, and **no known vulnerabilities**.
+
+**What does not change.** `backend/trading/adapters/alpaca_paper.py` is unaffected: it was written
+against an injected `client_factory` and a minimal duck-typed client surface, so it never depended
+on LumiBot. Alpaca Paper remains the only initially enabled execution venue; Polymarket and Kalshi
+remain simulated; Robinhood and Coinbase remain disconnected.
+
+**Consequences.** Backtesting and LumiBot's Polymarket/Coinbase paths are not acquired from a
+framework. Neither is in scope for this milestone; if backtesting is wanted later it is a separate
+design decision, not a dependency default.
+
+**Robinhood was considered as an alternative venue and rejected.** Robinhood's official Agentic
+Trading MCP has no paper or sandbox environment (see the reference already cited in this
+document), so every order would be real money in a system whose foundational invariant is
+paper-only. `Venue` does not include Robinhood, so the risk gate would reject such a proposal
+regardless. Read-only holdings mirroring remains on the deferred roadmap.

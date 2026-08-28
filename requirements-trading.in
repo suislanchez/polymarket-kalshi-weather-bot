@@ -1,14 +1,19 @@
 # Unified paper-trading runtime dependencies, isolated from the weather/API stack.
 #
-# LumiBot is GPL-3.0. It is consumed as an unmodified, unvendored dependency and
-# the current use is private/internal. Review the GPL implications before
-# distributing any LumiBot-combined work.
+# Alpaca's own SDK is used directly rather than a broker framework. The project
+# already owns its broker abstraction -- backend/trading/domain.py (typed
+# contracts), risk.py (deterministic risk gate), ledger.py (append-only audit),
+# service.py (execution orchestration) and adapters/base.py (broker protocol) --
+# so a second abstraction layer would be redundant. See
+# docs/blockers/2026-08-28-lumibot-dependency.md for the measured comparison.
 #
-# LumiBot is a strategy/backtest framework here, not an execution path: orders
-# route through PaperExecutionService and the deterministic risk gate. No broker
-# is constructed at import time and no credentials are required.
+# The Alpaca adapter (backend/trading/adapters/alpaca_paper.py) takes an injected
+# client factory, so this dependency is needed only for a real paper client at
+# runtime; the entire test suite runs without it.
 #
-# Compile with:
+# ALWAYS compile against the application stack as a constraint, so the trading
+# runtime can never silently upgrade or downgrade the app's pinned dependencies:
 #   env -u PYTHONPATH "$ENVS/unified-trading-py311/bin/pip-compile" \
-#       requirements-trading.in --output-file requirements-trading.txt
-lumibot
+#       requirements-trading.in --constraint requirements.txt \
+#       --constraint constraints-runtime.txt --output-file requirements-trading.txt
+alpaca-py

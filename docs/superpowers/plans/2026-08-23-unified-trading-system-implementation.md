@@ -561,7 +561,20 @@ git commit -m "feat: route paper orders through risk and ledger"
 
 ---
 
-### Task 8: Isolate and pin LumiBot on Archives
+### Task 8: Isolate and pin the trading runtime on Archives
+
+> **AMENDED 2026-08-28 — LumiBot dropped, alpaca-py adopted.** LumiBot was resolved, audited and
+> measured, then rejected: it would have changed 19 installed packages (breaking numpy 1 -> 2),
+> downgraded certifi, added 25 CVEs, and pulled an LLM stack into the trading tree. The broker
+> abstraction it was chosen for is already built and reviewed in this repository. The runtime now
+> pins **alpaca-py** instead: 19 pins, zero changes to existing packages, zero known
+> vulnerabilities. Files are `requirements-trading.in`, `requirements-trading.txt`,
+> `constraints-runtime.txt`, `README.md`, `tests/test_trading_runtime.py`. Compile ALWAYS with
+> `--constraint requirements.txt --constraint constraints-runtime.txt`. See
+> `docs/blockers/2026-08-28-lumibot-dependency.md` and design Amendment 1. The steps below are
+> retained as the original record; substitute alpaca-py for LumiBot throughout.
+
+### Task 8 (original): Isolate and pin LumiBot on Archives
 
 **Files:**
 - Create: `requirements-trading.in`
@@ -657,7 +670,7 @@ Expected: import failure.
 
 **Step 3: Implement adapter with dependency injection**
 
-Construction takes `client_factory` plus settings. Validate endpoint and `EXECUTION_MODE` before invoking the factory. Wrap the smallest stable LumiBot broker surface; do not let API routes or strategies instantiate Alpaca directly.
+Construction takes `client_factory` plus settings. Validate endpoint and `EXECUTION_MODE` before invoking the factory. Wrap the smallest stable broker surface (alpaca-py, per Task 8's 2026-08-28 amendment); do not let API routes or strategies instantiate Alpaca directly.
 
 **Step 4: Run GREEN and contract tests**
 
