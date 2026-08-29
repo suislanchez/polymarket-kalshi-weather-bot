@@ -364,28 +364,44 @@ def test_simulated_fill_is_independent_of_the_ambient_decimal_context(precision)
 
 
 @pytest.mark.parametrize("trap", [Inexact, Rounded])
-def test_a_strict_ambient_context_cannot_escape_the_sanitized_error_boundary(trap):
+@pytest.mark.parametrize(
+    "size,entry_price,precision",
+    [
+        # A short price: the drift needs 2 significant digits, so only precision 1 escapes.
+        (50.0, 0.56, 1),
+        # A repr-17 price, which is the ordinary case rather than the exotic one:
+        # WeatherMarket.best_ask is a plain float, and _exact_decimal preserves all 17
+        # digits via Decimal(str(value)). Here the drift needs 17 significant digits and
+        # the pre-fix expression escapes at every precision through 16.
+        (5.0, 0.30000000000000004, 16),
+    ],
+)
+def test_a_strict_ambient_context_cannot_escape_the_sanitized_error_boundary(
+    trap, size, entry_price, precision
+):
     """A raw decimal exception must never escape submit_order.
 
     The reconciliation check compares a long inexact quotient against the recorded
-    notional; the drift is tiny, so it needs two significant digits. A caller
-    running at precision 1 with inexactness trapped -- which is what this codebase
-    itself does internally -- would make that subtraction raise decimal.Inexact
-    straight out of submit_order, past the BrokerAdapterError boundary every
+    notional. Unpinned, that subtraction raises decimal.Inexact straight out of
+    submit_order under a caller that traps inexactness -- which is what this
+    codebase does internally -- bypassing the BrokerAdapterError boundary every
     adapter failure is required to surface through.
 
-    The window is narrow: precision 2 and above is unaffected. It is still a real
-    escape of a boundary this codebase treats as absolute, which is why the
-    reconciliation arithmetic is pinned rather than left to the caller.
+    How wide the window is depends on the price, not on a constant: the drift's
+    significant-digit count tracks the price's coefficient width. A 2-digit price
+    escapes only at precision 1; a 17-digit float price escapes at every precision
+    through 16. Both are parametrized here because the second is the reachable one
+    and an earlier version of this test, written only against the first, passed
+    against the unfixed code and proved nothing.
     """
-    order = order_from(build_proposal(make_signal(), size=50.0, entry_price=0.56))
+    order = order_from(build_proposal(make_signal(), size=size, entry_price=entry_price))
     with localcontext() as context:
-        context.prec = 1
+        context.prec = precision
         context.traps[trap] = True
         report = polymarket_adapter().submit_order(order, execution_mode="paper")
 
     assert report.status is OrderStatus.FILLED
-    assert report.filled_notional == Decimal("50")
+    assert report.filled_notional == Decimal(str(size))
 
 
 def test_kalshi_monitor_only_refuses_to_simulate_a_fill(monkeypatch):
