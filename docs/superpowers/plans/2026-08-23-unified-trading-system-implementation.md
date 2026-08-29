@@ -744,12 +744,30 @@ git commit -m "feat: add deterministic stock crypto proposals"
 
 ### Task 11: Preserve weather simulation behind normalized adapters
 
+> **AMENDED 2026-08-28 — Step 3 split; ledger routing reassigned to Task 12.** Step 3 below
+> bundled three clauses: translate weather signals into `TradeProposal`, reuse the existing
+> validation/reliability methods, and route accepted simulation orders into the unified event
+> ledger. The first two are delivered in commit `7e58b6c`. The third is **not**, and is
+> reassigned to Task 12, which owns job registration and is the only task with a composition
+> root to route from. Building it inside Task 11 would have introduced a second, freshly
+> written simulated-fill path into the live weather lane in the same commit that created that
+> path — the risk Task 12's duplicate-order and sanitized-failure tests exist to catch.
+> The spec review of `7e58b6c` found the deferral declared but **unowned**; this amendment
+> gives it an owner. The file list and Step 5 below are also corrected: they omitted
+> `prediction_paper.py` (the shared simulation engine both venues use, since they price the
+> same instrument) and `tests/test_broker_adapter_contract.py` (whose adapter-source policy
+> asserts an exact file list, so adding adapters without updating it leaves the suite red).
+
 **Files:**
+- Create: `backend/trading/adapters/prediction_paper.py`
 - Create: `backend/trading/adapters/polymarket_paper.py`
 - Create: `backend/trading/adapters/kalshi_paper.py`
 - Modify: `backend/core/scheduler.py`
 - Create: `tests/test_weather_paper_adapters.py`
-- Modify: `tests/test_weather_venue_reliability_integration.py`
+- Modify: `tests/test_broker_adapter_contract.py`
+- Unchanged: `tests/test_weather_venue_reliability_integration.py` — originally listed as
+  Modify. It is left byte-identical on purpose; passing as written is the preservation
+  evidence Step 1's last item asks for.
 
 **Step 1: Write failing preservation tests**
 
@@ -774,7 +792,14 @@ Expected: new test fails because normalized adapters do not exist.
 
 **Step 3: Implement thin adapters**
 
-Translate existing weather signals into `TradeProposal`, reuse current validation/reliability methods, and route accepted simulation orders into the unified event ledger while retaining legacy `Trade` rows during the compatibility phase.
+Translate existing weather signals into `TradeProposal` and reuse current validation/reliability
+methods. Refusal must be delegated to the existing `_weather_paper_execution_blockers` so the
+venue reliability gates keep their authority; the translation adds only the structural checks
+the normalized contract itself requires.
+
+~~and route accepted simulation orders into the unified event ledger while retaining legacy
+`Trade` rows during the compatibility phase~~ — **reassigned to Task 12** by the 2026-08-28
+amendment above. Task 11's translation is pure: it reads no storage and writes no ledger.
 
 **Step 4: Run GREEN plus all weather tests**
 
@@ -787,7 +812,7 @@ Expected: pass.
 **Step 5: Commit**
 
 ```bash
-git add backend/trading/adapters/polymarket_paper.py backend/trading/adapters/kalshi_paper.py backend/core/scheduler.py tests/test_weather_paper_adapters.py tests/test_weather_venue_reliability_integration.py
+git add backend/trading/adapters/prediction_paper.py backend/trading/adapters/polymarket_paper.py backend/trading/adapters/kalshi_paper.py backend/core/scheduler.py tests/test_weather_paper_adapters.py tests/test_broker_adapter_contract.py
 git diff --cached --check
 git commit -m "feat: normalize weather paper execution"
 ```
@@ -795,6 +820,13 @@ git commit -m "feat: normalize weather paper execution"
 ---
 
 ### Task 12: Integrate unified paper jobs without enabling them by default
+
+> **AMENDED 2026-08-28 — inherits weather ledger routing from Task 11.** Task 11 built the
+> weather translation and the two simulation venues but deliberately left them with no
+> production call site. Routing accepted weather proposals into the unified event ledger,
+> while legacy `Trade` rows are retained during the compatibility phase, is now this task's
+> responsibility alongside the stock/crypto lane. Both lanes must reach the ledger through
+> `PaperExecutionService`; no direct adapter call may appear in scheduler code.
 
 **Files:**
 - Modify: `backend/core/scheduler.py`
@@ -810,6 +842,10 @@ Verify:
 - `STOCK_CRYPTO_LANE_ENABLED=false` registers no Alpaca job;
 - enabling it registers exactly one bounded job;
 - weather jobs still register under existing flags;
+- accepted weather proposals route into the unified event ledger through `PaperExecutionService`
+  while legacy `Trade` rows are retained (inherited from Task 11 Step 3);
+- a weather signal the reliability gates refuse reaches neither the ledger nor an adapter;
+- Kalshi weather stays monitor-only end to end with `WEATHER_KALSHI_PAPER_EXECUTION_ENABLED=false`;
 - BTC prediction and entertainment jobs remain paused;
 - one run can return zero proposals successfully;
 - repeated job invocation cannot duplicate orders;
@@ -826,6 +862,11 @@ Expected: new tests fail.
 **Step 3: Add a bounded unified job**
 
 Add `stock_crypto_paper_job()` and register it only when both scheduler autostart and lane flag are enabled. It obtains market data, asks strategy for proposals, then hands proposals to `PaperExecutionService`. No direct broker call is allowed in scheduler code.
+
+Wire the weather lane the same way: `weather_scan_and_trade_job()` passes each proposal from
+`build_weather_paper_proposal()` to `PaperExecutionService` and continues to write its legacy
+`Trade` row. The two paths must not be able to disagree about whether an order happened, and a
+failure in the new path must not stop the legacy one.
 
 **Step 4: Run GREEN and scheduler regressions**
 

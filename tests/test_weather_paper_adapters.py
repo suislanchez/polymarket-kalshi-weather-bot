@@ -9,7 +9,7 @@ no order-signing or CLOB surface.
 import ast
 import inspect
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, Inexact, Rounded, localcontext
 from pathlib import Path
 
 import pytest
@@ -345,6 +345,47 @@ def test_inexact_share_counts_still_reconcile_against_the_recorded_notional():
     assert report.average_fill_price == Decimal("0.56")
     # quantity * price must reproduce the notional to well within a cent.
     assert abs(report.filled_quantity * Decimal("0.56") - Decimal("50")) < Decimal("0.0001")
+
+
+@pytest.mark.parametrize("precision", [1, 5, 60])
+def test_simulated_fill_is_independent_of_the_ambient_decimal_context(precision):
+    """Fill values must not depend on the decimal context the caller happens to have."""
+    order = order_from(build_proposal(make_signal(), size=50.0, entry_price=0.56))
+    with localcontext() as context:
+        context.prec = 28
+        normal = polymarket_adapter().submit_order(order, execution_mode="paper")
+    with localcontext() as context:
+        context.prec = precision
+        hostile = polymarket_adapter().submit_order(order, execution_mode="paper")
+
+    assert hostile.filled_quantity == normal.filled_quantity
+    assert hostile.filled_notional == normal.filled_notional == Decimal("50")
+    assert hostile.average_fill_price == normal.average_fill_price
+
+
+@pytest.mark.parametrize("trap", [Inexact, Rounded])
+def test_a_strict_ambient_context_cannot_escape_the_sanitized_error_boundary(trap):
+    """A raw decimal exception must never escape submit_order.
+
+    The reconciliation check compares a long inexact quotient against the recorded
+    notional; the drift is tiny, so it needs two significant digits. A caller
+    running at precision 1 with inexactness trapped -- which is what this codebase
+    itself does internally -- would make that subtraction raise decimal.Inexact
+    straight out of submit_order, past the BrokerAdapterError boundary every
+    adapter failure is required to surface through.
+
+    The window is narrow: precision 2 and above is unaffected. It is still a real
+    escape of a boundary this codebase treats as absolute, which is why the
+    reconciliation arithmetic is pinned rather than left to the caller.
+    """
+    order = order_from(build_proposal(make_signal(), size=50.0, entry_price=0.56))
+    with localcontext() as context:
+        context.prec = 1
+        context.traps[trap] = True
+        report = polymarket_adapter().submit_order(order, execution_mode="paper")
+
+    assert report.status is OrderStatus.FILLED
+    assert report.filled_notional == Decimal("50")
 
 
 def test_kalshi_monitor_only_refuses_to_simulate_a_fill(monkeypatch):

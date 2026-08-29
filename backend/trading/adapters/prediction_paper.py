@@ -105,6 +105,26 @@ def _exact_multiply(left: Decimal, right: Decimal) -> Decimal:
         return left * right
 
 
+def _digit_span(value: Decimal) -> int:
+    """Digits needed to write a finite Decimal out in full, including its scale."""
+    digits, exponent = value.as_tuple().digits, value.as_tuple().exponent
+    return len(digits) + (abs(exponent) if type(exponent) is int else 0)
+
+
+def _exact_absolute_difference(left: Decimal, right: Decimal) -> Decimal:
+    """Absolute difference in a context wide enough to hold both operands exactly.
+
+    The reconciliation check below is the guard that makes an inexact quotient
+    safe to book, so it must not inherit the caller's ambient decimal context: a
+    process running at low precision could otherwise round real drift down to
+    zero and the check would approve the fill it exists to refuse.
+    """
+
+    precision = max(28, _digit_span(left) + _digit_span(right))
+    with localcontext(_decimal_context(precision=precision, exact=True)):
+        return abs(left - right)
+
+
 def _deterministic_divide(numerator: Decimal, denominator: Decimal) -> Decimal:
     """Divide exactly when the quotient terminates, otherwise deterministically."""
 
@@ -356,11 +376,14 @@ class PredictionMarketPaperAdapter:
         try:
             quantity = _deterministic_divide(notional, price)
             reconciled = _exact_multiply(quantity, price)
+            if not quantity.is_finite() or quantity <= 0 or not reconciled.is_finite():
+                raise BrokerAdapterError("simulated fill arithmetic failed")
+            drift = _exact_absolute_difference(reconciled, notional)
         except DecimalException:
             raise BrokerAdapterError("simulated fill arithmetic failed") from None
-        if not quantity.is_finite() or quantity <= 0 or not reconciled.is_finite():
-            raise BrokerAdapterError("simulated fill arithmetic failed")
-        if abs(reconciled - notional) > _RECONCILIATION_TOLERANCE:
+        # Comparison, not arithmetic: Decimal comparisons are exact and take no
+        # rounding from the active context.
+        if drift > _RECONCILIATION_TOLERANCE:
             raise BrokerAdapterError("simulated fill failed to reconcile with notional")
         return quantity, notional
 
