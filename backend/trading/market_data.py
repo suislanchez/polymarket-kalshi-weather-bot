@@ -147,6 +147,11 @@ def load_bar_series(payload: Mapping[str, object]) -> BarSeries:
         missing = [f for f in _REQUIRED_BAR_FIELDS if f not in raw]
         if missing:
             raise MarketDataError(f"bar is missing required fields: {sorted(missing)}")
+        unknown = [f for f in raw if f not in _REQUIRED_BAR_FIELDS]
+        if unknown:
+            # Refuse silently-ignored fields: an unexpected key usually means the
+            # feed shape changed, which is exactly when guessing is unsafe.
+            raise MarketDataError(f"bar has unexpected fields: {sorted(unknown)}")
         try:
             bars.append(
                 MarketBar(

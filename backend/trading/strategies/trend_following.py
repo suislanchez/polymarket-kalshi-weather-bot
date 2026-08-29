@@ -80,10 +80,16 @@ class TrendFollowingStrategy:
         The ambient process context is NOT trusted: a caller running at reduced
         precision must never change which signal this strategy reports.
         """
+        # Size for the WIDEST significand plus the full exponent span: summing
+        # values of very different magnitudes needs digits for the gap between
+        # them, not just for the largest one. Rounding is trapped regardless, so
+        # an underestimate fails closed as indeterminate_signal rather than
+        # silently changing the signal.
         widest = max((len(v.as_tuple().digits) for v in values), default=1)
-        # digits for the widest value, plus room for the sum and the window scaling
+        exponents = [v.as_tuple().exponent for v in values if v.is_finite()]
+        span = (max(exponents) - min(exponents)) if exponents else 0
         return Context(
-            prec=widest + len(str(len(values))) + len(str(window)) + 16,
+            prec=widest + abs(span) + len(str(len(values))) + len(str(window)) + 16,
             traps=[Inexact, Rounded, Clamped, Overflow, Underflow, InvalidOperation],
         )
 
@@ -110,23 +116,45 @@ class TrendFollowingStrategy:
         if failed or previous is None or current is None:
             return "indeterminate_signal"
 
-        if previous <= 0 and current > 0:
+        # Strict on BOTH sides. Equality on the previous bar means the averages
+        # touched, and above -> equal -> above never crossed anything; treating
+        # a touch as a cross would invent trades the rule does not justify.
+        if previous < 0 and current > 0:
             return "golden_cross"
-        if previous >= 0 and current < 0:
+        if previous > 0 and current < 0:
             return "death_cross"
         return "no_crossover"
 
-    def _proposal_id(self, series: BarSeries, side: Side, reason: str) -> str:
-        """Deterministic identity: same inputs, same id, on every machine and run."""
+    def _proposal_id(
+        self,
+        series: BarSeries,
+        side: Side,
+        reason: str,
+        *,
+        notional: Decimal | None,
+        quantity: Decimal | None,
+        reference_price: Decimal,
+    ) -> str:
+        """Deterministic identity over EVERY field that distinguishes a proposal.
+
+        Size and reference price are included deliberately: two proposals off the
+        same bar but for different amounts are distinct proposals, and the ledger
+        treats the id as an aggregate key, so a collision would make one silently
+        replay as the other.
+        """
         material = "\x1f".join(
             (
                 STRATEGY_ID,
                 series.symbol,
+                series.asset_class.value,
                 side.value,
                 reason,
                 _timestamp(series.latest.timestamp),
                 str(self.fast_window),
                 str(self.slow_window),
+                "-" if notional is None else str(notional),
+                "-" if quantity is None else str(quantity),
+                str(reference_price),
             )
         ).encode("utf-8")
         return f"trend-{hashlib.sha256(material).hexdigest()[:32]}"
@@ -145,6 +173,10 @@ class TrendFollowingStrategy:
             return StrategySignal(None, "invalid_series")
         if series.symbol not in self.SUPPORTED_SYMBOLS:
             return StrategySignal(None, "symbol_not_supported")
+        if series.asset_class not in {AssetClass.STOCK, AssetClass.CRYPTO}:
+            # Spot strategies never emit prediction-market proposals, even if a
+            # BarSeries is constructed directly rather than through load_bar_series.
+            return StrategySignal(None, "asset_class_not_supported")
         if type(notional_cap) is not Decimal or not notional_cap.is_finite() or notional_cap <= 0:
             return StrategySignal(None, "invalid_notional_cap")
         if (
@@ -153,7 +185,14 @@ class TrendFollowingStrategy:
             or position_quantity < 0
         ):
             return StrategySignal(None, "invalid_position_quantity")
-        if type(now) is not datetime or now.tzinfo is None:
+        if type(now) is not datetime:
+            return StrategySignal(None, "invalid_clock")
+        try:
+            # tzinfo may be present but return None from utcoffset(), which is
+            # still a naive instant and would raise on comparison.
+            if now.utcoffset() is None:
+                return StrategySignal(None, "invalid_clock")
+        except Exception:
             return StrategySignal(None, "invalid_clock")
 
         # One extra bar is required beyond the slow window so the PREVIOUS
@@ -182,16 +221,25 @@ class TrendFollowingStrategy:
             f"{self.fast_window}/{self.slow_window} SMA {reason} on {series.symbol} "
             f"at bar {_timestamp(latest.timestamp)}; close={latest.close}"
         )
+        notional = notional_cap if side is Side.BUY else None
+        quantity = None if side is Side.BUY else position_quantity
         proposal = TradeProposal(
-            proposal_id=self._proposal_id(series, side, reason),
+            proposal_id=self._proposal_id(
+                series,
+                side,
+                reason,
+                notional=notional,
+                quantity=quantity,
+                reference_price=latest.close,
+            ),
             strategy_id=STRATEGY_ID,
             venue=Venue.ALPACA_PAPER,
             asset_class=series.asset_class,
             symbol=series.symbol,
             side=side,
             # Buys are sized by the caller's cap; sells reduce exactly what is held.
-            notional=notional_cap if side is Side.BUY else None,
-            quantity=None if side is Side.BUY else position_quantity,
+            notional=notional,
+            quantity=quantity,
             reference_price=latest.close,
             market_data_at=latest.timestamp,
             created_at=latest.timestamp,
