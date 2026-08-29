@@ -361,21 +361,63 @@ def test_a_nonterminating_price_fills_whole_increments_and_underspends():
     assert Decimal("50") - report.filled_notional < Decimal("0.000001")
 
 
-def test_a_notional_too_small_for_one_contract_is_refused_not_rounded():
-    """Kalshi trades whole contracts; a fractional contract does not exist."""
+def test_a_notional_too_small_for_one_contract_is_refused_not_rounded(monkeypatch):
+    """Kalshi trades whole contracts; a fractional contract does not exist.
+
+    The proposal builder is gated by the same flag the scheduler reads, so the
+    gate has to be opened here or the builder returns None and this test never
+    reaches its assertions. It previously skipped on the default configuration,
+    which left the refusal below unasserted on every ordinary run.
+    """
     from backend.trading.adapters.kalshi_paper import KalshiPaperAdapter
 
+    monkeypatch.setattr(settings, "WEATHER_KALSHI_PAPER_EXECUTION_ENABLED", True)
     monitor_free = KalshiPaperAdapter(clock=clock, execution_enabled=True)
     proposal = build_weather_paper_proposal(
         make_signal("kalshi"), size=0.5, entry_price=0.56, created_at=CLOCK_TIME
     )
-    if proposal is None:  # scheduler gate is closed by default for Kalshi
-        pytest.skip("kalshi proposal requires the scheduler gate open")
+    assert proposal is not None
     report = monitor_free.submit_order(order_from(proposal), execution_mode="paper")
 
+    # A refusal, not an exception, and not a rounded-into-existence fraction.
     assert report.status is OrderStatus.REJECTED
     assert report.rejection_reason == "notional_below_one_share_increment"
     assert report.filled_quantity == Decimal("0")
+    assert report.filled_notional == Decimal("0")
+
+
+def test_a_fill_that_flooring_cannot_bring_under_the_order_is_refused(monkeypatch):
+    """The terminal overspend comparison, not flooring, holds the invariant here.
+
+    Flooring keeps the recorded notional at or below the order for every size the
+    weather lane can produce. For a notional whose coefficient exhausts the
+    precision budget the quotient rounds up and flooring has no digit left to
+    trim, so the explicit comparison is the last line of defence. It must refuse
+    rather than book a fill worth more than was ordered.
+    """
+
+    huge = NormalizedOrder(
+        client_order_id="wx-precision-starved-1",
+        proposal_id="wx-precision-starved",
+        venue=Venue.POLYMARKET_PAPER,
+        asset_class=AssetClass.PREDICTION_WEATHER,
+        symbol="polymarket-nyc-high-75f-1:yes",
+        side=Side.BUY,
+        status=OrderStatus.APPROVED,
+        quantity=None,
+        notional=Decimal("1E+20"),
+        order_type=OrderType.LIMIT,
+        limit_price=Decimal("0.06"),
+        created_at=CLOCK_TIME,
+        metadata={},
+    )
+    adapter = PolymarketPaperAdapter(clock=clock)
+
+    with pytest.raises(BrokerAdapterError, match="exceeded the ordered notional"):
+        adapter.submit_order(huge, execution_mode="paper")
+
+    # Fail closed: nothing was cached, so a replay does not resurrect the fill.
+    assert adapter.get_order("wx-precision-starved-1") is None
 
 
 @pytest.mark.parametrize("precision", [1, 5, 60])
