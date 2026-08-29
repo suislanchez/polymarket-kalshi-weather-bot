@@ -1,6 +1,10 @@
 """Background scheduler for BTC 5-min autonomous trading."""
 import asyncio
-from datetime import datetime, timedelta
+import hashlib
+import json
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
+from math import isfinite
 from typing import List, Optional
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
@@ -10,6 +14,13 @@ import logging
 from backend.config import settings
 from backend.models.database import SessionLocal, Trade, BotState, Signal
 from backend.core.signals import scan_for_signals
+from backend.trading.domain import (
+    AssetClass,
+    OrderType,
+    Side,
+    TradeProposal,
+    Venue,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("trading_bot")
@@ -101,6 +112,201 @@ def _weather_paper_execution_blockers(signal) -> list[str]:
     no_trade_reasons = list(getattr(signal, "no_trade_reasons", []) or [])
     blockers.extend(str(reason) for reason in no_trade_reasons if reason)
     return blockers
+
+
+WEATHER_STRATEGY_ID = "weather-ensemble-v1"
+
+# Only these platforms have a simulated paper venue. Anything else is refused
+# rather than guessed at, so a new venue cannot reach execution by accident.
+_WEATHER_PAPER_VENUES = {
+    "polymarket": Venue.POLYMARKET_PAPER,
+    "kalshi": Venue.KALSHI_PAPER,
+}
+
+
+def weather_paper_venue(platform: object) -> Optional[Venue]:
+    """Map a weather market platform onto its simulated paper venue."""
+    if not isinstance(platform, str):
+        return None
+    return _WEATHER_PAPER_VENUES.get(platform.strip().lower())
+
+
+def _finite_float(value: object) -> Optional[float]:
+    """Return a finite float, rejecting bools, non-numbers, NaN and infinities."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError, InvalidOperation):
+        return None
+    return number if isfinite(number) else None
+
+
+def _exact_decimal(value: object) -> Optional[Decimal]:
+    """Convert a finite number to Decimal via its shortest round-tripping text.
+
+    Going through ``str`` keeps 0.56 as ``Decimal("0.56")`` rather than the binary
+    expansion ``Decimal(0.56)`` would produce, so identical inputs always digest
+    to identical proposal identifiers.
+    """
+    number = _finite_float(value)
+    if number is None:
+        return None
+    try:
+        converted = Decimal(str(number))
+    except InvalidOperation:
+        return None
+    return converted if converted.is_finite() else None
+
+
+def _open_interval_price(value: object) -> Optional[Decimal]:
+    price = _exact_decimal(value)
+    if price is None or not (Decimal("0") < price < Decimal("1")):
+        return None
+    return price
+
+
+def _positive_amount(value: object) -> Optional[Decimal]:
+    amount = _exact_decimal(value)
+    if amount is None or amount <= 0:
+        return None
+    return amount
+
+
+def _as_utc(value: object) -> Optional[datetime]:
+    """Normalize a signal timestamp to UTC, reading naive values as UTC."""
+    if type(value) is not datetime:
+        return None
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def build_weather_paper_proposal(
+    signal,
+    *,
+    size: float,
+    entry_price: float,
+    created_at: datetime,
+) -> Optional[TradeProposal]:
+    """Translate a gated weather signal into the normalized proposal contract.
+
+    Returns ``None`` whenever the signal is not executable. Refusal is delegated
+    to :func:`_weather_paper_execution_blockers` so the legacy venue reliability
+    gates stay the single authority over what may execute; this function adds
+    only the structural checks the normalized contract itself requires.
+
+    This is a pure translation. It reads no storage and writes no ledger: routing
+    accepted proposals into the unified event log is a later integration step.
+    """
+    if _weather_paper_execution_blockers(signal):
+        return None
+
+    market = getattr(signal, "market", None)
+    if market is None:
+        return None
+
+    venue = weather_paper_venue(getattr(market, "platform", None))
+    if venue is None:
+        return None
+
+    market_id = str(getattr(market, "market_id", "") or "").strip()
+    if not market_id:
+        return None
+
+    outcome = str(getattr(signal, "direction", "") or "").strip().lower()
+    if outcome not in {"yes", "no"}:
+        return None
+
+    price = _open_interval_price(entry_price)
+    notional = _positive_amount(size)
+    market_data_at = _as_utc(getattr(signal, "timestamp", None))
+    created_at_utc = _as_utc(created_at)
+    if price is None or notional is None or market_data_at is None or created_at_utc is None:
+        return None
+
+    target_date = getattr(market, "target_date", None)
+    target_date_text = target_date.isoformat() if hasattr(target_date, "isoformat") else None
+    metric = str(getattr(market, "metric", "") or "") or None
+    market_direction = str(getattr(market, "direction", "") or "") or None
+    threshold_f = _finite_float(getattr(market, "threshold_f", None))
+
+    metadata = {
+        "market_id": market_id,
+        "platform": str(getattr(market, "platform", "") or "").strip().lower(),
+        "slug": str(getattr(market, "slug", "") or "") or None,
+        "outcome": outcome,
+        "city_key": str(getattr(market, "city_key", "") or "") or None,
+        "city_name": str(getattr(market, "city_name", "") or "") or None,
+        "target_date": target_date_text,
+        "metric": metric,
+        "market_direction": market_direction,
+        "threshold_f": threshold_f,
+        "model_probability": _finite_float(getattr(signal, "model_probability", None)),
+        "market_probability": _finite_float(getattr(signal, "market_probability", None)),
+        "edge": _finite_float(getattr(signal, "edge", None)),
+        "confidence": _finite_float(getattr(signal, "confidence", None)),
+        "ensemble_mean": _finite_float(getattr(signal, "ensemble_mean", None)),
+        "ensemble_std": _finite_float(getattr(signal, "ensemble_std", None)),
+        "ensemble_members": int(getattr(signal, "ensemble_members", 0) or 0),
+        "settlement_source": str(getattr(market, "settlement_source", "") or "") or None,
+        "settlement_station": str(getattr(market, "settlement_station", "") or "") or None,
+        "execution_spread": _finite_float(getattr(signal, "execution_spread", None)),
+        "top_ask_size": _finite_float(getattr(signal, "top_ask_size", None)),
+        "bucket_set_probability_mass": _finite_float(
+            getattr(signal, "bucket_set_probability_mass", None)
+        ),
+        "bucket_set_sanity_passed": bool(getattr(signal, "bucket_set_sanity_passed", False)),
+    }
+
+    # Everything that distinguishes one order from another must be digested, or
+    # two different orders collide on one identifier the ledger keys by.
+    identity = json.dumps(
+        {
+            "strategy_id": WEATHER_STRATEGY_ID,
+            "venue": venue.value,
+            "market_id": market_id,
+            "outcome": outcome,
+            "side": Side.BUY.value,
+            "order_type": OrderType.LIMIT.value,
+            "notional": str(notional),
+            "limit_price": str(price),
+            "market_data_at": market_data_at.isoformat(),
+            "target_date": target_date_text,
+            "metric": metric,
+            "market_direction": market_direction,
+            "threshold_f": None if threshold_f is None else str(threshold_f),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    proposal_id = "wx-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+    threshold_text = "?" if threshold_f is None else f"{threshold_f:.1f}"
+    edge = _finite_float(getattr(signal, "edge", None))
+    rationale = (
+        f"weather {metric or 'temp'} {market_direction or '?'} {threshold_text}F "
+        f"buy {outcome} at {price}"
+        + ("" if edge is None else f" on edge {edge:+.4f}")
+    )
+
+    return TradeProposal(
+        proposal_id=proposal_id,
+        strategy_id=WEATHER_STRATEGY_ID,
+        venue=venue,
+        asset_class=AssetClass.PREDICTION_WEATHER,
+        symbol=f"{market_id}:{outcome}",
+        side=Side.BUY,
+        notional=notional,
+        order_type=OrderType.LIMIT,
+        limit_price=price,
+        reference_price=price,
+        market_data_at=market_data_at,
+        created_at=created_at_utc,
+        rationale=rationale,
+        metadata=metadata,
+    )
 
 
 async def scan_and_trade_job():

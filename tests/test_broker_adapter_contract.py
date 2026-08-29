@@ -1802,6 +1802,9 @@ ALLOWED_ADAPTER_IMPORTS = {
     "backend.trading.adapters.alpaca_paper",
     "backend.trading.adapters.base",
     "backend.trading.adapters.fake",
+    "backend.trading.adapters.kalshi_paper",
+    "backend.trading.adapters.polymarket_paper",
+    "backend.trading.adapters.prediction_paper",
     "backend.trading.domain",
     "backend.trading.execution_mode",
 }
@@ -1840,6 +1843,9 @@ def test_adapter_sources_have_only_exact_allowed_dependencies_and_no_effect_call
         "alpaca_paper.py",
         "base.py",
         "fake.py",
+        "kalshi_paper.py",
+        "polymarket_paper.py",
+        "prediction_paper.py",
     ]
     for path in adapter_files:
         source = path.read_text(encoding="utf-8")
