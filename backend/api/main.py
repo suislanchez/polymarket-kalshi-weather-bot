@@ -12,8 +12,11 @@ from backend.config import settings
 from pathlib import Path
 
 from backend.trading.execution_mode import (
+    archives_required_directories,
+    archives_runtime_paths,
     require_archives_runtime,
     require_paper_mode,
+    sqlite_path as _sqlite_path,
 )
 from backend.models.database import (
     get_db, init_db, SessionLocal,
@@ -358,37 +361,6 @@ def _maybe_start_scheduler() -> bool:
     start_scheduler()
     log_event("success", "Trading bot scheduler initialized")
     return True
-
-
-def _sqlite_path(database_url: object) -> str:
-    """Return the on-disk path behind a sqlite URL, or the value unchanged."""
-    if type(database_url) is not str:
-        return ""
-    for prefix in ("sqlite:////", "sqlite:///", "sqlite://"):
-        if database_url.startswith(prefix):
-            remainder = database_url[len(prefix):]
-            return remainder if remainder.startswith("/") else f"/{remainder}"
-    return database_url
-
-
-def archives_runtime_paths(active_settings) -> list[str]:
-    """Every mutable runtime location that must live on Archives."""
-    return [
-        _sqlite_path(active_settings.DATABASE_URL),
-        active_settings.RESEARCH_DATABASE_PATH,
-        active_settings.RESEARCH_SNAPSHOT_ROOT,
-        active_settings.TRADING_DATA_ROOT,
-        active_settings.TRADING_ARTIFACTS_ROOT,
-        active_settings.TRADING_LOG_ROOT,
-    ]
-
-
-def archives_required_directories(active_settings) -> list[str]:
-    """Runtime directories that must already exist before startup proceeds."""
-    return [
-        str(Path(_sqlite_path(active_settings.DATABASE_URL)).parent),
-        str(Path(active_settings.RESEARCH_DATABASE_PATH).parent),
-    ]
 
 
 @app.on_event("startup")

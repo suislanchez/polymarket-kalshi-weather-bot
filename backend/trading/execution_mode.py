@@ -149,3 +149,55 @@ def require_archives_runtime(
             raise ArchivesRuntimeError(
                 "A required Archives runtime directory is missing or is not a directory."
             )
+
+
+def sqlite_path(database_url: object) -> str:
+    """Return the on-disk path behind a sqlite URL, or the value unchanged."""
+    if type(database_url) is not str:
+        return ""
+    for prefix in ("sqlite:////", "sqlite:///", "sqlite://"):
+        if database_url.startswith(prefix):
+            remainder = database_url[len(prefix):]
+            return remainder if remainder.startswith("/") else f"/{remainder}"
+    return database_url
+
+
+def archives_runtime_paths(active_settings) -> list[str]:
+    """Every mutable runtime location that must live on Archives."""
+    return [
+        sqlite_path(active_settings.DATABASE_URL),
+        active_settings.RESEARCH_DATABASE_PATH,
+        active_settings.RESEARCH_SNAPSHOT_ROOT,
+        active_settings.TRADING_DATA_ROOT,
+        active_settings.TRADING_ARTIFACTS_ROOT,
+        active_settings.TRADING_LOG_ROOT,
+    ]
+
+
+def archives_required_directories(active_settings) -> list[str]:
+    """Runtime directories that must already exist before startup proceeds."""
+    return [
+        str(Path(sqlite_path(active_settings.DATABASE_URL)).parent),
+        str(Path(active_settings.RESEARCH_DATABASE_PATH).parent),
+    ]
+
+
+def archives_runtime_guard(active_settings) -> Callable[[], None]:
+    """A zero-argument guard that re-checks Archives against live settings.
+
+    API startup checks Archives once. A scheduler job runs for as long as the
+    process does, so the execution service re-checks immediately before it
+    writes -- but only if something hands it a guard, because it cannot build
+    one without reaching back into configuration it deliberately does not import.
+    This is that seam, and it reads the settings each call so a root that
+    disappears mid-run is seen rather than remembered.
+    """
+
+    def guard() -> None:
+        require_archives_runtime(
+            active_settings.TRADING_ARCHIVES_ROOT,
+            archives_runtime_paths(active_settings),
+            required_directories=archives_required_directories(active_settings),
+        )
+
+    return guard

@@ -3,6 +3,7 @@ import asyncio
 import hashlib
 import json
 from datetime import datetime, timedelta, timezone
+from weakref import WeakKeyDictionary
 from decimal import Decimal, InvalidOperation
 from math import isfinite
 from typing import List, Optional
@@ -16,6 +17,7 @@ from backend.models.database import SessionLocal, Trade, BotState, Signal
 from backend.core.signals import scan_for_signals
 from backend.trading.domain import (
     AssetClass,
+    OrderStatus,
     OrderType,
     Side,
     TradeProposal,
@@ -444,17 +446,36 @@ def weather_portfolio_state(session):
         return None
 
 
+_PAPER_EXECUTION_SERVICES: "WeakKeyDictionary[object, object]" = WeakKeyDictionary()
+
+
 def build_paper_execution_service(session):
-    """Construct a PaperExecutionService, or return None when one cannot exist.
+    """Return this session's PaperExecutionService, or None when one cannot exist.
+
+    One service per session, not one per order. The prediction adapters number
+    their broker references from an instance counter, so an adapter rebuilt for
+    every proposal restarts that counter and stamps every order in a run with the
+    same reference -- four filled orders reading as one in an append-only audit
+    ledger. Holding the service for the life of the session also restores the
+    duplicate-replay caches, which a service discarded after a single execute can
+    never reach.
+
+    The session is the unit of work, so it is the right scope, and the mapping is
+    weak so a finished session takes its service with it.
 
     Imported lazily so the scheduler keeps importing cleanly in environments where
     Archives is unbound; the service fails closed on Archives by design.
     """
+    cached = _PAPER_EXECUTION_SERVICES.get(session)
+    if cached is not None:
+        return cached
+
     failed = False
     service = None
     try:
         from backend.trading.adapters.kalshi_paper import KalshiPaperAdapter
         from backend.trading.adapters.polymarket_paper import PolymarketPaperAdapter
+        from backend.trading.execution_mode import archives_runtime_guard
         from backend.trading.service import PaperExecutionService, PaperExecutionSettings
 
         def clock():
@@ -473,11 +494,20 @@ def build_paper_execution_service(session):
             settings=PaperExecutionSettings(execution_mode=str(settings.EXECUTION_MODE)),
             clock=clock,
             kill_switch=lambda: bool(getattr(settings, "LIVE_TRADING_ENABLED", False)),
+            # Without this the service's own Archives checks return immediately and
+            # both of them are dead code. A scheduler job outlives API startup, so
+            # the re-check before each write is the only one that sees a mount lost
+            # while the process is running.
+            archives_guard=archives_runtime_guard(settings),
         )
     except Exception:
         failed = True
     if failed:
         return None
+    try:
+        _PAPER_EXECUTION_SERVICES[session] = service
+    except TypeError:  # pragma: no cover - a session that cannot be weakly held
+        pass
     return service
 
 
@@ -514,6 +544,36 @@ def _weather_idempotency_key(proposal: TradeProposal) -> str:
     return f"weather:{proposal.proposal_id}"
 
 
+def _shadow_route_outcome(result) -> tuple[str, dict | None]:
+    """Read what the unified path actually decided, rather than that it returned.
+
+    A call that comes back without raising is not agreement. The risk gate can
+    refuse, the venue can be monitor-only, and the adapter's report can be
+    rejected as unusable -- and in every one of those cases the legacy lane has
+    already written its Trade row. Reporting them as a successful route is how
+    the two paths diverge in silence.
+    """
+    decision = getattr(result, "decision", None)
+    report = getattr(result, "report", None)
+    approved = getattr(decision, "approved", None) is True
+    status_name = getattr(getattr(report, "status", None), "value", None)
+    if not isinstance(status_name, str):
+        status_name = ""
+
+    if approved and status_name == OrderStatus.FILLED.value:
+        return "routed", None
+
+    reason_codes = getattr(decision, "reason_codes", ()) or ()
+    # Both vocabularies are fixed: Task 4's reason codes and the service's own
+    # sanitized rejection label. Neither carries upstream text.
+    return "refused", {
+        "approved": approved,
+        "status": status_name or "none",
+        "reason_codes": [str(code) for code in reason_codes][:8],
+        "rejection_reason": str(getattr(report, "rejection_reason", "") or ""),
+    }
+
+
 def shadow_route_weather_proposal(session, signal, proposal, *, now) -> str:
     """Mirror an accepted weather proposal into the unified event ledger.
 
@@ -527,7 +587,8 @@ def shadow_route_weather_proposal(session, signal, proposal, *, now) -> str:
     silent.
 
     Returns one of: ``disabled``, ``no_proposal``, ``unavailable``, ``failed``,
-    ``routed``.
+    ``refused``, ``routed``. Only ``routed`` means the unified path agreed with
+    the legacy one.
     """
     if not settings.WEATHER_UNIFIED_LEDGER_ENABLED:
         return "disabled"
@@ -570,10 +631,23 @@ def shadow_route_weather_proposal(session, signal, proposal, *, now) -> str:
             weather_upstream_approved=True,
             weather_approval_evidence=evidence,
         )
-        service.execute(
-            proposal, portfolio=portfolio, context=context, limits=paper_risk_limits()
-        )
-        outcome = "routed"
+        # The route borrows the caller's session, and the caller commits
+        # authoritative legacy rows on it. A savepoint bounds the damage: a
+        # failure in here rolls back only what this route wrote, and leaves the
+        # session usable so the legacy commit still lands. Without it a failed
+        # flush poisons the session and takes the legacy rows down with it, and a
+        # failed read leaves a durable event chain with no order behind it.
+        with session.begin_nested():
+            result = service.execute(
+                proposal, portfolio=portfolio, context=context, limits=paper_risk_limits()
+            )
+        outcome, refusal = _shadow_route_outcome(result)
+        if refusal is not None:
+            log_event(
+                "warning",
+                "Weather shadow ledger refused a proposal the legacy lane executed",
+                {"proposal_id": proposal.proposal_id, **refusal},
+            )
     except Exception as error:
         # Sanitized: record the failure type, never the upstream message, which
         # can carry request payloads.

@@ -19,7 +19,11 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from sqlalchemy import create_engine, event
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import sessionmaker
 
+from backend.models.database import Base, Trade, TradingEvent, UnifiedOrder
 from backend.core import scheduler as scheduler_module
 from backend.core.scheduler import (
     STOCK_CRYPTO_JOB_ID,
@@ -100,13 +104,43 @@ def make_proposal(signal=None, **kwargs) -> TradeProposal:
     return proposal
 
 
-class RecordingService:
-    """Stands in for PaperExecutionService, recording what the lane hands it."""
+class _StubDecision:
+    def __init__(self, approved=True, reason_codes=()):
+        self.approved = approved
+        self.reason_codes = tuple(reason_codes)
 
-    def __init__(self, *, raises=None, result="ok"):
+
+class _StubReport:
+    def __init__(self, status=OrderStatus.FILLED, rejection_reason=""):
+        self.status = status
+        self.rejection_reason = rejection_reason
+
+
+class _StubResult:
+    """The shape PaperExecutionResult presents to the route, and nothing more."""
+
+    def __init__(self, *, approved=True, status=OrderStatus.FILLED, reason_codes=()):
+        self.decision = _StubDecision(approved, reason_codes)
+        self.report = _StubReport(status)
+
+
+class RecordingService:
+    """Records what the lane hands the service, and answers with a fixed result.
+
+    This can assert what goes *in* -- the proposal, the risk context, the
+    idempotency key -- and nothing about what comes back out. It does not
+    evaluate risk, does not write the ledger, does not resolve an adapter, and
+    does not run the size reconciliation a simulated fill has to satisfy. A
+    defect on the far side of that boundary is invisible here by construction,
+    which is how a broken fill derivation survived five commits under a green
+    suite. Anything that depends on real service behaviour belongs in the
+    real-service section at the bottom of this file.
+    """
+
+    def __init__(self, *, raises=None, result=None):
         self.calls = []
         self._raises = raises
-        self._result = result
+        self._result = _StubResult() if result is None else result
 
     def execute(self, proposal, *, portfolio, context, limits):
         self.calls.append(
@@ -205,12 +239,14 @@ def test_lane_defaults_are_off_in_a_fresh_settings_object():
 # ---------------------------------------------------------------------------
 
 
-def test_accepted_weather_proposal_reaches_the_ledger_service(monkeypatch, captured_events):
+def test_accepted_weather_proposal_reaches_the_ledger_service(
+    monkeypatch, captured_events, ledger_session
+):
     service = enable_routing(monkeypatch, RecordingService())
 
     signal = make_signal()
     outcome = shadow_route_weather_proposal(
-        object(), signal, make_proposal(signal), now=NOW
+        ledger_session, signal, make_proposal(signal), now=NOW
     )
 
     assert outcome == "routed"
@@ -279,11 +315,11 @@ def test_a_refused_signal_yields_no_upstream_approval_evidence():
     assert weather_upstream_evidence(blocked) == ()
 
 
-def test_the_risk_context_carries_the_evidence_to_the_service(monkeypatch):
+def test_the_risk_context_carries_the_evidence_to_the_service(monkeypatch, ledger_session):
     service = enable_routing(monkeypatch, RecordingService())
 
     signal = make_signal()
-    shadow_route_weather_proposal(object(), signal, make_proposal(signal), now=NOW)
+    shadow_route_weather_proposal(ledger_session, signal, make_proposal(signal), now=NOW)
 
     context = service.calls[0]["context"]
     assert context.weather_upstream_approved is True
@@ -291,7 +327,9 @@ def test_the_risk_context_carries_the_evidence_to_the_service(monkeypatch):
     assert context.execution_mode == "paper"
 
 
-def test_the_idempotency_key_is_stable_for_one_proposal_and_distinct_across_them(monkeypatch):
+def test_the_idempotency_key_is_stable_for_one_proposal_and_distinct_across_them(
+    monkeypatch, ledger_session
+):
     service = enable_routing(monkeypatch, RecordingService())
 
     signal = make_signal()
@@ -300,10 +338,10 @@ def test_the_idempotency_key_is_stable_for_one_proposal_and_distinct_across_them
     first = make_proposal(signal)
     second = make_proposal(signal)
     assert first is not second and first.proposal_id == second.proposal_id
-    shadow_route_weather_proposal(object(), signal, first, now=NOW)
-    shadow_route_weather_proposal(object(), signal, second, now=NOW + timedelta(hours=3))
+    shadow_route_weather_proposal(ledger_session, signal, first, now=NOW)
+    shadow_route_weather_proposal(ledger_session, signal, second, now=NOW + timedelta(hours=3))
     other = make_proposal(signal, size=25.0)
-    shadow_route_weather_proposal(object(), signal, other, now=NOW)
+    shadow_route_weather_proposal(ledger_session, signal, other, now=NOW)
 
     keys = [call["context"].idempotency_key for call in service.calls]
     assert keys[0] == keys[1], "the same proposal must replay under one key"
@@ -315,12 +353,20 @@ def test_the_idempotency_key_is_stable_for_one_proposal_and_distinct_across_them
 # ---------------------------------------------------------------------------
 
 
-def test_a_service_failure_is_sanitized_logged_and_swallowed(monkeypatch, captured_events):
+def test_a_service_failure_is_sanitized_logged_and_swallowed(
+    monkeypatch, captured_events, ledger_session
+):
     secret = "sk-live-DO-NOT-LEAK-9999"
-    enable_routing(monkeypatch, RecordingService(raises=RuntimeError(f"boom {secret}")))
+    service = enable_routing(
+        monkeypatch, RecordingService(raises=RuntimeError(f"boom {secret}"))
+    )
 
-    outcome = shadow_route_weather_proposal(object(), make_signal(), make_proposal(), now=NOW)
+    outcome = shadow_route_weather_proposal(
+        ledger_session, make_signal(), make_proposal(), now=NOW
+    )
 
+    # The service must actually have been reached, or this asserts nothing.
+    assert len(service.calls) == 1
     assert outcome == "failed"
     assert any(kind in {"warning", "error"} for kind, _m, _d in captured_events)
     rendered = repr(captured_events)
@@ -350,7 +396,7 @@ def test_a_service_construction_error_does_not_escape(monkeypatch, captured_even
     )
 
 
-def test_shadow_routing_never_raises_for_any_outcome(monkeypatch):
+def test_shadow_routing_never_raises_for_any_outcome(monkeypatch, ledger_session):
     """Exhaustive: every branch of the shadow path returns rather than raises."""
     monkeypatch.setattr(scheduler_module, "weather_portfolio_state", lambda _s: a_portfolio())
     monkeypatch.setattr(scheduler_module.settings, "WEATHER_UNIFIED_LEDGER_ENABLED", True)
@@ -358,15 +404,18 @@ def test_shadow_routing_never_raises_for_any_outcome(monkeypatch):
         RecordingService(raises=RuntimeError("x")),
         RecordingService(raises=KeyError("x")),
         RecordingService(raises=ValueError("x")),
-        RecordingService(result=None),
+        # A result the route cannot read is a refusal, not a route.
+        RecordingService(result="ok"),
+        RecordingService(result=_StubResult(approved=False, status=OrderStatus.RISK_REJECTED)),
+        RecordingService(result=_StubResult(status=OrderStatus.REJECTED)),
     ):
         monkeypatch.setattr(
             scheduler_module, "build_paper_execution_service", lambda _s, svc=service: svc
         )
         outcome = shadow_route_weather_proposal(
-            object(), make_signal(), make_proposal(), now=NOW
+            ledger_session, make_signal(), make_proposal(), now=NOW
         )
-        assert outcome in {"routed", "failed", "unavailable"}
+        assert outcome in {"routed", "refused", "failed", "unavailable"}
 
 
 # ---------------------------------------------------------------------------
@@ -656,3 +705,218 @@ def test_evidence_requires_settlement_identity_even_when_the_gate_is_silent():
 
     half = make_signal(market_overrides={"settlement_station": None})
     assert weather_upstream_evidence(half) == ()
+
+
+# ---------------------------------------------------------------------------
+# The same lane, driven through the real PaperExecutionService
+#
+# Everything above this line routes through RecordingService, which records four
+# kwargs and returns a string. It cannot reject, cannot write a ledger row, and
+# cannot run the size reconciliation a simulated fill has to satisfy -- so any
+# defect on the far side of that boundary is invisible to it. That is not
+# hypothetical: the fill derivation shipped broken for five commits underneath
+# these tests, and every one of them stayed green, because none of them ever
+# reached an adapter.
+#
+# These tests pay for the real thing: a real sqlite ledger, the real adapters,
+# the real service, built by the same production constructor the scheduler uses.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def ledger_session(tmp_path: Path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'unified-scheduler.sqlite3'}")
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    with factory() as database_session:
+        yield database_session
+    engine.dispose()
+
+
+def a_funded_portfolio():
+    """Enough equity that the real per-order cap admits a 50-dollar weather order.
+
+    paper_risk_limits caps a single order at 3% of equity, so the 1000-dollar
+    book used by the stub tests refuses every proposal in this section on size
+    before any of the behaviour under test is reached.
+    """
+    from backend.trading.risk import PortfolioState
+
+    return PortfolioState(
+        equity=Decimal("10000"),
+        start_of_day_nlv=Decimal("10000"),
+        daily_realized_pnl=Decimal("0"),
+        gross_exposure=Decimal("0"),
+        crypto_exposure=Decimal("0"),
+    )
+
+
+def route_for_real(monkeypatch):
+    """Enable the shadow route without substituting the service.
+
+    Only the account-state read is stubbed, and only because it needs a live
+    broker session; the risk gate, the ledger, the adapters and the projection
+    are all the production objects.
+    """
+    monkeypatch.setattr(scheduler_module.settings, "WEATHER_UNIFIED_LEDGER_ENABLED", True)
+    monkeypatch.setattr(
+        scheduler_module, "weather_portfolio_state", lambda _s: a_funded_portfolio()
+    )
+
+
+def a_fresh_route(*, size=50.0, entry_price=0.56, platform="polymarket", market_id=None):
+    """A signal and proposal whose market data is fresh enough for the real gate.
+
+    The module-level fixtures are pinned to a fixed date. The real service reads
+    its own clock, so anything built from them is stale on arrival -- which is
+    useful for the refusal tests below and useless for the acceptance ones.
+    """
+    at = datetime.now(timezone.utc)
+    market_overrides = {} if market_id is None else {"market_id": market_id, "slug": market_id}
+    signal = make_signal(platform, market_overrides=market_overrides, timestamp=at)
+    proposal = build_weather_paper_proposal(
+        signal, size=size, entry_price=entry_price, created_at=at
+    )
+    assert proposal is not None
+    return signal, proposal, at
+
+
+def ledger_event_types(session) -> list[str]:
+    return [
+        row.event_type
+        for row in session.query(TradingEvent).order_by(TradingEvent.sequence).all()
+    ]
+
+
+def test_the_real_service_accepts_a_fresh_weather_proposal(monkeypatch, ledger_session):
+    """The acceptance path, asserted against what the ledger actually holds.
+
+    This is the assertion that would have caught the fill defect: the reconciled
+    fill has to survive the service's size check and land in the projection. With
+    the pre-fix derivation the report is discarded as adapter_invalid_report and
+    the terminal event is order_rejected.
+    """
+    route_for_real(monkeypatch)
+    signal, proposal, at = a_fresh_route()
+
+    outcome = shadow_route_weather_proposal(ledger_session, signal, proposal, now=at)
+
+    assert outcome == "routed"
+    assert ledger_event_types(ledger_session) == [
+        "proposal_created",
+        "risk_approved",
+        "order_submitted",
+        "order_acknowledged",
+        "order_filled",
+    ]
+    order = ledger_session.query(UnifiedOrder).one()
+    assert order.status == "filled"
+    # The exact strings the adapter produced, not a rounded restatement of them.
+    assert order.filled_quantity == "89.285714"
+    assert order.filled_notional == "49.99999984"
+    assert order.average_fill_price == "0.56"
+
+
+def test_a_proposal_the_unified_path_refuses_is_not_reported_as_routed(
+    monkeypatch, ledger_session, captured_events
+):
+    """A refusal is a disagreement with the legacy lane, and must be visible.
+
+    The module fixtures are deliberately stale against the real clock, so the
+    risk gate refuses. The legacy Trade row for the same signal is written and
+    committed by the caller regardless, so if this returns "routed" and logs
+    nothing, the two lanes have diverged in silence.
+    """
+    route_for_real(monkeypatch)
+    signal = make_signal()
+    proposal = make_proposal(signal)
+
+    outcome = shadow_route_weather_proposal(ledger_session, signal, proposal, now=NOW)
+
+    assert outcome != "routed"
+    assert "risk_rejected" in ledger_event_types(ledger_session)
+    assert ledger_session.query(UnifiedOrder).count() == 0
+    assert captured_events, "a refusal that logs nothing is exactly the silent divergence"
+
+
+def test_every_order_in_one_run_carries_its_own_broker_reference(
+    monkeypatch, ledger_session
+):
+    """Three distinct orders, three distinct broker references.
+
+    The adapter numbers orders from an instance counter, so an adapter rebuilt
+    per proposal restarts it and every order in the run is stamped -000001.
+    """
+    route_for_real(monkeypatch)
+
+    for index in range(3):
+        signal, proposal, at = a_fresh_route(market_id=f"polymarket-nyc-high-{index}")
+        assert shadow_route_weather_proposal(
+            ledger_session, signal, proposal, now=at
+        ) == "routed"
+
+    orders = ledger_session.query(UnifiedOrder).all()
+    assert len(orders) == 3
+    references = {order.broker_order_id for order in orders}
+    assert len(references) == 3, references
+
+
+def test_the_production_constructor_supplies_an_archives_guard(ledger_session):
+    """An unwired guard is a fail-open, and the service cannot supply its own.
+
+    PaperExecutionService returns immediately from _require_archives when no
+    guard was injected, so both of its checks are dead code unless the caller
+    that builds it wires one. This is that caller.
+    """
+    service = scheduler_module.build_paper_execution_service(ledger_session)
+
+    assert service is not None
+    assert service._archives_guard is not None
+
+
+def test_a_storage_failure_leaves_the_legacy_lane_committable(
+    monkeypatch, ledger_session, captured_events
+):
+    """The shadow route must not be able to take down the lane it shadows.
+
+    The route shares the caller's session, and the caller commits authoritative
+    legacy Trade rows on it. If a failure inside the route leaves that session
+    poisoned or leaves a partial event chain behind, the compatibility phase has
+    made things worse rather than safer.
+    """
+    route_for_real(monkeypatch)
+
+    legacy = Trade(
+        market_ticker="polymarket-nyc-high-75f-1",
+        platform="polymarket",
+        market_type="weather",
+        direction="yes",
+        entry_price=0.56,
+        size=50.0,
+        timestamp=datetime.now(timezone.utc),
+        settled=False,
+    )
+    ledger_session.add(legacy)
+    ledger_session.flush()
+
+    failures = {"remaining": 1}
+
+    @event.listens_for(ledger_session.get_bind(), "before_cursor_execute")
+    def fail_the_projection(conn, cursor, statement, parameters, context, executemany):
+        lowered = statement.lower().lstrip()
+        if lowered.startswith("insert") and "unified_orders" in lowered and failures["remaining"]:
+            failures["remaining"] -= 1
+            raise OperationalError("insert", {}, Exception("database is locked"))
+
+    signal, proposal, at = a_fresh_route()
+    outcome = shadow_route_weather_proposal(ledger_session, signal, proposal, now=at)
+
+    assert outcome == "failed"
+    assert captured_events
+
+    # The session survives, and the legacy row the caller owns still commits.
+    ledger_session.commit()
+    assert ledger_session.query(Trade).count() == 1
+    # No half-written unified order, and no event chain claiming one was filled.
+    assert ledger_session.query(UnifiedOrder).count() == 0
+    assert "order_filled" not in ledger_event_types(ledger_session)
