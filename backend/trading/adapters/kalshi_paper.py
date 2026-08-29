@@ -17,6 +17,9 @@ from backend.trading.adapters.prediction_paper import PredictionMarketPaperAdapt
 from backend.trading.domain import PositionSnapshot, Venue
 
 ADAPTER_NAME = "kalshi-paper"
+# Kalshi trades whole contracts. A fractional contract does not exist, so a
+# notional that cannot buy one is refused rather than rounded into being.
+SHARE_INCREMENT = Decimal("1")
 
 
 class KalshiPaperAdapter(PredictionMarketPaperAdapter):
@@ -37,6 +40,7 @@ class KalshiPaperAdapter(PredictionMarketPaperAdapter):
             venue=Venue.KALSHI_PAPER,
             adapter_name=ADAPTER_NAME,
             execution_enabled=execution_enabled,
+            share_increment=SHARE_INCREMENT,
             cash=cash,
             equity=equity,
             buying_power=buying_power,
@@ -51,4 +55,4 @@ class KalshiPaperAdapter(PredictionMarketPaperAdapter):
         )
 
 
-__all__ = ["ADAPTER_NAME", "KalshiPaperAdapter"]
+__all__ = ["ADAPTER_NAME", "SHARE_INCREMENT", "KalshiPaperAdapter"]

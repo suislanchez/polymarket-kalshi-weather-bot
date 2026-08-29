@@ -16,6 +16,9 @@ from backend.trading.adapters.prediction_paper import PredictionMarketPaperAdapt
 from backend.trading.domain import PositionSnapshot, Venue
 
 ADAPTER_NAME = "polymarket-paper"
+# Outcome shares are collateral-denominated and divisible; six places matches
+# the smallest unit the venue quotes.
+SHARE_INCREMENT = Decimal("0.000001")
 
 
 class PolymarketPaperAdapter(PredictionMarketPaperAdapter):
@@ -36,6 +39,7 @@ class PolymarketPaperAdapter(PredictionMarketPaperAdapter):
             venue=Venue.POLYMARKET_PAPER,
             adapter_name=ADAPTER_NAME,
             execution_enabled=execution_enabled,
+            share_increment=SHARE_INCREMENT,
             cash=cash,
             equity=equity,
             buying_power=buying_power,
@@ -43,4 +47,4 @@ class PolymarketPaperAdapter(PredictionMarketPaperAdapter):
         )
 
 
-__all__ = ["ADAPTER_NAME", "PolymarketPaperAdapter"]
+__all__ = ["ADAPTER_NAME", "SHARE_INCREMENT", "PolymarketPaperAdapter"]

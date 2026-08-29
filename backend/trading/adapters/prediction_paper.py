@@ -29,6 +29,7 @@ from decimal import (
     Inexact,
     InvalidOperation,
     Overflow,
+    ROUND_DOWN,
     ROUND_HALF_EVEN,
     Rounded,
     localcontext,
@@ -141,6 +142,18 @@ def _deterministic_divide(numerator: Decimal, denominator: Decimal) -> Decimal:
             return numerator / denominator
 
 
+def _floor_to_increment(value: Decimal, increment: Decimal) -> Decimal:
+    """Largest whole multiple of ``increment`` not exceeding ``value``.
+
+    Rounding down, never to nearest: a simulated fill must never claim more
+    shares than the ordered notional pays for.
+    """
+
+    precision = max(28, _digit_span(value) + _digit_span(increment))
+    with localcontext(_decimal_context(precision=precision)):
+        return value.quantize(increment, rounding=ROUND_DOWN)
+
+
 class PredictionMarketPaperAdapter:
     """Shared simulation engine for paper prediction-market venues.
 
@@ -155,6 +168,7 @@ class PredictionMarketPaperAdapter:
         venue: Venue,
         adapter_name: str,
         execution_enabled: bool,
+        share_increment: Decimal,
         cash: Decimal = Decimal("10000.00"),
         equity: Decimal = Decimal("10000.00"),
         buying_power: Decimal = Decimal("10000.00"),
@@ -166,6 +180,12 @@ class PredictionMarketPaperAdapter:
             raise BrokerAdapterError("adapter name must be a nonblank string")
         if type(execution_enabled) is not bool:
             raise BrokerAdapterError("execution_enabled must be an explicit bool")
+        if (
+            type(share_increment) is not Decimal
+            or not share_increment.is_finite()
+            or share_increment <= 0
+        ):
+            raise BrokerAdapterError("share increment must be a positive Decimal")
 
         position_materialization_failed = False
         position_items: tuple[PositionSnapshot, ...] = ()
@@ -198,6 +218,7 @@ class PredictionMarketPaperAdapter:
         self._venue = venue
         self._name = adapter_name
         self._execution_enabled = execution_enabled
+        self._share_increment = share_increment
         self._report_metadata = report_metadata
         self._cash = validated.cash
         self._equity = validated.equity
@@ -363,29 +384,41 @@ class PredictionMarketPaperAdapter:
 
     def _simulated_fill(
         self, notional: Decimal, price: Decimal
-    ) -> tuple[Decimal, Decimal]:
-        """Derive the share count a notional buys, and prove it reconciles.
+    ) -> tuple[Decimal, Decimal] | None:
+        """Fill whole share increments and report what those shares actually cost.
 
-        Share counts are frequently non-terminating (50 / 0.56), so the division
-        is deterministic rather than exact. The recorded notional stays
-        authoritative, and the reconciliation below is what makes that safe: if
-        quantity * price ever drifts from the notional by more than rounding
-        noise, the fill is refused instead of booked.
+        The recorded notional is DERIVED from the share count rather than passed
+        through from the order. That direction matters: the execution boundary
+        requires filled_quantity * average_fill_price to equal filled_notional
+        exactly, and a share count is a non-terminating quotient for most prices
+        (50 / 0.56). Passing the ordered notional through would make the two
+        disagree in the last digits for about six prices in seven, and every one
+        of those fills would be discarded downstream as an invalid report.
+
+        Sizing down to the venue's increment is also what a venue does -- shares
+        are not infinitely divisible -- so the residual cash simply goes unspent.
+
+        Returns None when the notional cannot buy even one increment.
         """
 
         try:
-            quantity = _deterministic_divide(notional, price)
-            reconciled = _exact_multiply(quantity, price)
-            if not quantity.is_finite() or quantity <= 0 or not reconciled.is_finite():
+            raw_quantity = _deterministic_divide(notional, price)
+            quantity = _floor_to_increment(raw_quantity, self._share_increment)
+            if not quantity.is_finite():
                 raise BrokerAdapterError("simulated fill arithmetic failed")
-            drift = _exact_absolute_difference(reconciled, notional)
+            if quantity <= 0:
+                return None
+            filled_notional = _exact_multiply(quantity, price)
+            if not filled_notional.is_finite():
+                raise BrokerAdapterError("simulated fill arithmetic failed")
+            overspend = _exact_absolute_difference(filled_notional, notional)
         except DecimalException:
             raise BrokerAdapterError("simulated fill arithmetic failed") from None
-        # Comparison, not arithmetic: Decimal comparisons are exact and take no
+        # Comparisons, not arithmetic: Decimal comparisons are exact and take no
         # rounding from the active context.
-        if drift > _RECONCILIATION_TOLERANCE:
-            raise BrokerAdapterError("simulated fill failed to reconcile with notional")
-        return quantity, notional
+        if filled_notional > notional or overspend > notional:
+            raise BrokerAdapterError("simulated fill exceeded the ordered notional")
+        return quantity, filled_notional
 
     def submit_order(
         self, order: NormalizedOrder, *, execution_mode: str
@@ -420,7 +453,21 @@ class PredictionMarketPaperAdapter:
         notional = order.notional
         if notional is None:  # pragma: no cover - _validate_order already required it
             raise BrokerAdapterError("prediction paper orders must be sized by notional")
-        filled_quantity, filled_notional = self._simulated_fill(notional, price)
+        fill = self._simulated_fill(notional, price)
+        if fill is None:
+            report = ExecutionReport(
+                client_order_id=order.client_order_id,
+                venue=self._venue,
+                status=OrderStatus.REJECTED,
+                rejection_reason="notional_below_one_share_increment",
+                occurred_at=occurred_at,
+                metadata=self._report_metadata,
+            )
+            self._fingerprints[order.client_order_id] = fingerprint
+            self._record_transition(order.client_order_id, report)
+            return report
+
+        filled_quantity, filled_notional = fill
         next_broker_counter = self._broker_counter + 1
         report = ExecutionReport(
             client_order_id=order.client_order_id,

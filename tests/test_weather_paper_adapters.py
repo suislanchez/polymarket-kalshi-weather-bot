@@ -34,6 +34,7 @@ from backend.trading.adapters.kalshi_paper import KalshiPaperAdapter
 from backend.trading.adapters.polymarket_paper import PolymarketPaperAdapter
 from backend.trading.domain import (
     AssetClass,
+    ExecutionReport,
     NormalizedOrder,
     OrderStatus,
     OrderType,
@@ -327,24 +328,54 @@ def test_reports_are_labeled_simulation_and_never_carry_a_broker_venue():
     assert report.venue is Venue.POLYMARKET_PAPER
 
 
-def test_simulated_fill_uses_the_limit_price_and_preserves_notional_exactly():
+def test_a_terminating_price_spends_the_whole_notional():
     proposal = build_proposal(make_signal(), size=50.0, entry_price=0.5)
     report = polymarket_adapter().submit_order(order_from(proposal), execution_mode="paper")
 
     assert report.status is OrderStatus.FILLED
-    assert report.filled_notional == Decimal("50")
-    assert report.average_fill_price == Decimal("0.5")
     assert report.filled_quantity == Decimal("100")
+    assert report.average_fill_price == Decimal("0.5")
+    assert report.filled_notional == Decimal("50")
 
 
-def test_inexact_share_counts_still_reconcile_against_the_recorded_notional():
+def test_a_nonterminating_price_fills_whole_increments_and_underspends():
+    """50 / 0.56 does not terminate, so the share count is floored to the venue
+    increment and the recorded notional is what those shares actually cost.
+
+    The residual is left unspent rather than rounded away. Reporting the ordered
+    notional here would make filled_quantity * price disagree with
+    filled_notional in the last digits, and the execution boundary requires them
+    to be exactly equal.
+    """
     proposal = build_proposal(make_signal(), size=50.0, entry_price=0.56)
     report = polymarket_adapter().submit_order(order_from(proposal), execution_mode="paper")
 
-    assert report.filled_notional == Decimal("50")
+    assert report.status is OrderStatus.FILLED
     assert report.average_fill_price == Decimal("0.56")
-    # quantity * price must reproduce the notional to well within a cent.
-    assert abs(report.filled_quantity * Decimal("0.56") - Decimal("50")) < Decimal("0.0001")
+    assert report.filled_quantity == Decimal("89.285714")
+    assert report.filled_notional == Decimal("49.99999984")
+    # Exactly consistent, and never more than was ordered.
+    assert report.filled_quantity * report.average_fill_price == report.filled_notional
+    assert report.filled_notional <= Decimal("50")
+    # The unspent residual is under one share increment's worth.
+    assert Decimal("50") - report.filled_notional < Decimal("0.000001")
+
+
+def test_a_notional_too_small_for_one_contract_is_refused_not_rounded():
+    """Kalshi trades whole contracts; a fractional contract does not exist."""
+    from backend.trading.adapters.kalshi_paper import KalshiPaperAdapter
+
+    monitor_free = KalshiPaperAdapter(clock=clock, execution_enabled=True)
+    proposal = build_weather_paper_proposal(
+        make_signal("kalshi"), size=0.5, entry_price=0.56, created_at=CLOCK_TIME
+    )
+    if proposal is None:  # scheduler gate is closed by default for Kalshi
+        pytest.skip("kalshi proposal requires the scheduler gate open")
+    report = monitor_free.submit_order(order_from(proposal), execution_mode="paper")
+
+    assert report.status is OrderStatus.REJECTED
+    assert report.rejection_reason == "notional_below_one_share_increment"
+    assert report.filled_quantity == Decimal("0")
 
 
 @pytest.mark.parametrize("precision", [1, 5, 60])
@@ -359,8 +390,9 @@ def test_simulated_fill_is_independent_of_the_ambient_decimal_context(precision)
         hostile = polymarket_adapter().submit_order(order, execution_mode="paper")
 
     assert hostile.filled_quantity == normal.filled_quantity
-    assert hostile.filled_notional == normal.filled_notional == Decimal("50")
+    assert hostile.filled_notional == normal.filled_notional
     assert hostile.average_fill_price == normal.average_fill_price
+    assert hostile.filled_quantity * hostile.average_fill_price == hostile.filled_notional
 
 
 @pytest.mark.parametrize("trap", [Inexact, Rounded])
@@ -401,7 +433,8 @@ def test_a_strict_ambient_context_cannot_escape_the_sanitized_error_boundary(
         report = polymarket_adapter().submit_order(order, execution_mode="paper")
 
     assert report.status is OrderStatus.FILLED
-    assert report.filled_notional == Decimal(str(size))
+    assert report.filled_quantity * report.average_fill_price == report.filled_notional
+    assert report.filled_notional <= Decimal(str(size))
 
 
 def test_kalshi_monitor_only_refuses_to_simulate_a_fill(monkeypatch):
@@ -538,10 +571,11 @@ def test_adapter_repr_exposes_only_fixed_identity_fields():
         "PolymarketPaperAdapter(name='polymarket-paper', "
         "venue='polymarket_paper', paper_only=True)"
     )
-    assert repr(kalshi_adapter(execution_enabled=False)) == (
-        "KalshiPaperAdapter(name='kalshi-paper', venue='kalshi_paper', "
-        "paper_only=True, execution_enabled=False)"
-    )
+    for enabled in (False, True):
+        assert repr(kalshi_adapter(execution_enabled=enabled)) == (
+            "KalshiPaperAdapter(name='kalshi-paper', venue='kalshi_paper', "
+            f"paper_only=True, execution_enabled={enabled})"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -680,3 +714,71 @@ def test_a_signal_timestamp_in_another_zone_is_converted_not_relabeled():
         make_signal(timestamp=datetime(2026, 8, 28, 11, 29, tzinfo=eastern))
     )
     assert proposal.market_data_at == MARKET_DATA_TIME
+
+
+# ---------------------------------------------------------------------------
+# The report must survive the boundary that will consume it
+# ---------------------------------------------------------------------------
+#
+# The absence of this section is what let a real defect ship. Every adapter test
+# above checks the report against what the adapter meant; none checked it
+# against what PaperExecutionService actually accepts. The service requires
+# filled_quantity * average_fill_price to equal filled_notional EXACTLY, and the
+# original design passed the ordered notional through while deriving the share
+# count -- which disagreed in the last digits for 85 of 99 two-decimal prices.
+# Each of those would have been discarded downstream as adapter_invalid_report,
+# leaving the adapter and the ledger permanently disagreeing about a fill.
+
+
+def service_accepts(report, order) -> bool:
+    """Ask the real execution boundary, not a restatement of its rules."""
+    from backend.trading.service import PaperExecutionService
+
+    return PaperExecutionService._report_size_is_valid(order, report)
+
+
+@pytest.mark.parametrize("cents", list(range(1, 100)))
+def test_every_two_decimal_price_produces_a_report_the_service_accepts(cents):
+    price = Decimal(cents) / Decimal(100)
+    proposal = build_proposal(make_signal(), size=50.0, entry_price=float(price))
+    order = order_from(proposal)
+    report = polymarket_adapter().submit_order(order, execution_mode="paper")
+
+    assert report.status is OrderStatus.FILLED, f"price {price} did not fill"
+    assert service_accepts(report, order), f"service rejected the fill at price {price}"
+
+
+@pytest.mark.parametrize("size", ["1.0", "7.5", "50.0", "99.99", "100.0"])
+@pytest.mark.parametrize("entry_price", [0.03, 0.17, 0.56, 0.63, 0.9799999999999999])
+def test_reports_survive_the_boundary_across_sizes_and_repr17_prices(size, entry_price):
+    proposal = build_proposal(make_signal(), size=float(size), entry_price=entry_price)
+    order = order_from(proposal)
+    report = polymarket_adapter().submit_order(order, execution_mode="paper")
+
+    assert service_accepts(report, order)
+    assert report.filled_notional <= Decimal(size)
+
+
+def test_the_boundary_check_would_reject_a_passed_through_notional():
+    """Guard the guard: prove the service really is this strict.
+
+    A report carrying the ordered notional alongside a non-terminating share
+    count -- the shape the adapter used to emit -- must be rejected, or the
+    tests above would pass regardless of what the adapter did.
+    """
+    from backend.trading.adapters.prediction_paper import _deterministic_divide
+
+    proposal = build_proposal(make_signal(), size=50.0, entry_price=0.56)
+    order = order_from(proposal)
+    naive_quantity = _deterministic_divide(Decimal("50"), Decimal("0.56"))
+    naive = ExecutionReport(
+        client_order_id=order.client_order_id,
+        venue=Venue.POLYMARKET_PAPER,
+        status=OrderStatus.FILLED,
+        broker_order_id="polymarket-paper-000001",
+        filled_quantity=naive_quantity,
+        filled_notional=Decimal("50"),
+        average_fill_price=Decimal("0.56"),
+        occurred_at=CLOCK_TIME,
+    )
+    assert service_accepts(naive, order) is False
