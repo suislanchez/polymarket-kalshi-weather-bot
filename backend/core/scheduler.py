@@ -21,6 +21,7 @@ from backend.trading.domain import (
     TradeProposal,
     Venue,
 )
+from backend.trading.risk import PortfolioState, RiskContext, RiskLimits
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("trading_bot")
@@ -309,6 +310,368 @@ def build_weather_paper_proposal(
     )
 
 
+STOCK_CRYPTO_JOB_ID = "stock_crypto_paper"
+
+
+def paper_clock() -> datetime:
+    """Current UTC instant for the unified paper lanes.
+
+    A named seam rather than an inline datetime.now() call, so a test can place
+    the run at a chosen moment relative to its market data instead of having to
+    weaken the strategy's staleness bound to make a fixture usable.
+    """
+    return datetime.now(timezone.utc)
+
+# Weather quotes are slow-moving relative to equities, and the weather scan
+# cadence is five minutes; a tighter bound would reject every real proposal.
+_WEATHER_MAX_QUOTE_AGE_SECONDS = Decimal("900")
+_STOCK_CRYPTO_MAX_QUOTE_AGE_SECONDS = Decimal("30")
+
+
+def stock_crypto_symbols() -> tuple:
+    """Parse the configured symbol list, trimmed and deduplicated in order."""
+    raw = str(getattr(settings, "STOCK_CRYPTO_SYMBOLS", "") or "")
+    ordered: list[str] = []
+    for candidate in raw.split(","):
+        symbol = candidate.strip()
+        if symbol and symbol not in ordered:
+            ordered.append(symbol)
+    return tuple(ordered)
+
+
+def load_stock_crypto_bars(symbol: str):
+    """Return a bar-series payload for ``symbol``, or None if none is available.
+
+    There is no market-data source wired yet: broker credentials are gated behind
+    a later user-approved step, and this runtime must never reach a live endpoint.
+    Returning None is the honest answer, and it makes "a run produced zero
+    proposals" the ordinary production outcome rather than an error. Tests and the
+    later credentialed lane replace this seam.
+    """
+    return None
+
+
+def paper_allowed_venues() -> frozenset:
+    """Venues the risk layer may approve, mirroring the venue safety toggles.
+
+    Kalshi is admitted only when its paper-execution flag is on, so the
+    monitor-only boundary is enforced at the risk layer as well as at the
+    scheduler gate and inside the adapter.
+    """
+    venues = {Venue.POLYMARKET_PAPER}
+    if settings.WEATHER_KALSHI_PAPER_EXECUTION_ENABLED:
+        venues.add(Venue.KALSHI_PAPER)
+    if settings.STOCK_CRYPTO_LANE_ENABLED:
+        venues.add(Venue.ALPACA_PAPER)
+    return frozenset(venues)
+
+
+def partition_stock_and_crypto_symbols(symbols) -> tuple:
+    """Split configured symbols into disjoint stock and crypto allowlists.
+
+    The risk layer requires these two allowlists to be non-empty and disjoint, so
+    the split has to be total rather than best-effort. A pair separator is the
+    discriminator the strategy already uses: BTC/USD and ETH/USD are crypto,
+    SPY and QQQ are not. Each side falls back to a single conservative default
+    when the configuration names nothing on that side, which keeps the
+    allowlists non-empty without silently widening the other one.
+    """
+    stock = frozenset(symbol for symbol in symbols if "/" not in symbol)
+    crypto = frozenset(symbol for symbol in symbols if "/" in symbol)
+    return (stock or frozenset({"SPY"}), crypto or frozenset({"BTC/USD"}))
+
+
+def paper_risk_limits() -> RiskLimits:
+    """Deterministic risk policy for the shadow ledger route."""
+    bankroll = _positive_amount(getattr(settings, "INITIAL_BANKROLL", 0.0)) or Decimal("1000")
+    daily_loss = _positive_amount(getattr(settings, "WEATHER_DAILY_LOSS_LIMIT", 0.0))
+    daily_loss_fraction = Decimal("0.05") if daily_loss is None else min(
+        Decimal("0.95"), max(Decimal("0.001"), daily_loss / bankroll)
+    )
+    max_order = _positive_amount(getattr(settings, "WEATHER_MAX_TRADE_SIZE", 0.0)) or Decimal("100")
+    stock_symbols, crypto_symbols = partition_stock_and_crypto_symbols(
+        stock_crypto_symbols()
+    )
+    return RiskLimits(
+        max_order_notional=max_order,
+        max_order_equity_fraction=Decimal("0.03"),
+        max_symbol_exposure_fraction=Decimal("0.10"),
+        max_gross_exposure_fraction=Decimal("0.50"),
+        max_crypto_exposure_fraction=Decimal("0.20"),
+        daily_loss_fraction=daily_loss_fraction,
+        stock_crypto_max_quote_age_seconds=_STOCK_CRYPTO_MAX_QUOTE_AGE_SECONDS,
+        weather_max_quote_age_seconds=_WEATHER_MAX_QUOTE_AGE_SECONDS,
+        allowed_stock_symbols=stock_symbols,
+        allowed_crypto_symbols=crypto_symbols,
+        allowed_venues=paper_allowed_venues(),
+    )
+
+
+def weather_portfolio_state(session):
+    """Read real account state for the risk evaluation, or None if unavailable.
+
+    Returning None rather than a placeholder is deliberate. A risk decision made
+    against invented exposure would be recorded in an append-only audit ledger as
+    though it were real, which is worse than not recording it at all.
+    """
+    failed = False
+    equity = None
+    gross = Decimal("0")
+    realized = Decimal("0")
+    try:
+        state = session.query(BotState).first()
+        if state is not None:
+            equity = _positive_amount(getattr(state, "bankroll", None))
+            realized = _exact_decimal(getattr(state, "total_pnl", 0.0)) or Decimal("0")
+        pending = session.query(func.coalesce(func.sum(Trade.size), 0.0)).filter(
+            Trade.settled == False,  # noqa: E712 - SQLAlchemy column comparison
+            Trade.market_type == "weather",
+        ).scalar()
+        gross = _exact_decimal(pending) or Decimal("0")
+    except Exception:
+        failed = True
+    if failed or equity is None or gross < 0:
+        return None
+    try:
+        return PortfolioState(
+            equity=equity,
+            start_of_day_nlv=equity,
+            daily_realized_pnl=realized,
+            gross_exposure=gross,
+            crypto_exposure=Decimal("0"),
+        )
+    except Exception:
+        return None
+
+
+def build_paper_execution_service(session):
+    """Construct a PaperExecutionService, or return None when one cannot exist.
+
+    Imported lazily so the scheduler keeps importing cleanly in environments where
+    Archives is unbound; the service fails closed on Archives by design.
+    """
+    failed = False
+    service = None
+    try:
+        from backend.trading.adapters.kalshi_paper import KalshiPaperAdapter
+        from backend.trading.adapters.polymarket_paper import PolymarketPaperAdapter
+        from backend.trading.service import PaperExecutionService, PaperExecutionSettings
+
+        def clock():
+            return datetime.now(timezone.utc)
+
+        adapters = {
+            Venue.POLYMARKET_PAPER: PolymarketPaperAdapter(clock=clock),
+            Venue.KALSHI_PAPER: KalshiPaperAdapter(
+                clock=clock,
+                execution_enabled=bool(settings.WEATHER_KALSHI_PAPER_EXECUTION_ENABLED),
+            ),
+        }
+        service = PaperExecutionService(
+            session=session,
+            adapters=adapters,
+            settings=PaperExecutionSettings(execution_mode=str(settings.EXECUTION_MODE)),
+            clock=clock,
+            kill_switch=lambda: bool(getattr(settings, "LIVE_TRADING_ENABLED", False)),
+        )
+    except Exception:
+        failed = True
+    if failed:
+        return None
+    return service
+
+
+def weather_upstream_evidence(signal) -> tuple:
+    """Name the authority that approved this weather signal for execution.
+
+    The risk layer refuses every prediction-weather proposal without upstream
+    approval evidence. That evidence must record *what* approved, so an auditor
+    reading the ledger can check the claim rather than take it. It is derived
+    from the shipped execution gate: when that gate refuses, there is no evidence
+    to give, and the empty tuple makes the risk layer refuse too.
+    """
+    if _weather_paper_execution_blockers(signal):
+        return ()
+    market = getattr(signal, "market", None)
+    if market is None:
+        return ()
+    platform = str(getattr(market, "platform", "") or "").strip().lower()
+    source = str(getattr(market, "settlement_source", "") or "").strip()
+    station = str(getattr(market, "settlement_station", "") or "").strip()
+    if not platform or not source or not station:
+        return ()
+    return (
+        f"weather-execution-gate:{platform}",
+        f"settlement-source:{source}",
+        f"settlement-station:{station}",
+    )
+
+
+def _weather_idempotency_key(proposal: TradeProposal) -> str:
+    """One key per proposal. The proposal id already digests everything that
+    distinguishes one order from another, so deriving from it makes a replay of
+    the same proposal share a key while a different order cannot borrow one."""
+    return f"weather:{proposal.proposal_id}"
+
+
+def shadow_route_weather_proposal(session, signal, proposal, *, now) -> str:
+    """Mirror an accepted weather proposal into the unified event ledger.
+
+    This is a shadow write during the compatibility phase: the legacy ``Trade``
+    row remains authoritative, and this function must never raise, because the
+    lane that already worked must not be taken down by the lane being added.
+
+    Divergence between the two paths is therefore possible -- the legacy row can
+    be written while this refuses -- so every non-routed outcome is logged with
+    its reason. Disagreement is allowed to happen; it is not allowed to be
+    silent.
+
+    Returns one of: ``disabled``, ``no_proposal``, ``unavailable``, ``failed``,
+    ``routed``.
+    """
+    if not settings.WEATHER_UNIFIED_LEDGER_ENABLED:
+        return "disabled"
+    if proposal is None:
+        log_event(
+            "info",
+            "Weather shadow ledger skipped: the execution gate produced no proposal",
+            {"market_id": str(getattr(getattr(signal, "market", None), "market_id", "") or "")},
+        )
+        return "no_proposal"
+
+    evidence = weather_upstream_evidence(signal)
+    if not evidence:
+        log_event(
+            "info",
+            "Weather shadow ledger skipped: no upstream approval evidence",
+            {"proposal_id": proposal.proposal_id},
+        )
+        return "no_proposal"
+
+    outcome = "failed"
+    try:
+        service = build_paper_execution_service(session)
+        portfolio = weather_portfolio_state(session)
+        if service is None or portfolio is None:
+            log_event(
+                "warning",
+                "Weather shadow ledger unavailable; legacy paper path is unaffected",
+                {
+                    "proposal_id": proposal.proposal_id,
+                    "service": service is not None,
+                    "portfolio": portfolio is not None,
+                },
+            )
+            return "unavailable"
+        context = RiskContext(
+            now=now,
+            execution_mode="paper",
+            idempotency_key=_weather_idempotency_key(proposal),
+            weather_upstream_approved=True,
+            weather_approval_evidence=evidence,
+        )
+        service.execute(
+            proposal, portfolio=portfolio, context=context, limits=paper_risk_limits()
+        )
+        outcome = "routed"
+    except Exception as error:
+        # Sanitized: record the failure type, never the upstream message, which
+        # can carry request payloads.
+        log_event(
+            "warning",
+            "Weather shadow ledger route failed; legacy paper path is unaffected",
+            {"proposal_id": proposal.proposal_id, "error_type": type(error).__name__},
+        )
+        return "failed"
+    return outcome
+
+
+async def stock_crypto_paper_job():
+    """Bounded unified paper lane for stocks and spot crypto.
+
+    Obtains market data, asks the strategy for proposals, and hands each to
+    ``PaperExecutionService``. It never calls a broker adapter directly.
+    """
+    if not settings.STOCK_CRYPTO_LANE_ENABLED:
+        return
+
+    from backend.trading.market_data import load_bar_series
+    from backend.trading.strategies.trend_following import TrendFollowingStrategy
+
+    strategy = TrendFollowingStrategy()
+    now = paper_clock()
+    notional_cap = _positive_amount(getattr(settings, "WEATHER_MAX_TRADE_SIZE", 0.0)) or Decimal("100")
+
+    service = None
+    portfolio = None
+    proposals_seen = 0
+    sessions_opened: list = []
+    for symbol in stock_crypto_symbols():
+        try:
+            payload = load_stock_crypto_bars(symbol)
+            if payload is None:
+                continue
+            series = load_bar_series(payload)
+            signal = strategy.propose(
+                series,
+                now=now,
+                notional_cap=notional_cap,
+                position_quantity=Decimal("0"),
+            )
+        except Exception as error:
+            log_event(
+                "warning",
+                f"Stock/crypto market data unavailable for {symbol}",
+                {"symbol": symbol, "error_type": type(error).__name__},
+            )
+            continue
+
+        if signal.proposal is None:
+            log_event("info", f"No {symbol} proposal: {signal.reason}", {"symbol": symbol})
+            continue
+
+        proposals_seen += 1
+        try:
+            if service is None:
+                session = SessionLocal()
+                sessions_opened.append(session)
+                service = build_paper_execution_service(session)
+                portfolio = weather_portfolio_state(session)
+            if service is None or portfolio is None:
+                log_event(
+                    "warning",
+                    "Stock/crypto paper service unavailable; no order was routed",
+                    {"symbol": symbol},
+                )
+                continue
+            context = RiskContext(
+                now=now,
+                execution_mode="paper",
+                idempotency_key=f"stock-crypto:{signal.proposal.proposal_id}",
+            )
+            service.execute(
+                signal.proposal,
+                portfolio=portfolio,
+                context=context,
+                limits=paper_risk_limits(),
+            )
+        except Exception as error:
+            log_event(
+                "warning",
+                f"Stock/crypto paper route failed for {symbol}",
+                {"symbol": symbol, "error_type": type(error).__name__},
+            )
+
+    for session in sessions_opened:
+        try:
+            session.close()
+        except Exception:
+            pass
+
+    if proposals_seen == 0:
+        log_event("info", "Stock/crypto paper run produced zero proposals")
+
+
 async def scan_and_trade_job():
     """
     Background job: Scan BTC 5-min markets, generate signals, execute trades.
@@ -578,6 +941,23 @@ async def weather_scan_and_trade_job():
                 if city_key:
                     open_by_city[city_key] = open_by_city.get(city_key, 0) + 1
 
+                # Shadow-write the same decision into the unified event ledger.
+                # The legacy Trade row above stays authoritative for the
+                # compatibility phase; this cannot raise, and any refusal is
+                # logged with its reason so the two paths cannot disagree quietly.
+                routed_at = paper_clock()
+                shadow_route_weather_proposal(
+                    db,
+                    signal,
+                    build_weather_paper_proposal(
+                        signal,
+                        size=trade_size,
+                        entry_price=entry_price,
+                        created_at=routed_at,
+                    ),
+                    now=routed_at,
+                )
+
                 log_event("trade",
                     f"WX {signal.market.city_name}: {signal.direction.upper()} "
                     f"${trade_size:.0f} @ {entry_price:.0%} | "
@@ -730,6 +1110,8 @@ def planned_scheduler_jobs() -> List[str]:
     jobs.append("heartbeat")
     if settings.WEATHER_ENABLED:
         jobs.append("weather_scan")
+    if settings.STOCK_CRYPTO_LANE_ENABLED:
+        jobs.append(STOCK_CRYPTO_JOB_ID)
     return jobs
 
 
@@ -790,6 +1172,15 @@ def start_scheduler():
     )
 
     # Weather trading jobs (gated by WEATHER_ENABLED)
+    # Unified stock/crypto paper lane — only when explicitly enabled.
+    if settings.STOCK_CRYPTO_LANE_ENABLED:
+        scheduler.add_job(
+            stock_crypto_paper_job,
+            IntervalTrigger(seconds=settings.STOCK_CRYPTO_SCAN_INTERVAL_SECONDS),
+            id=STOCK_CRYPTO_JOB_ID,
+            replace_existing=True,
+        )
+
     if settings.WEATHER_ENABLED:
         weather_scan_seconds = settings.WEATHER_SCAN_INTERVAL_SECONDS
 

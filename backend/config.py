@@ -56,6 +56,10 @@ class Settings(BaseSettings):
     LIVE_TRADING_ENABLED: bool = False
     ACTIVE_PRODUCT_SCOPE: str = "unified_paper"
     STOCK_CRYPTO_LANE_ENABLED: bool = False
+    # Bounded cadence for the unified stock/crypto paper lane. Only consulted
+    # when STOCK_CRYPTO_LANE_ENABLED is true.
+    STOCK_CRYPTO_SCAN_INTERVAL_SECONDS: int = 300
+    STOCK_CRYPTO_SYMBOLS: str = "SPY"
     TRADING_ARCHIVES_ROOT: str = "/Volumes/Archives"
     TRADING_SYSTEM_ROOT: str = "/Volumes/Archives/Hermes-Offload/2026-08-23/trading-system/unified-trading-system"
     TRADING_DATA_ROOT: str = "/Volumes/Archives/Hermes-Offload/2026-08-23/trading-system/data"
@@ -143,6 +147,11 @@ class Settings(BaseSettings):
     # while the venue-specific paper ledger is underperforming; public Kalshi
     # discovery/signals/calibration remain enabled.
     WEATHER_KALSHI_PAPER_EXECUTION_ENABLED: bool = False
+    # Shadow-route accepted weather proposals into the unified event ledger
+    # alongside the legacy Trade row. Off by default: the legacy row stays
+    # authoritative for the compatibility phase, and enabling this requires
+    # Archives to be bound, since PaperExecutionService fails closed without it.
+    WEATHER_UNIFIED_LEDGER_ENABLED: bool = False
 
     # Weather risk controls + scoring
     WEATHER_DAILY_LOSS_LIMIT: float = 200.0

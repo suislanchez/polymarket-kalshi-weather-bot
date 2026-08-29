@@ -832,7 +832,15 @@ git commit -m "feat: normalize weather paper execution"
 - Modify: `backend/core/scheduler.py`
 - Modify: `backend/config.py`
 - Create: `tests/test_unified_scheduler.py`
-- Modify: `tests/test_scheduler_autostart.py`
+- Unchanged: `tests/test_scheduler_autostart.py` — originally listed as Modify. It passes as
+  written, which is the evidence the new lane did not disturb startup gating.
+
+> **CORRECTED 2026-08-28 — Step 4 named a test file that does not exist.**
+> `tests/test_scheduler_jobs.py` has never existed in this repository, so running Step 4
+> verbatim collected **zero tests** and reported success by running nothing. The command
+> below now names the scheduler regression files that do exist. Checked with `ls tests/`:
+> `test_scheduler_autostart.py`, `test_scheduler_open_position_risk.py`,
+> `test_weather_scheduler_risk_controls.py`.
 
 **Step 1: Write failing scheduler tests**
 
@@ -871,7 +879,7 @@ failure in the new path must not stop the legacy one.
 **Step 4: Run GREEN and scheduler regressions**
 
 ```bash
-env -u PYTHONPATH "$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_unified_scheduler.py tests/test_scheduler_autostart.py tests/test_scheduler_jobs.py -q
+env -u PYTHONPATH "$ENVS/unified-trading-py311/bin/python" -m pytest tests/test_unified_scheduler.py tests/test_scheduler_autostart.py tests/test_scheduler_open_position_risk.py tests/test_weather_scheduler_risk_controls.py tests/test_weather_paper_adapters.py -q
 ```
 
 Expected: pass.
@@ -879,7 +887,7 @@ Expected: pass.
 **Step 5: Commit**
 
 ```bash
-git add backend/core/scheduler.py backend/config.py tests/test_unified_scheduler.py tests/test_scheduler_autostart.py
+git add backend/core/scheduler.py backend/config.py tests/test_unified_scheduler.py
 git diff --cached --check
 git commit -m "feat: schedule guarded stock crypto paper lane"
 ```
