@@ -3,7 +3,6 @@ import asyncio
 import hashlib
 import json
 from datetime import datetime, timedelta, timezone
-from weakref import WeakKeyDictionary
 from decimal import Decimal, InvalidOperation
 from math import isfinite
 from typing import List, Optional
@@ -446,7 +445,7 @@ def weather_portfolio_state(session):
         return None
 
 
-_PAPER_EXECUTION_SERVICES: "WeakKeyDictionary[object, object]" = WeakKeyDictionary()
+_SERVICE_SESSION_KEY = "paper_execution_service"
 
 
 def build_paper_execution_service(session):
@@ -457,16 +456,24 @@ def build_paper_execution_service(session):
     every proposal restarts that counter and stamps every order in a run with the
     same reference -- four filled orders reading as one in an append-only audit
     ledger. Holding the service for the life of the session also restores the
-    duplicate-replay caches, which a service discarded after a single execute can
-    never reach.
+    service's own duplicate-replay caches, which a service discarded after a
+    single execute can never reach.
 
-    The session is the unit of work, so it is the right scope, and the mapping is
-    weak so a finished session takes its service with it.
+    The service is stored on the session, so it lives and dies with the session
+    and nothing outlives the tick that opened it. A module-level weak-keyed
+    mapping does not achieve that here: the service holds the session, so every
+    entry would pin its own key, the weak reference could never fire, and a
+    scheduler that opens a session per tick would retain all of them for the life
+    of the process.
 
     Imported lazily so the scheduler keeps importing cleanly in environments where
     Archives is unbound; the service fails closed on Archives by design.
     """
-    cached = _PAPER_EXECUTION_SERVICES.get(session)
+    try:
+        cached = session.info.get(_SERVICE_SESSION_KEY)
+    except Exception:
+        # Not a real Session. Build one anyway; it simply will not be reused.
+        cached = None
     if cached is not None:
         return cached
 
@@ -505,8 +512,8 @@ def build_paper_execution_service(session):
     if failed:
         return None
     try:
-        _PAPER_EXECUTION_SERVICES[session] = service
-    except TypeError:  # pragma: no cover - a session that cannot be weakly held
+        session.info[_SERVICE_SESSION_KEY] = service
+    except Exception:  # pragma: no cover - a stand-in with no usable info mapping
         pass
     return service
 

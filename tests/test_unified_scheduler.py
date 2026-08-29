@@ -920,3 +920,55 @@ def test_a_storage_failure_leaves_the_legacy_lane_committable(
     # No half-written unified order, and no event chain claiming one was filled.
     assert ledger_session.query(UnifiedOrder).count() == 0
     assert "order_filled" not in ledger_event_types(ledger_session)
+
+
+def test_the_service_is_not_retained_after_its_session_ends(tmp_path):
+    """A per-session cache must not outlive the sessions it is keyed on.
+
+    The scheduler jobs open a fresh session every tick and run for as long as the
+    process does, so anything the cache keeps is kept forever: the session and
+    its identity map, the service, both adapters with their report and
+    fingerprint caches, and the replay caches. A weak *key* does not buy this on
+    its own -- if the stored value references the session, the entry pins its own
+    key and the weak reference can never fire.
+    """
+    import gc
+    import weakref
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'retention.sqlite3'}")
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+
+    witnesses = []
+    for _ in range(3):
+        session = factory()
+        service = scheduler_module.build_paper_execution_service(session)
+        assert service is not None
+        witnesses.append(weakref.ref(session))
+        session.close()
+        del session, service
+
+    gc.collect()
+    gc.collect()
+
+    assert [witness() for witness in witnesses] == [None, None, None]
+    engine.dispose()
+
+
+def test_each_session_gets_its_own_service(tmp_path):
+    """Sharing one service across sessions would write one session's ledger
+    through another's transaction."""
+    engine = create_engine(f"sqlite:///{tmp_path / 'per-session.sqlite3'}")
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+
+    with factory() as first, factory() as second:
+        service_one = scheduler_module.build_paper_execution_service(first)
+        service_two = scheduler_module.build_paper_execution_service(second)
+
+        assert service_one is not None and service_two is not None
+        assert service_one is not service_two
+        # ...and the same session keeps getting the same one.
+        assert scheduler_module.build_paper_execution_service(first) is service_one
+
+    engine.dispose()
