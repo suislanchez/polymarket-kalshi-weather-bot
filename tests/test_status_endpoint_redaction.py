@@ -67,25 +67,32 @@ def test_relayer_status_redacts_full_address(monkeypatch):
     assert full_address not in blob
     assert full_address not in result.values()
 
-    # Two independent properties, because dropping the old assertion dropped
-    # both at once.
+    # Two properties, because the assertion this replaced was carrying both and
+    # each earlier attempt restored only one.
     #
-    # It read `full_address[:6] in preview`, which required the disclosure it
-    # exists to limit -- any future tightening of _redact_address would have
-    # failed here and looked like a regression. But it was also the only thing
-    # binding the preview to the address, and removing it alone let the preview
-    # become a DIFFERENT secret published whole: a _redact_address returning
-    # settings.RELAYER_API_KEY passed this test.
+    # It read `full_address[:6] in preview`. That REQUIRED the disclosure it
+    # exists to limit -- any future tightening of _redact_address, including
+    # reducing the preview to a boolean, would have failed here and looked like
+    # a regression. But it was also the only thing binding the preview to the
+    # address: dropping it alone let the preview become a different secret
+    # published whole, and naming one forbidden credential instead only excluded
+    # that one. Swapping the call-site argument to POLYMARKET_API_SECRET, with
+    # the shipped redactor untouched, published a real key's prefix and suffix
+    # while the test stayed green.
     #
-    # So: an upper bound on how much may be published, and a sentinel on the
-    # credential that must never be its source. Neither is a floor; a preview
-    # reduced to a boolean still passes both.
+    # So: a ceiling on how much may be published, and a positive statement that
+    # whatever IS published came from the address. The second is what excludes
+    # every foreign source at once, and unlike the original it imposes no floor
+    # -- an empty preview, a bare ellipsis, and a boolean-shaped redactor all
+    # satisfy it vacuously, which is exactly the freedom the ceiling was added
+    # to protect.
     preview = result.get("address_preview")
     assert preview is not None
     assert preview != full_address
     assert len(preview) <= 12
+    assert all(part in full_address for part in str(preview).split("…") if part)
+    # And the relayer key itself never appears anywhere in the payload.
     assert api_key_sentinel not in blob
-    assert api_key_sentinel[:6] not in blob
 
 
 def test_relayer_status_not_configured_is_safe(monkeypatch):

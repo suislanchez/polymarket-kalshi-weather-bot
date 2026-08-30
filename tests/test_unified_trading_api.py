@@ -128,6 +128,31 @@ def seeded_credentials(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+def walk_routes(routes, prefix=""):
+    """Enumerate every reachable path, including the method-less kinds.
+
+    Mount and WebSocketRoute expose no .methods, so a methods-only comprehension
+    omits them entirely. And a Mount's children carry paths RELATIVE to it, so
+    the prefix has to accumulate: a mount at /api whose child is
+    /trading/place-order serves POST /api/trading/place-order while appearing
+    under neither name. Both route guards below use this, because a scan of only
+    the top level misses a nested route in exactly the case the guards exist for.
+    """
+    for route in routes:
+        path = prefix + getattr(route, "path", "")
+        children = getattr(route, "routes", None)
+        if children is not None:
+            yield (path, "MOUNT")
+            yield from walk_routes(children, path)
+            continue
+        methods = getattr(route, "methods", None)
+        if methods is None:
+            yield (path, "WEBSOCKET" if "WebSocket" in type(route).__name__ else "MOUNT")
+        else:
+            for method in sorted(set(methods) - {"HEAD", "OPTIONS"}):
+                yield (path, method)
+
+
 def test_the_trading_surface_is_exactly_the_declared_allowlist():
     """A route-table assertion, not a grep.
 
@@ -135,33 +160,8 @@ def test_the_trading_surface_is_exactly_the_declared_allowlist():
     live-order route arrives. A substring scan of the source would miss a route
     registered dynamically or named innocuously.
     """
-    def walk(routes, prefix=""):
-        """Enumerate every reachable path, including the method-less kinds.
-
-        Mount and WebSocketRoute expose no .methods, so a methods-only
-        comprehension omits them entirely. And a Mount's children carry paths
-        RELATIVE to it, so the prefix has to accumulate: a mount at /api whose
-        child is /trading/place-order serves POST /api/trading/place-order while
-        appearing under neither name. Without the accumulation this assertion --
-        whose whole purpose is catching a live-order route being added -- misses
-        exactly that.
-        """
-        for route in routes:
-            path = prefix + getattr(route, "path", "")
-            children = getattr(route, "routes", None)
-            if children is not None:
-                yield (path, "MOUNT")
-                yield from walk(children, path)
-                continue
-            methods = getattr(route, "methods", None)
-            if methods is None:
-                yield (path, "WEBSOCKET" if "WebSocket" in type(route).__name__ else "MOUNT")
-            else:
-                for method in sorted(set(methods) - {"HEAD", "OPTIONS"}):
-                    yield (path, method)
-
     trading_routes = {
-        entry for entry in walk(main.app.routes) if entry[0].startswith(TRADING_PREFIX)
+        entry for entry in walk_routes(main.app.routes) if entry[0].startswith(TRADING_PREFIX)
     }
 
     assert trading_routes == {
@@ -177,9 +177,7 @@ def test_no_route_anywhere_offers_live_order_placement():
     """Belt and braces across the whole app, not just the trading prefix."""
     forbidden = re.compile(r"live|real[-_]?order|submit[-_]?order|place[-_]?order", re.I)
     offenders = [
-        getattr(route, "path", "")
-        for route in main.app.routes
-        if forbidden.search(getattr(route, "path", ""))
+        path for path, _kind in walk_routes(main.app.routes) if forbidden.search(path)
     ]
     assert offenders == []
 
@@ -449,6 +447,15 @@ def test_events_return_only_allowlisted_payload_keys(client, factory, paper_mode
                     "identity": "IDENTITYSENTINEL",
                     "api_key": "PAYLOADKEYSENTINEL",
                     "caller_metadata": {"secret": "NESTEDPAYLOADSENTINEL"},
+                    # The subset leg only catches a widening whose new key is
+                    # present here, so plant the keys a real widening would most
+                    # plausibly add. These four are adapter- or caller-controlled
+                    # free text that real ledger writers do emit, which is
+                    # precisely why they are excluded.
+                    "client_order_id": "CLIENTORDERSENTINEL",
+                    "broker_order_id": "BROKERORDERSENTINEL",
+                    "metadata": {"secret": "METADATAKEYSENTINEL"},
+                    "context": "CONTEXTSENTINEL",
                 },
                 previous_hash="0" * 64,
                 event_hash="1" * 64,
@@ -474,6 +481,10 @@ def test_events_return_only_allowlisted_payload_keys(client, factory, paper_mode
         "IDENTITYSENTINEL",
         "PAYLOADKEYSENTINEL",
         "NESTEDPAYLOADSENTINEL",
+        "CLIENTORDERSENTINEL",
+        "BROKERORDERSENTINEL",
+        "METADATAKEYSENTINEL",
+        "CONTEXTSENTINEL",
     ):
         assert sentinel not in response.text
 
