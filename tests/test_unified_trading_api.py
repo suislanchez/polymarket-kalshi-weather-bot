@@ -135,12 +135,24 @@ def test_the_trading_surface_is_exactly_the_declared_allowlist():
     live-order route arrives. A substring scan of the source would miss a route
     registered dynamically or named innocuously.
     """
+    def walk(routes):
+        """Mount and WebSocketRoute expose no .methods, so a methods-only
+        comprehension silently omits them -- a mounted sub-application under the
+        prefix would be both inside the surface and invisible to this assertion.
+        The app already registers a websocket route, so the blind class is real.
+        """
+        for route in routes:
+            path = getattr(route, "path", "")
+            methods = getattr(route, "methods", None)
+            if methods is None:
+                yield (path, "WEBSOCKET" if hasattr(route, "session") or "ws" in path else "MOUNT")
+            else:
+                for method in sorted(set(methods) - {"HEAD", "OPTIONS"}):
+                    yield (path, method)
+            yield from walk(getattr(route, "routes", ()) or ())
+
     trading_routes = {
-        (path, method)
-        for route in main.app.routes
-        for path in [getattr(route, "path", "")]
-        if path.startswith(TRADING_PREFIX)
-        for method in sorted(getattr(route, "methods", set()) - {"HEAD", "OPTIONS"})
+        entry for entry in walk(main.app.routes) if entry[0].startswith(TRADING_PREFIX)
     }
 
     assert trading_routes == {
@@ -339,22 +351,46 @@ def test_orders_returns_money_fields_as_strings(client, factory, paper_mode):
     assert Decimal(order["filled_quantity"]) == Decimal("89.285714")
 
 
-def test_orders_projects_an_allowlist_and_never_dumps_metadata(
+def test_orders_never_dump_the_projection_metadata_column(
     client, factory, paper_mode
 ):
     """upsert_order_projection copies report metadata into the JSON column with
-    no key filtering, so a dump would echo whatever a strategy put there."""
+    no key filtering, so a dump would echo whatever reached it.
+
+    The sentinel goes through the projection writer directly. Routing a proposal
+    with hostile metadata proves nothing: PaperExecutionService replaces report
+    metadata with a hard-coded literal before the projection is written, so the
+    sentinel never reaches the column and the assertion holds for any handler.
+    """
+    from backend.trading.domain import ExecutionReport, OrderStatus, Venue
+    from backend.trading.ledger import upsert_order_projection
+
     with factory() as session:
-        route_one_real_order(
+        upsert_order_projection(
             session,
-            metadata={"api_key": "METADATASENTINELVALUE", "caller": {"secret": "NESTEDSENTINEL"}},
+            ExecutionReport(
+                client_order_id="projection-dump-probe",
+                venue=Venue.POLYMARKET_PAPER,
+                status=OrderStatus.FILLED,
+                broker_order_id="polymarket-paper-000001",
+                filled_quantity=Decimal("89.285714"),
+                filled_notional=Decimal("49.99999984"),
+                average_fill_price=Decimal("0.56"),
+                occurred_at=datetime.now(timezone.utc),
+                metadata={"api_key": "METADATASENTINELVALUE", "note": "NESTEDSENTINEL"},
+            ),
         )
+        session.commit()
+        # The sentinel really is in the column, or this test is vacuous again.
+        stored = session.query(UnifiedOrder).one()
+        assert "METADATASENTINELVALUE" in json.dumps(stored.order_metadata)
 
     response = client.get(f"{TRADING_PREFIX}/orders")
 
+    assert response.json()[0]["client_order_id"] == "projection-dump-probe"
     assert "METADATASENTINELVALUE" not in response.text
     assert "NESTEDSENTINEL" not in response.text
-    assert "order_metadata" not in response.text
+    assert "metadata" not in response.text
 
 
 def test_events_return_the_sanitized_audit_chain(client, factory, paper_mode):
@@ -374,16 +410,59 @@ def test_events_return_the_sanitized_audit_chain(client, factory, paper_mode):
     assert all(isinstance(event["sequence"], int) for event in body)
 
 
-def test_events_do_not_echo_proposal_rationale(client, factory, paper_mode):
-    """The rationale is free text from a research component and never belongs
-    in a response."""
+def test_events_return_only_allowlisted_payload_keys(client, factory, paper_mode):
+    """The allowlist is the only control over what ledger payload content
+    reaches an unauthenticated response, and TradingEventResponse.payload is
+    typed dict[str, Any], so response_model provides no backstop.
+
+    The row is written DIRECTLY rather than through the service, on purpose.
+    Planting a sentinel on proposal.rationale or proposal.metadata proves
+    nothing: the service overwrites metadata with a hard-coded literal and no
+    payload builder ever emits rationale, so the sentinel cannot reach the
+    column, cannot reach the response, and the assertion cannot fail for any
+    implementation of the handler. Deleting the allowlist left the whole suite
+    green. This test writes the hostile payload where the filter will actually
+    see it.
+    """
     with factory() as session:
-        route_one_real_order(session, rationale="RATIONALESENTINEL api_key=sk-live-XYZ")
+        session.add(
+            TradingEvent(
+                event_id="payload-filter-probe",
+                aggregate_id="payload-filter-probe",
+                sequence=1,
+                event_type="proposal_created",
+                occurred_at=datetime.now(timezone.utc),
+                payload={
+                    "proposal_id": "payload-filter-probe",  # allowlisted, must survive
+                    "rationale": "RATIONALESENTINEL api_key=sk-live-XYZ",
+                    "identity": "IDENTITYSENTINEL",
+                    "api_key": "PAYLOADKEYSENTINEL",
+                    "caller_metadata": {"secret": "NESTEDPAYLOADSENTINEL"},
+                },
+                previous_hash="0" * 64,
+                event_hash="1" * 64,
+            )
+        )
+        session.commit()
 
     response = client.get(f"{TRADING_PREFIX}/events")
+    body = response.json()
 
-    assert "RATIONALESENTINEL" not in response.text
-    assert "sk-live-XYZ" not in response.text
+    assert len(body) == 1
+    returned = set(body[0]["payload"])
+    # The filter, asserted directly. Removing it fails here immediately.
+    assert returned <= main._TRADING_EVENT_PAYLOAD_KEYS, sorted(returned - main._TRADING_EVENT_PAYLOAD_KEYS)
+    # ...and it must not be filtering everything away.
+    assert body[0]["payload"]["proposal_id"] == "payload-filter-probe"
+
+    for sentinel in (
+        "RATIONALESENTINEL",
+        "sk-live-XYZ",
+        "IDENTITYSENTINEL",
+        "PAYLOADKEYSENTINEL",
+        "NESTEDPAYLOADSENTINEL",
+    ):
+        assert sentinel not in response.text
 
 
 def test_listing_endpoints_bound_their_limit(client, paper_mode):

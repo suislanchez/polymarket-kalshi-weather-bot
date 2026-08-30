@@ -60,13 +60,23 @@ def test_relayer_status_redacts_full_address(monkeypatch):
     assert result["configured"] is True
     assert result["connected"] is True
     assert result.get("address_present") is True
-    # The full address must never appear; only a shortened preview is allowed.
-    assert "address" not in result
+
+    # The full address must never appear, in any field.
     assert full_address not in blob
+    assert full_address not in result.values()
+
+    # An UPPER bound on what may be published, not a floor.
+    #
+    # This assertion used to read `full_address[:6] in preview`, which required
+    # the disclosure it exists to limit: any future tightening of
+    # _redact_address -- including reducing the preview to a boolean -- would
+    # have failed here and looked like a regression. A relayer address is public
+    # and grants no spend authority, so the preview is not a credential leak,
+    # but the test must not be the thing standing in the way of shortening it.
     preview = result.get("address_preview")
     assert preview is not None
     assert preview != full_address
-    assert full_address[:6] in preview  # short prefix is acceptable
+    assert len(preview) <= 12
 
 
 def test_relayer_status_not_configured_is_safe(monkeypatch):
