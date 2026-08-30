@@ -135,21 +135,30 @@ def test_the_trading_surface_is_exactly_the_declared_allowlist():
     live-order route arrives. A substring scan of the source would miss a route
     registered dynamically or named innocuously.
     """
-    def walk(routes):
-        """Mount and WebSocketRoute expose no .methods, so a methods-only
-        comprehension silently omits them -- a mounted sub-application under the
-        prefix would be both inside the surface and invisible to this assertion.
-        The app already registers a websocket route, so the blind class is real.
+    def walk(routes, prefix=""):
+        """Enumerate every reachable path, including the method-less kinds.
+
+        Mount and WebSocketRoute expose no .methods, so a methods-only
+        comprehension omits them entirely. And a Mount's children carry paths
+        RELATIVE to it, so the prefix has to accumulate: a mount at /api whose
+        child is /trading/place-order serves POST /api/trading/place-order while
+        appearing under neither name. Without the accumulation this assertion --
+        whose whole purpose is catching a live-order route being added -- misses
+        exactly that.
         """
         for route in routes:
-            path = getattr(route, "path", "")
+            path = prefix + getattr(route, "path", "")
+            children = getattr(route, "routes", None)
+            if children is not None:
+                yield (path, "MOUNT")
+                yield from walk(children, path)
+                continue
             methods = getattr(route, "methods", None)
             if methods is None:
-                yield (path, "WEBSOCKET" if hasattr(route, "session") or "ws" in path else "MOUNT")
+                yield (path, "WEBSOCKET" if "WebSocket" in type(route).__name__ else "MOUNT")
             else:
                 for method in sorted(set(methods) - {"HEAD", "OPTIONS"}):
                     yield (path, method)
-            yield from walk(getattr(route, "routes", ()) or ())
 
     trading_routes = {
         entry for entry in walk(main.app.routes) if entry[0].startswith(TRADING_PREFIX)
@@ -390,7 +399,9 @@ def test_orders_never_dump_the_projection_metadata_column(
     assert response.json()[0]["client_order_id"] == "projection-dump-probe"
     assert "METADATASENTINELVALUE" not in response.text
     assert "NESTEDSENTINEL" not in response.text
-    assert "metadata" not in response.text
+    # Field names, not free text: a rejection reason mentioning metadata is not
+    # a dump, and asserting on the whole body made this fire on benign content.
+    assert not any("metadata" in key for key in response.json()[0])
 
 
 def test_events_return_the_sanitized_audit_chain(client, factory, paper_mode):
@@ -450,8 +461,10 @@ def test_events_return_only_allowlisted_payload_keys(client, factory, paper_mode
 
     assert len(body) == 1
     returned = set(body[0]["payload"])
-    # The filter, asserted directly. Removing it fails here immediately.
-    assert returned <= main._TRADING_EVENT_PAYLOAD_KEYS, sorted(returned - main._TRADING_EVENT_PAYLOAD_KEYS)
+    # Pinned literally, not read from the constant under test: comparing the
+    # response against main._TRADING_EVENT_PAYLOAD_KEYS would pass for any
+    # widening of that set, which is the erosion this leg exists to catch.
+    assert returned <= {"proposal_id"}, sorted(returned - {"proposal_id"})
     # ...and it must not be filtering everything away.
     assert body[0]["payload"]["proposal_id"] == "payload-filter-probe"
 

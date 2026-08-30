@@ -49,8 +49,10 @@ def test_kalshi_status_does_not_leak_raw_balance(monkeypatch):
 
 def test_relayer_status_redacts_full_address(monkeypatch):
     full_address = "0x1111111111111111111111111111111111111111"
+    # Distinctive so a preview sourced from the wrong secret is visible.
+    api_key_sentinel = "RELAYERKEYSENTINEL-MUST-NOT-BE-PUBLISHED"
     monkeypatch.setattr(settings, "RELAYER_API_KEY_ADDRESS", full_address)
-    monkeypatch.setattr(settings, "RELAYER_API_KEY", "secret-key")
+    monkeypatch.setattr(settings, "RELAYER_API_KEY", api_key_sentinel)
     monkeypatch.setattr("backend.data.polymarket_relayer.relayer_credentials_present", lambda: True)
     monkeypatch.setattr("backend.data.polymarket_relayer.PolymarketRelayerClient", _FakeRelayerClient)
 
@@ -65,18 +67,25 @@ def test_relayer_status_redacts_full_address(monkeypatch):
     assert full_address not in blob
     assert full_address not in result.values()
 
-    # An UPPER bound on what may be published, not a floor.
+    # Two independent properties, because dropping the old assertion dropped
+    # both at once.
     #
-    # This assertion used to read `full_address[:6] in preview`, which required
-    # the disclosure it exists to limit: any future tightening of
-    # _redact_address -- including reducing the preview to a boolean -- would
-    # have failed here and looked like a regression. A relayer address is public
-    # and grants no spend authority, so the preview is not a credential leak,
-    # but the test must not be the thing standing in the way of shortening it.
+    # It read `full_address[:6] in preview`, which required the disclosure it
+    # exists to limit -- any future tightening of _redact_address would have
+    # failed here and looked like a regression. But it was also the only thing
+    # binding the preview to the address, and removing it alone let the preview
+    # become a DIFFERENT secret published whole: a _redact_address returning
+    # settings.RELAYER_API_KEY passed this test.
+    #
+    # So: an upper bound on how much may be published, and a sentinel on the
+    # credential that must never be its source. Neither is a floor; a preview
+    # reduced to a boolean still passes both.
     preview = result.get("address_preview")
     assert preview is not None
     assert preview != full_address
     assert len(preview) <= 12
+    assert api_key_sentinel not in blob
+    assert api_key_sentinel[:6] not in blob
 
 
 def test_relayer_status_not_configured_is_safe(monkeypatch):
