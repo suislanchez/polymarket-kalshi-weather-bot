@@ -1,4 +1,4 @@
-"""FastAPI backend for weather paper-trading dashboard."""
+"""FastAPI backend for the unified paper-trading dashboard (weather, stocks, spot crypto)."""
 from fastapi import FastAPI, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
@@ -66,12 +66,22 @@ from backend.api.schemas import (
     MicrostructureResponse,
     OpenPositionRiskRowResponse,
     OpenPositionRiskSummaryResponse,
+    PaperRunResponse,
+    PaperRunResultResponse,
     PolymarketWeatherSourceStateResponse,
     PolymarketWeatherSourceStateSummaryResponse,
     RottenTomatoesSourceStateResponse,
     SignalResponse,
     SignalReviewQueueResponse,
     TradeResponse,
+    TradingArchivesResponse,
+    TradingEventResponse,
+    TradingKillSwitchResponse,
+    TradingPortfolioResponse,
+    TradingPositionResponse,
+    TradingStatusResponse,
+    TradingVenueStateResponse,
+    UnifiedOrderResponse,
     WeatherBotCalibrationRowResponse,
     WeatherCalibrationRowResponse,
     WeatherCalibrationSummaryResponse,
@@ -83,8 +93,12 @@ from backend.api.schemas import (
 )
 
 app = FastAPI(
-    title="Weather Paper Trading Dashboard",
-    description="Simulation-only weather prediction-market paper-trading dashboard",
+    title="Unified Paper Trading Dashboard",
+    description=(
+        "Paper-only unified trading dashboard. Stocks, spot crypto and "
+        "prediction-market weather share one proposal, risk, order and ledger "
+        "path. Simulation only: there is no live-order endpoint."
+    ),
     version="3.0.0"
 )
 
@@ -440,7 +454,7 @@ async def shutdown():
 # Core endpoints
 @app.get("/")
 async def root():
-    return {"status": "ok", "message": "Weather Paper Trading Dashboard API v3.0", "simulation_mode": settings.SIMULATION_MODE}
+    return {"status": "ok", "message": "Unified Paper Trading Dashboard API v3.0", "simulation_mode": settings.SIMULATION_MODE}
 
 
 def _sqlite_path_from_database_url(database_url: str) -> str:
@@ -1096,10 +1110,14 @@ async def get_kalshi_status():
             "connected": True,
             "balance_available": _summarize_account_balance(balance_data),
         }
-    except Exception as e:
+    except Exception as error:
+        # Never str(error). A missing or unreadable key raises with the private
+        # key's absolute path in its message, and this route is unauthenticated,
+        # so echoing it published the path to anyone who asked. The exception
+        # type is enough to tell an operator what to look at.
         return {
             "connected": False,
-            "error": str(e),
+            "error_type": type(error).__name__,
         }
 
 
@@ -1669,6 +1687,330 @@ async def websocket_events(websocket: WebSocket):
         ws_manager.disconnect(websocket)
     except Exception:
         ws_manager.disconnect(websocket)
+
+
+# ---------------------------------------------------------------------------
+# Unified paper trading endpoints (Task 13)
+#
+# Four reads and one write. Handlers stay thin: each delegates to a module-level
+# helper that is testable without FastAPI, following the /api/open-position-risk
+# shape rather than the inline /api/dashboard one.
+#
+# Two rules hold across all five. Money crosses the boundary as strings, because
+# a bare Decimal in a plain dict serializes to a float and silently drops the
+# precision the ledger preserved. And no handler ever returns an exception
+# string: refusals carry fixed reason codes, the way the trading layer already
+# logs type(error).__name__ rather than the message.
+# ---------------------------------------------------------------------------
+
+_TRADING_CREDENTIAL_FIELDS = {
+    "polymarket_api": ("POLYMARKET_API_KEY", "POLYMARKET_API_KEY_ID", "POLYMARKET_API_SECRET"),
+    "polymarket_relayer": ("RELAYER_API_KEY", "RELAYER_API_KEY_ADDRESS"),
+    "kalshi": ("KALSHI_API_KEY_ID", "KALSHI_PRIVATE_KEY_PATH"),
+    "alpaca_paper": ("ALPACA_API_KEY", "ALPACA_API_SECRET"),
+    "groq": ("GROQ_API_KEY",),
+}
+
+# The kill switch the execution service is actually built with. Reported by
+# name so an operator cannot flip a flag nothing reads: GLOBAL_TRADING_KILL_SWITCH
+# is declared in config and read by no production code path.
+_KILL_SWITCH_SOURCE = "LIVE_TRADING_ENABLED"
+
+_paper_run_lock = asyncio.Lock()
+
+
+def _credential_presence() -> dict:
+    """Presence as booleans, never values, never lengths, never prefixes."""
+    presence = {}
+    for label, fields in _TRADING_CREDENTIAL_FIELDS.items():
+        presence[label] = all(
+            bool(str(getattr(settings, field, "") or "").strip()) for field in fields
+        )
+    return presence
+
+
+def _archives_binding() -> dict:
+    """The shape of the Archives binding, never the paths themselves."""
+    from backend.trading.execution_mode import (
+        ArchivesRuntimeError,
+        archives_required_directories,
+        archives_runtime_paths,
+        require_archives_runtime,
+    )
+
+    root = str(getattr(settings, "TRADING_ARCHIVES_ROOT", "") or "").strip()
+    binding = {
+        "root_configured": bool(root),
+        "root_available": False,
+        "runtime_paths_contained": False,
+        "required_directories_present": False,
+    }
+    if not binding["root_configured"]:
+        return binding
+    try:
+        require_archives_runtime(
+            settings.TRADING_ARCHIVES_ROOT,
+            archives_runtime_paths(settings),
+            required_directories=archives_required_directories(settings),
+        )
+    except ArchivesRuntimeError:
+        return binding
+    except Exception:
+        return binding
+    binding.update(
+        root_available=True,
+        runtime_paths_contained=True,
+        required_directories_present=True,
+    )
+    return binding
+
+
+def _venue_states() -> list:
+    """Both prediction venues are internal simulations, always."""
+    kalshi_enabled = bool(getattr(settings, "WEATHER_KALSHI_PAPER_EXECUTION_ENABLED", False))
+    return [
+        TradingVenueStateResponse(
+            venue="polymarket_paper",
+            simulation=True,
+            execution_enabled=True,
+            monitor_only=False,
+        ),
+        TradingVenueStateResponse(
+            venue="kalshi_paper",
+            simulation=True,
+            execution_enabled=kalshi_enabled,
+            monitor_only=not kalshi_enabled,
+        ),
+    ]
+
+
+def _kill_switch_engaged() -> bool:
+    return bool(getattr(settings, _KILL_SWITCH_SOURCE, False))
+
+
+def _is_paper_mode() -> bool:
+    mode = getattr(settings, "EXECUTION_MODE", "")
+    return isinstance(mode, str) and mode.strip().lower() == "paper"
+
+
+def _unified_order_response(row) -> UnifiedOrderResponse:
+    """Explicit projection. order_metadata is deliberately not carried."""
+    return UnifiedOrderResponse(
+        client_order_id=str(row.client_order_id),
+        venue=str(row.venue),
+        status=str(row.status),
+        broker_order_id=(str(row.broker_order_id) if row.broker_order_id else None),
+        rejection_reason=(str(row.rejection_reason) if row.rejection_reason else None),
+        filled_quantity=str(row.filled_quantity),
+        filled_notional=str(row.filled_notional),
+        average_fill_price=(
+            str(row.average_fill_price) if row.average_fill_price is not None else None
+        ),
+        occurred_at=row.occurred_at,
+    )
+
+
+# Payload keys the ledger writes that are safe to return. Anything else -- a
+# rationale, a caller metadata dict, an adapter-controlled identifier -- is
+# dropped rather than trusted, because the projection and the event payload copy
+# some fields through without filtering.
+_TRADING_EVENT_PAYLOAD_KEYS = frozenset(
+    {
+        "proposal_id",
+        "strategy_id",
+        "venue",
+        "asset_class",
+        "symbol",
+        "side",
+        "order_type",
+        "quantity",
+        "notional",
+        "reference_price",
+        "limit_price",
+        "status",
+        "approved",
+        "reason_codes",
+        "filled_quantity",
+        "filled_notional",
+        "average_fill_price",
+        "rejection_reason",
+        "occurred_at",
+        "created_at",
+    }
+)
+
+
+def _trading_event_response(row) -> TradingEventResponse:
+    payload = row.payload if isinstance(row.payload, dict) else {}
+    return TradingEventResponse(
+        aggregate_id=str(row.aggregate_id),
+        sequence=int(row.sequence),
+        event_type=str(row.event_type),
+        occurred_at=row.occurred_at,
+        payload={
+            key: value
+            for key, value in payload.items()
+            if key in _TRADING_EVENT_PAYLOAD_KEYS
+        },
+    )
+
+
+@app.get("/api/trading/status", response_model=TradingStatusResponse)
+async def get_trading_status():
+    """Paper-only runtime posture. Credential presence only, never values."""
+    return TradingStatusResponse(
+        execution_mode=str(getattr(settings, "EXECUTION_MODE", "")),
+        paper_only=_is_paper_mode() and not _kill_switch_engaged(),
+        kill_switch=TradingKillSwitchResponse(
+            engaged=_kill_switch_engaged(), source=_KILL_SWITCH_SOURCE
+        ),
+        lanes={
+            "stock_crypto": bool(getattr(settings, "STOCK_CRYPTO_LANE_ENABLED", False)),
+            "weather_unified_ledger": bool(
+                getattr(settings, "WEATHER_UNIFIED_LEDGER_ENABLED", False)
+            ),
+            "scheduler_autostart": bool(getattr(settings, "SCHEDULER_AUTOSTART", False)),
+        },
+        venues=_venue_states(),
+        credentials=_credential_presence(),
+        archives=TradingArchivesResponse(**_archives_binding()),
+    )
+
+
+@app.get("/api/trading/orders", response_model=List[UnifiedOrderResponse])
+async def get_trading_orders(
+    limit: int = Query(50, ge=1, le=200), db: Session = Depends(get_db)
+):
+    """Normalized order projections, newest first."""
+    from backend.models.database import UnifiedOrder
+
+    rows = (
+        db.query(UnifiedOrder)
+        .order_by(UnifiedOrder.occurred_at.desc(), UnifiedOrder.id.desc())
+        .limit(limit)
+        .all()
+    )
+    return [_unified_order_response(row) for row in rows]
+
+
+@app.get("/api/trading/events", response_model=List[TradingEventResponse])
+async def get_trading_events(
+    limit: int = Query(50, ge=1, le=200), db: Session = Depends(get_db)
+):
+    """Sanitized audit events in ledger order."""
+    from backend.models.database import TradingEvent
+
+    rows = (
+        db.query(TradingEvent)
+        .order_by(TradingEvent.id.asc())
+        .limit(limit)
+        .all()
+    )
+    return [_trading_event_response(row) for row in rows]
+
+
+@app.get("/api/trading/portfolio", response_model=TradingPortfolioResponse)
+async def get_trading_portfolio(db: Session = Depends(get_db)):
+    """Real account state, or an explicit absence.
+
+    Never an adapter snapshot: both production adapters return a hard-coded
+    balance that looks like an account read and is not one. Never cash aliased
+    to equity.
+    """
+    from backend.core.scheduler import weather_portfolio_state
+
+    state = weather_portfolio_state(db)
+    if state is None:
+        return TradingPortfolioResponse(
+            available=False, reason="portfolio_state_unavailable"
+        )
+    return TradingPortfolioResponse(
+        available=True,
+        equity=str(state.equity),
+        cash=None,
+        positions=[],
+    )
+
+
+def _paper_run_response(outcome) -> PaperRunResponse:
+    results = []
+    for item in outcome.results:
+        proposal = item.proposal
+        results.append(
+            PaperRunResultResponse(
+                proposal_id=str(getattr(proposal, "proposal_id", "")),
+                strategy_id=str(getattr(proposal, "strategy_id", "")),
+                venue=str(getattr(getattr(proposal, "venue", ""), "value", "")),
+                asset_class=str(getattr(getattr(proposal, "asset_class", ""), "value", "")),
+                symbol=str(getattr(proposal, "symbol", "")),
+                side=str(getattr(getattr(proposal, "side", ""), "value", "")),
+                outcome=str(item.outcome),
+                status=item.status,
+                reason_codes=[str(code) for code in item.reason_codes],
+                rejection_reason=item.rejection_reason,
+                notional=(
+                    str(proposal.notional)
+                    if getattr(proposal, "notional", None) is not None
+                    else None
+                ),
+            )
+        )
+    return PaperRunResponse(ran=True, proposals=outcome.proposals, results=results)
+
+
+@app.post("/api/trading/paper/run")
+async def run_paper_lane(db: Session = Depends(get_db)):
+    """Run the stock/crypto paper lane once, on demand.
+
+    Refuses rather than resizes, like everything else here. The startup
+    paper-mode guard is a snapshot taken once against mutable settings and does
+    not protect this handler, so the check is repeated here on every request.
+
+    A run that proposes nothing is a success with zero results.
+    """
+    from fastapi.responses import JSONResponse
+    from backend.core import scheduler as scheduler_module
+
+    if not _is_paper_mode():
+        return JSONResponse(status_code=409, content={"refused": "not_paper_mode"})
+    if _kill_switch_engaged():
+        return JSONResponse(status_code=409, content={"refused": "kill_switch_engaged"})
+    archives = _archives_binding()
+    if not archives["root_available"]:
+        return JSONResponse(status_code=409, content={"refused": "archives_unavailable"})
+
+    if _paper_run_lock.locked():
+        return JSONResponse(status_code=409, content={"refused": "run_in_progress"})
+
+    async with _paper_run_lock:
+        try:
+            outcome = await _run_manual_paper_lane_async(db)
+            # This handler owns the transaction boundary: get_db neither commits
+            # nor rolls back, and the execution service is forbidden from doing
+            # either.
+            db.commit()
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            # No partial results. Reporting outcomes accumulated before the
+            # failure would name orders that do not exist.
+            return JSONResponse(status_code=503, content={"refused": "run_failed"})
+
+    return _paper_run_response(outcome)
+
+
+async def _run_manual_paper_lane_async(db):
+    """Seam for the lane call, so a test can force a real overlap.
+
+    The lane body is fully synchronous today, which means two handlers cannot
+    interleave by accident -- and a concurrency test that relies on that passes
+    for a reason that disappears the day a real market-data client is wired.
+    """
+    from backend.core.scheduler import run_manual_paper_lane
+
+    return run_manual_paper_lane(db)
 
 
 if __name__ == "__main__":

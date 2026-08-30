@@ -5,7 +5,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from math import isfinite
-from typing import List, Optional
+from typing import List, NamedTuple, Optional
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import func
@@ -667,26 +667,50 @@ def shadow_route_weather_proposal(session, signal, proposal, *, now) -> str:
     return outcome
 
 
-async def stock_crypto_paper_job():
-    """Bounded unified paper lane for stocks and spot crypto.
+class PaperLaneResult(NamedTuple):
+    """One proposal's outcome, read from the service rather than assumed."""
 
-    Obtains market data, asks the strategy for proposals, and hands each to
-    ``PaperExecutionService``. It never calls a broker adapter directly.
+    proposal: object
+    outcome: str
+    status: Optional[str]
+    reason_codes: tuple
+    rejection_reason: Optional[str]
+
+
+class PaperLaneOutcome(NamedTuple):
+    proposals: int
+    results: tuple
+
+
+def run_manual_paper_lane(session, *, now=None) -> PaperLaneOutcome:
+    """Propose and route the stock/crypto paper lane on a caller-owned session.
+
+    This never commits and never rolls back. The execution service is held to
+    that contract and so is this: the caller owns the transaction boundary,
+    because the caller is the only party that knows whether its own work should
+    survive. Both the scheduler job and the manual API route are thin callers,
+    so the lane has one implementation and one place to fix.
+
+    The lane flag is deliberately NOT checked here. It governs whether the
+    scheduler runs this on its own; an operator asking for a run has already
+    made that decision, and the safety guards that actually matter -- paper
+    mode, the kill switch, Archives availability -- live in the service and in
+    the callers.
+
+    A run that proposes nothing returns zero proposals and no results. That is
+    success, not a failure to report.
     """
-    if not settings.STOCK_CRYPTO_LANE_ENABLED:
-        return
-
     from backend.trading.market_data import load_bar_series
     from backend.trading.strategies.trend_following import TrendFollowingStrategy
 
     strategy = TrendFollowingStrategy()
-    now = paper_clock()
+    now = paper_clock() if now is None else now
     notional_cap = _positive_amount(getattr(settings, "WEATHER_MAX_TRADE_SIZE", 0.0)) or Decimal("100")
 
     service = None
     portfolio = None
     proposals_seen = 0
-    sessions_opened: list = []
+    results: list = []
     for symbol in stock_crypto_symbols():
         try:
             payload = load_stock_crypto_bars(symbol)
@@ -714,8 +738,6 @@ async def stock_crypto_paper_job():
         proposals_seen += 1
         try:
             if service is None:
-                session = SessionLocal()
-                sessions_opened.append(session)
                 service = build_paper_execution_service(session)
                 portfolio = weather_portfolio_state(session)
             if service is None or portfolio is None:
@@ -724,17 +746,38 @@ async def stock_crypto_paper_job():
                     "Stock/crypto paper service unavailable; no order was routed",
                     {"symbol": symbol},
                 )
+                results.append(
+                    PaperLaneResult(signal.proposal, "unavailable", None, (), None)
+                )
                 continue
             context = RiskContext(
                 now=now,
                 execution_mode="paper",
                 idempotency_key=f"stock-crypto:{signal.proposal.proposal_id}",
             )
-            service.execute(
+            result = service.execute(
                 signal.proposal,
                 portfolio=portfolio,
                 context=context,
                 limits=paper_risk_limits(),
+            )
+            # Read what the service decided rather than that it returned, the
+            # same way the weather shadow route does.
+            outcome, refusal = _shadow_route_outcome(result)
+            if refusal is not None:
+                log_event(
+                    "warning",
+                    f"Stock/crypto paper lane refused {symbol}",
+                    {"symbol": symbol, **refusal},
+                )
+            results.append(
+                PaperLaneResult(
+                    signal.proposal,
+                    outcome,
+                    (refusal or {}).get("status"),
+                    tuple((refusal or {}).get("reason_codes", ())),
+                    (refusal or {}).get("rejection_reason") or None,
+                )
             )
         except Exception as error:
             log_event(
@@ -742,15 +785,47 @@ async def stock_crypto_paper_job():
                 f"Stock/crypto paper route failed for {symbol}",
                 {"symbol": symbol, "error_type": type(error).__name__},
             )
+            results.append(PaperLaneResult(signal.proposal, "failed", None, (), None))
 
-    for session in sessions_opened:
+    if proposals_seen == 0:
+        log_event("info", "Stock/crypto paper run produced zero proposals")
+
+    return PaperLaneOutcome(proposals_seen, tuple(results))
+
+
+async def stock_crypto_paper_job():
+    """Bounded unified paper lane for stocks and spot crypto.
+
+    Obtains market data, asks the strategy for proposals, and hands each to
+    ``PaperExecutionService``. It never calls a broker adapter directly.
+
+    This job owns the session it opens, so it is the party that must commit.
+    It previously closed without committing, which discarded every ledger row
+    the lane wrote -- invisible only because the market-data seam returns None
+    and the lane has never produced a proposal in production.
+    """
+    if not settings.STOCK_CRYPTO_LANE_ENABLED:
+        return
+
+    session = SessionLocal()
+    try:
+        run_manual_paper_lane(session)
+        session.commit()
+    except Exception as error:
+        try:
+            session.rollback()
+        except Exception:
+            pass
+        log_event(
+            "warning",
+            "Stock/crypto paper job failed; nothing was recorded",
+            {"error_type": type(error).__name__},
+        )
+    finally:
         try:
             session.close()
         except Exception:
             pass
-
-    if proposals_seen == 0:
-        log_event("info", "Stock/crypto paper run produced zero proposals")
 
 
 async def scan_and_trade_job():

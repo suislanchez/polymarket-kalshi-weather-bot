@@ -77,3 +77,34 @@ def test_relayer_status_not_configured_is_safe(monkeypatch):
     assert result["configured"] is False
     assert result["connected"] is False
     assert "address" not in result
+
+
+def test_kalshi_status_does_not_leak_the_private_key_path(monkeypatch):
+    """The failure path must not echo the exception message.
+
+    A missing or unreadable key raises with the private key's absolute path in
+    its message, and this route is unauthenticated, so returning str(e) published
+    that path to anyone who asked. Reproduced before the fix; this pins it.
+    """
+    key_path = "/Volumes/Archives/SECRETS/kalshi_private_key.pem"
+
+    class _ExplodingKalshiClient:
+        def __init__(self, *args, **kwargs):
+            raise FileNotFoundError(
+                f"[Errno 2] No such file or directory: '{key_path}'"
+            )
+
+    monkeypatch.setattr("backend.data.kalshi_client.kalshi_credentials_present", lambda: True)
+    monkeypatch.setattr("backend.data.kalshi_client.KalshiClient", _ExplodingKalshiClient)
+
+    result = asyncio.run(main.get_kalshi_status())
+    blob = json.dumps(result)
+
+    assert result["connected"] is False
+    assert key_path not in blob
+    # No fragment either: a truncated path still names the directory.
+    assert "SECRETS" not in blob
+    assert "kalshi_private_key" not in blob
+    # The exception type is enough for an operator, and carries no operand.
+    assert result["error_type"] == "FileNotFoundError"
+    assert "error" not in result

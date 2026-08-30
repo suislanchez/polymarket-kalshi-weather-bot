@@ -718,3 +718,134 @@ class DashboardData(BaseModel):
     signal_review_queue: SignalReviewQueueResponse = SignalReviewQueueResponse()
     open_position_risk_rows: List[OpenPositionRiskRowResponse] = []
     open_position_risk_summary: OpenPositionRiskSummaryResponse = OpenPositionRiskSummaryResponse()
+
+
+# ---------------------------------------------------------------------------
+# Task 13: unified paper trading read models and manual run
+#
+# Money and quantities cross this boundary as STRINGS. On this stack a Decimal
+# inside a pydantic model already serializes to a JSON string, but a bare
+# Decimal dropped into a plain dict serializes to a float and silently loses the
+# precision the ledger preserved. Declaring these `str` makes the boundary
+# explicit rather than dependent on where the value happens to sit.
+# ---------------------------------------------------------------------------
+
+
+class TradingKillSwitchResponse(BaseModel):
+    """Which flag is authoritative, named so an operator cannot flip a dead one."""
+
+    engaged: bool
+    source: str
+
+
+class TradingVenueStateResponse(BaseModel):
+    venue: str
+    simulation: bool
+    execution_enabled: bool
+    monitor_only: bool
+
+
+class TradingArchivesResponse(BaseModel):
+    """The SHAPE of the Archives binding, never its contents.
+
+    The runtime path list begins with the database URL, and a non-sqlite URL
+    passes through unchanged, so returning the paths themselves would publish
+    database credentials on any deployment that is not sqlite.
+    """
+
+    root_configured: bool
+    root_available: bool
+    runtime_paths_contained: bool
+    required_directories_present: bool
+
+
+class TradingStatusResponse(BaseModel):
+    execution_mode: str
+    paper_only: bool
+    kill_switch: TradingKillSwitchResponse
+    lanes: dict[str, bool]
+    venues: List[TradingVenueStateResponse]
+    credentials: dict[str, bool]
+    archives: TradingArchivesResponse
+
+
+class UnifiedOrderResponse(BaseModel):
+    """An explicit projection of unified_orders.
+
+    Deliberately not a dump: the projection copies adapter report metadata into
+    a JSON column with no key filtering, so echoing it would publish whatever a
+    strategy or adapter happened to put there.
+    """
+
+    client_order_id: str
+    venue: str
+    status: str
+    broker_order_id: Optional[str] = None
+    rejection_reason: Optional[str] = None
+    filled_quantity: str
+    filled_notional: str
+    average_fill_price: Optional[str] = None
+    occurred_at: datetime
+
+
+class TradingEventResponse(BaseModel):
+    aggregate_id: str
+    sequence: int
+    event_type: str
+    occurred_at: datetime
+    payload: dict[str, Any]
+
+
+class TradingPositionResponse(BaseModel):
+    symbol: str
+    quantity: str
+    notional: str
+
+
+class TradingPortfolioResponse(BaseModel):
+    """Absent state is reported as absent.
+
+    The portfolio reader returns None rather than a placeholder when it cannot
+    read real account state, because a risk decision made against invented
+    exposure would be written to an append-only ledger as though it were real.
+    Neither equity nor cash is ever derived from the other.
+    """
+
+    available: bool
+    reason: Optional[str] = None
+    equity: Optional[str] = None
+    cash: Optional[str] = None
+    positions: List[TradingPositionResponse] = []
+
+
+class PaperRunResultResponse(BaseModel):
+    """One proposal's outcome. Never the domain model.
+
+    A TradeProposal carries a free-text rationale and a caller-supplied metadata
+    dict, both of which survive a successful execution in memory. Only the
+    fields named here leave the process.
+    """
+
+    proposal_id: str
+    strategy_id: str
+    venue: str
+    asset_class: str
+    symbol: str
+    side: str
+    outcome: str
+    status: Optional[str] = None
+    reason_codes: List[str] = []
+    rejection_reason: Optional[str] = None
+    notional: Optional[str] = None
+
+
+class PaperRunResponse(BaseModel):
+    ran: bool
+    proposals: int
+    results: List[PaperRunResultResponse] = []
+
+
+class TradingRefusalResponse(BaseModel):
+    """A fixed reason code. Never an exception string."""
+
+    refused: str

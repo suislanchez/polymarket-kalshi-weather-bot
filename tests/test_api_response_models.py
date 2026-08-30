@@ -378,17 +378,30 @@ def test_stats_cards_weather_paper_chip_surfaces_remaining_target_and_settlement
     assert "ledger_status_note: 'No weather paper trades; selective/no-forced-trade mode is preserved.'" in app_source
 
 
-def test_weather_only_api_copy_does_not_default_to_btc_branding():
-    """Default API metadata should match the active weather-only product scope."""
+def test_api_copy_matches_the_unified_paper_scope_and_never_btc_branding():
+    """Default API metadata should match the active product scope.
+
+    The product widened at Task 13 from weather-only to the unified paper lane,
+    so the copy names that. The invariant this test has always existed to hold
+    is the second half: the repository began life as a BTC bot and its branding
+    must never drift back, in any of the three places it is written down.
+    """
     import asyncio
 
     from backend.api import main
 
     payload = asyncio.run(main.root())
 
-    assert main.app.title == "Weather Paper Trading Dashboard"
-    assert payload["message"] == "Weather Paper Trading Dashboard API v3.0"
-    assert (main.__doc__ or "").startswith("FastAPI backend for weather paper-trading dashboard")
+    assert main.app.title == "Unified Paper Trading Dashboard"
+    assert payload["message"] == "Unified Paper Trading Dashboard API v3.0"
+    assert (main.__doc__ or "").startswith("FastAPI backend for the unified paper-trading dashboard")
+
+    # Weather is preserved, not replaced.
+    assert "weather" in main.app.description.lower()
+
+    for copy in (main.app.title, main.app.description, payload["message"], main.__doc__ or ""):
+        assert "btc" not in copy.lower()
+        assert "bitcoin" not in copy.lower()
 
 
 def test_open_position_risk_row_schema_is_dependency_light_and_serializable():
