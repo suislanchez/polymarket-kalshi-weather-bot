@@ -67,6 +67,14 @@ export interface Trade {
   pnl: number | null
 }
 
+export interface StrategyStats {
+  trades: number
+  winning_trades: number
+  win_rate: number
+  pnl: number
+  fees: number
+}
+
 export interface BotStats {
   bankroll: number
   total_trades: number
@@ -75,6 +83,14 @@ export interface BotStats {
   total_pnl: number
   is_running: boolean
   last_run: string | null
+  daily_pnl: number
+  daily_loss_limit: number
+  pending_trades: number
+  max_pending_trades: number
+  max_drawdown: number
+  total_fees: number
+  btc: StrategyStats
+  weather: StrategyStats
 }
 
 export interface EquityPoint {

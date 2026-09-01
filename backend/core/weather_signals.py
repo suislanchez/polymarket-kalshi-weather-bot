@@ -6,7 +6,11 @@ from typing import List, Optional
 
 from backend.config import settings
 from backend.core.signals import calculate_edge, calculate_kelly_size
-from backend.data.weather import fetch_ensemble_forecast, EnsembleForecast, CITY_CONFIG
+from backend.data.weather import (
+    fetch_ensemble_forecast,
+    EnsembleForecast,
+    integer_temp_meets,
+)
 from backend.data.weather_markets import WeatherMarket, fetch_polymarket_weather_markets
 from backend.models.database import SessionLocal, Signal
 
@@ -45,6 +49,79 @@ class WeatherTradingSignal:
         return abs(self.edge) >= settings.WEATHER_MIN_EDGE_THRESHOLD
 
 
+def _ensemble_members_for_market(forecast: EnsembleForecast, market: WeatherMarket) -> List[float]:
+    return forecast.member_highs if market.metric == "high" else forecast.member_lows
+
+
+def model_yes_probability(forecast: EnsembleForecast, market: WeatherMarket) -> Optional[float]:
+    """YES probability using the same integer-high definition as settlement.
+
+    Open-Meteo members are floats; NOAA/official highs are whole degrees.
+    '80-81°F' is P(round(h) in [80, 81]), not a mix of strict float cuts.
+    Returns None (with a warning) if a between-bracket is missing its high.
+    """
+    members = _ensemble_members_for_market(forecast, market)
+    if not members:
+        return None
+
+    if market.direction == "between" and market.threshold_high_f is None:
+        logger.warning(
+            "Skipping %s: between-bracket missing threshold_high_f",
+            getattr(market, "title", None) or market.slug,
+        )
+        return None
+
+    try:
+        yes_count = sum(
+            1 for m in members
+            if integer_temp_meets(
+                m, market.direction, market.threshold_f, market.threshold_high_f
+            )
+        )
+    except ValueError as e:
+        logger.warning(
+            "Skipping %s: %s",
+            getattr(market, "title", None) or market.slug,
+            e,
+        )
+        return None
+
+    return yes_count / len(members)
+
+
+def ensemble_yes_agreement(forecast: EnsembleForecast, market: WeatherMarket) -> Optional[float]:
+    """Ensemble agreement on YES vs NO (same integer definition as probability)."""
+    members = _ensemble_members_for_market(forecast, market)
+    if not members:
+        return None
+
+    if market.direction == "between" and market.threshold_high_f is None:
+        logger.warning(
+            "Skipping confidence for %s: between-bracket missing threshold_high_f",
+            getattr(market, "title", None) or market.slug,
+        )
+        return None
+
+    try:
+        yes_count = sum(
+            1 for m in members
+            if integer_temp_meets(
+                m, market.direction, market.threshold_f, market.threshold_high_f
+            )
+        )
+    except ValueError as e:
+        logger.warning(
+            "Skipping confidence for %s: %s",
+            getattr(market, "title", None) or market.slug,
+            e,
+        )
+        return None
+
+    n = len(members)
+    agreement_frac = max(yes_count, n - yes_count) / n
+    return min(0.9, agreement_frac)
+
+
 async def generate_weather_signal(market: WeatherMarket) -> Optional[WeatherTradingSignal]:
     """
     Generate a trading signal for a weather temperature market.
@@ -58,17 +135,13 @@ async def generate_weather_signal(market: WeatherMarket) -> Optional[WeatherTrad
     if not forecast or not forecast.member_highs:
         return None
 
-    # Calculate model probability based on market's question
-    if market.metric == "high":
-        if market.direction == "above":
-            model_yes_prob = forecast.probability_high_above(market.threshold_f)
-        else:
-            model_yes_prob = forecast.probability_high_below(market.threshold_f)
-    else:  # "low"
-        if market.direction == "above":
-            model_yes_prob = forecast.probability_low_above(market.threshold_f)
-        else:
-            model_yes_prob = forecast.probability_low_below(market.threshold_f)
+    model_yes_prob = model_yes_probability(forecast, market)
+    if model_yes_prob is None:
+        return None
+
+    agreement_frac = ensemble_yes_agreement(forecast, market)
+    if agreement_frac is None:
+        return None
 
     # Clip extreme probabilities (ensemble can be unanimous but don't bet 100%)
     model_yes_prob = max(0.05, min(0.95, model_yes_prob))
@@ -84,15 +157,7 @@ async def generate_weather_signal(market: WeatherMarket) -> Optional[WeatherTrad
     if entry_price > settings.WEATHER_MAX_ENTRY_PRICE:
         edge = 0.0  # Zero out but still return for UI visibility
 
-    # Confidence = ensemble agreement (how one-sided the members are)
-    if market.metric == "high":
-        members = forecast.member_highs
-    else:
-        members = forecast.member_lows
-
-    above_count = sum(1 for m in members if m > market.threshold_f)
-    agreement_frac = max(above_count, len(members) - above_count) / len(members)
-    confidence = min(0.9, agreement_frac)
+    confidence = agreement_frac
 
     # Kelly sizing
     bankroll = settings.INITIAL_BANKROLL
@@ -116,9 +181,14 @@ async def generate_weather_signal(market: WeatherMarket) -> Optional[WeatherTrad
         filter_notes.append(f"entry {entry_price:.0%} > {settings.WEATHER_MAX_ENTRY_PRICE:.0%}")
     filter_note = f" [{', '.join(filter_notes)}]" if filter_notes else ""
 
+    bracket_desc = (
+        f"{market.threshold_f:.0f}-{market.threshold_high_f:.0f}F"
+        if market.direction == "between" and market.threshold_high_f is not None
+        else f"{market.direction} {market.threshold_f:.0f}F"
+    )
     reasoning = (
         f"[{filter_status}]{filter_note} "
-        f"{market.city_name} {market.metric} {market.direction} {market.threshold_f:.0f}F on {market.target_date} | "
+        f"{market.city_name} {market.metric} {bracket_desc} on {market.target_date} | "
         f"Ensemble: {mean_val:.1f}F +/- {std_val:.1f}F ({forecast.num_members} members) | "
         f"Model YES: {model_yes_prob:.0%} vs Market: {market_yes_prob:.0%} | "
         f"Edge: {edge:+.1%} -> {direction.upper()} @ {entry_price:.0%} | "

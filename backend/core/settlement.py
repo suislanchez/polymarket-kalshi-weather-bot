@@ -6,16 +6,56 @@ from datetime import datetime, date
 from typing import Optional, List, Tuple
 from sqlalchemy.orm import Session
 
+from backend.config import settings
 from backend.models.database import Trade, BotState, Signal
 
 logger = logging.getLogger("trading_bot")
+
+
+def _market_identifier_values(market: dict) -> List[str]:
+    """Identifiers Polymarket may use for a single market inside an event."""
+    values = []
+    for key in ("id", "slug", "ticker", "conditionId", "condition_id"):
+        val = market.get(key)
+        if val is not None and str(val) != "":
+            values.append(str(val))
+    return values
+
+
+def select_event_market(event: dict, market_id: str) -> Optional[dict]:
+    """Pick the traded market from an event, never a sibling ladder rung.
+
+    Weather events are negRisk ladders: many brackets share one event.
+    BTC 5-min events have a single market, so matching (or a one-market
+    fallback) keeps that flow working. Returns None (rather than guessing
+    via markets[0]) when a specific market_id can't be found in a
+    multi-market event - the earlier version of this code always used
+    markets[0], which resolved every weather trade against the FIRST
+    bracket regardless of which one was actually traded.
+    """
+    markets = event.get("markets") or []
+    if not markets:
+        return None
+
+    needle = str(market_id) if market_id is not None else ""
+    if needle:
+        for market in markets:
+            if needle in _market_identifier_values(market):
+                return market
+
+    # BTC (one market per event): still resolvable if the id field is missing.
+    if len(markets) == 1:
+        return markets[0]
+    return None
 
 
 async def fetch_polymarket_resolution(market_id: str, event_slug: Optional[str] = None) -> Tuple[bool, Optional[float]]:
     """
     Fetch actual market resolution from Polymarket API.
 
-    For BTC 5-min markets, uses event slug to find the market.
+    Looks up the event by slug when provided, then resolves the *traded*
+    market (id / slug / ticker / conditionId) inside that event - see
+    select_event_market().
 
     Returns: (is_resolved, settlement_value)
         - settlement_value: 1.0 if Up won, 0.0 if Down won
@@ -33,9 +73,9 @@ async def fetch_polymarket_resolution(market_id: str, event_slug: Optional[str] 
 
                 if events:
                     event = events[0] if isinstance(events, list) else events
-                    markets = event.get("markets", [])
-                    if markets:
-                        return _parse_market_resolution(markets[0])
+                    market = select_event_market(event, market_id)
+                    if market:
+                        return _parse_market_resolution(market)
 
             # Fallback: try market ID directly
             url = f"https://gamma-api.polymarket.com/markets/{market_id}"
@@ -120,15 +160,31 @@ def _parse_market_resolution(market: dict) -> Tuple[bool, Optional[float]]:
         return False, None
 
 
-def calculate_pnl(trade: Trade, settlement_value: float) -> float:
+def compute_taker_fee(entry_price: float, size_usd: float, market_type: str) -> float:
     """
-    Calculate P&L for a trade given the settlement value.
+    Polymarket taker fee: shares * rate * (price * (1-price))^exponent,
+    shares = size_usd / price. See settings.BTC_TAKER_FEE_RATE /
+    WEATHER_TAKER_FEE_RATE for where the rates came from.
+    """
+    if entry_price <= 0 or entry_price >= 1:
+        return 0.0
+    rate = settings.BTC_TAKER_FEE_RATE if market_type == "btc" else settings.WEATHER_TAKER_FEE_RATE
+    shares = size_usd / entry_price
+    fee = shares * rate * (entry_price * (1.0 - entry_price)) ** settings.FEE_EXPONENT
+    return round(fee, 4)
+
+
+def calculate_pnl(trade: Trade, settlement_value: float) -> Tuple[float, float]:
+    """
+    Calculate net P&L (after taker fee) for a trade given the settlement value.
 
     settlement_value: 1.0 if Up/Yes outcome, 0.0 if Down/No outcome
 
     Maps up->yes, down->no internally:
     - UP position wins when settlement = 1.0
     - DOWN position wins when settlement = 0.0
+
+    Returns (net_pnl, fee) - fee is already subtracted from net_pnl.
     """
     # Map up/down to yes/no logic
     direction = trade.direction
@@ -139,23 +195,26 @@ def calculate_pnl(trade: Trade, settlement_value: float) -> float:
 
     if direction == "yes":
         if settlement_value == 1.0:
-            pnl = trade.size * (1.0 - trade.entry_price)
+            gross_pnl = trade.size * (1.0 - trade.entry_price)
         else:
-            pnl = -trade.size * trade.entry_price
+            gross_pnl = -trade.size * trade.entry_price
     else:  # NO / DOWN position
         if settlement_value == 0.0:
-            pnl = trade.size * (1.0 - trade.entry_price)
+            gross_pnl = trade.size * (1.0 - trade.entry_price)
         else:
-            pnl = -trade.size * trade.entry_price
+            gross_pnl = -trade.size * trade.entry_price
 
-    return round(pnl, 2)
+    market_type = getattr(trade, "market_type", "btc") or "btc"
+    fee = compute_taker_fee(trade.entry_price, trade.size, market_type)
+
+    return round(gross_pnl - fee, 2), fee
 
 
-async def check_market_settlement(trade: Trade) -> Tuple[bool, Optional[float], Optional[float]]:
+async def check_market_settlement(trade: Trade) -> Tuple[bool, Optional[float], Optional[float], Optional[float]]:
     """
     Check if a trade's market has settled.
 
-    Returns: (is_settled, settlement_value, pnl)
+    Returns: (is_settled, settlement_value, pnl, fee)
     """
     is_resolved, settlement_value = await fetch_polymarket_resolution(
         trade.market_ticker,
@@ -163,21 +222,21 @@ async def check_market_settlement(trade: Trade) -> Tuple[bool, Optional[float], 
     )
 
     if not is_resolved or settlement_value is None:
-        return False, None, None
+        return False, None, None, None
 
-    pnl = calculate_pnl(trade, settlement_value)
+    pnl, fee = calculate_pnl(trade, settlement_value)
 
     mapped_dir = "UP" if trade.direction in ("up", "yes") else "DOWN"
     outcome = "UP" if settlement_value == 1.0 else "DOWN"
     result = "WIN" if mapped_dir == outcome else "LOSS"
 
     logger.info(f"Trade {trade.id} settled: {mapped_dir} @ {trade.entry_price:.0%} -> "
-                f"{result} P&L: ${pnl:+.2f}")
+                f"{result} P&L: ${pnl:+.2f} (fee: ${fee:.2f})")
 
-    return True, settlement_value, pnl
+    return True, settlement_value, pnl, fee
 
 
-async def check_weather_settlement(trade: Trade) -> Tuple[bool, Optional[float], Optional[float]]:
+async def check_weather_settlement(trade: Trade) -> Tuple[bool, Optional[float], Optional[float], Optional[float]]:
     """
     Check if a weather trade's market has settled.
     Routes to the correct platform's resolution method.
@@ -193,10 +252,10 @@ async def check_weather_settlement(trade: Trade) -> Tuple[bool, Optional[float],
         )
 
     if is_resolved and settlement_value is not None:
-        pnl = calculate_pnl(trade, settlement_value)
-        return True, settlement_value, pnl
+        pnl, fee = calculate_pnl(trade, settlement_value)
+        return True, settlement_value, pnl, fee
 
-    return False, None, None
+    return False, None, None, None
 
 
 async def _fetch_kalshi_resolution(ticker: str) -> Tuple[bool, Optional[float]]:
@@ -250,14 +309,15 @@ async def settle_pending_trades(db: Session) -> List[Trade]:
             # Route settlement by market type
             market_type = getattr(trade, 'market_type', 'btc') or 'btc'
             if market_type == "weather":
-                is_settled, settlement_value, pnl = await check_weather_settlement(trade)
+                is_settled, settlement_value, pnl, fee = await check_weather_settlement(trade)
             else:
-                is_settled, settlement_value, pnl = await check_market_settlement(trade)
+                is_settled, settlement_value, pnl, fee = await check_market_settlement(trade)
 
             if is_settled and settlement_value is not None:
                 trade.settled = True
                 trade.settlement_value = settlement_value
                 trade.pnl = pnl
+                trade.fee = fee
                 trade.settlement_time = datetime.utcnow()
 
                 if pnl is not None and pnl > 0:

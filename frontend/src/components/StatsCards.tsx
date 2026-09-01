@@ -34,6 +34,13 @@ export function StatsCards({ stats }: Props) {
 
       <div className="w-px h-3 bg-neutral-800" />
 
+      <motion.div className="flex items-center gap-1.5" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.075 }}>
+        <span className="text-[10px] text-neutral-600 uppercase">Fees</span>
+        <span className="text-sm font-semibold tabular-nums text-neutral-400">${stats.total_fees.toFixed(0)}</span>
+      </motion.div>
+
+      <div className="w-px h-3 bg-neutral-800" />
+
       <motion.div className="flex items-center gap-1.5" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.1 }}>
         <span className="text-[10px] text-neutral-600 uppercase">Win</span>
         <span className={`text-sm font-semibold tabular-nums ${winRate >= 55 ? 'text-green-500' : winRate >= 45 ? 'text-yellow-500' : 'text-red-500'}`}>

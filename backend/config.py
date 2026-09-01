@@ -67,6 +67,20 @@ class Settings(BaseSettings):
     WEATHER_MAX_TRADE_SIZE: float = 100.0
     WEATHER_CITIES: str = "nyc,chicago,miami,los_angeles,denver"
 
+    # Polymarket taker fee model - previously not modeled at all (paper P&L
+    # was gross, not net). Verified live 2026-09-01 via Gamma API
+    # feeSchedule on real markets: BTC 5-min rate=0.07, weather ladder
+    # rate=0.05, both exponent=1, takerOnly=true. Every trade this bot
+    # places takes the current market price immediately (no resting/maker
+    # orders anywhere in the codebase), so the fee always applies - this
+    # isn't an avoidable cost estimate. fee = shares * rate *
+    # (price * (1-price))^exponent, shares = size_usd / price. Rates are a
+    # single sampled snapshot per category, not fetched per-market, so
+    # treat this as a documented estimate, not exact accounting.
+    BTC_TAKER_FEE_RATE: float = 0.07
+    WEATHER_TAKER_FEE_RATE: float = 0.05
+    FEE_EXPONENT: float = 1.0
+
     class Config:
         env_file = ".env"
 

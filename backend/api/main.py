@@ -2,6 +2,7 @@
 from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from datetime import datetime, timedelta
 from typing import List, Optional
 import asyncio
@@ -128,6 +129,14 @@ class TradeResponse(BaseModel):
     pnl: Optional[float]
 
 
+class StrategyStats(BaseModel):
+    trades: int
+    winning_trades: int
+    win_rate: float
+    pnl: float
+    fees: float
+
+
 class BotStats(BaseModel):
     bankroll: float
     total_trades: int
@@ -136,6 +145,20 @@ class BotStats(BaseModel):
     total_pnl: float
     is_running: bool
     last_run: Optional[datetime]
+
+    # Risk / exposure - previously computed only internally by the
+    # scheduler's circuit breaker (scheduler.py), never surfaced via the API.
+    daily_pnl: float
+    daily_loss_limit: float
+    pending_trades: int
+    max_pending_trades: int
+    max_drawdown: float
+    total_fees: float
+
+    # Per-strategy breakdown - total_pnl/win_rate above blend BTC 5-min and
+    # weather ladder trades together, two very different risk profiles.
+    btc: StrategyStats
+    weather: StrategyStats
 
 
 class CalibrationBucket(BaseModel):
@@ -294,6 +317,39 @@ async def health():
     return {"status": "healthy"}
 
 
+def _strategy_stats(db: Session, market_type: str) -> StrategyStats:
+    """Break out win rate / P&L / fees for one market_type (btc or weather) -
+    the aggregate BotStats fields blend both together, which hides very
+    different risk profiles (5-min momentum vs. multi-day weather ladders)."""
+    settled = db.query(Trade).filter(Trade.settled == True, Trade.market_type == market_type).all()
+    trades = len(settled)
+    wins = sum(1 for t in settled if t.result == "win")
+    pnl = sum(t.pnl or 0.0 for t in settled)
+    fees = sum(t.fee or 0.0 for t in settled)
+    return StrategyStats(
+        trades=trades,
+        winning_trades=wins,
+        win_rate=(wins / trades) if trades > 0 else 0.0,
+        pnl=round(pnl, 2),
+        fees=round(fees, 2),
+    )
+
+
+def _compute_max_drawdown(db: Session) -> float:
+    """Largest peak-to-trough drop in the bankroll curve, using the same
+    ordering/starting point as /api/equity-curve for consistency."""
+    trades = db.query(Trade).filter(Trade.settled == True).order_by(Trade.timestamp).all()
+    bankroll = settings.INITIAL_BANKROLL
+    peak = bankroll
+    max_dd = 0.0
+    for trade in trades:
+        if trade.pnl is not None:
+            bankroll += trade.pnl
+            peak = max(peak, bankroll)
+            max_dd = max(max_dd, peak - bankroll)
+    return round(max_dd, 2)
+
+
 @app.get("/api/stats", response_model=BotStats)
 async def get_stats(db: Session = Depends(get_db)):
     state = db.query(BotState).first()
@@ -302,6 +358,18 @@ async def get_stats(db: Session = Depends(get_db)):
 
     win_rate = state.winning_trades / state.total_trades if state.total_trades > 0 else 0
 
+    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    daily_pnl = db.query(func.coalesce(func.sum(Trade.pnl), 0.0)).filter(
+        Trade.settled == True,
+        Trade.settlement_time >= today_start,
+    ).scalar()
+
+    pending_trades = db.query(Trade).filter(Trade.settled == False).count()
+
+    total_fees = db.query(func.coalesce(func.sum(Trade.fee), 0.0)).filter(
+        Trade.settled == True,
+    ).scalar()
+
     return BotStats(
         bankroll=state.bankroll,
         total_trades=state.total_trades,
@@ -309,7 +377,15 @@ async def get_stats(db: Session = Depends(get_db)):
         win_rate=win_rate,
         total_pnl=state.total_pnl,
         is_running=state.is_running,
-        last_run=state.last_run
+        last_run=state.last_run,
+        daily_pnl=round(daily_pnl, 2),
+        daily_loss_limit=settings.DAILY_LOSS_LIMIT,
+        pending_trades=pending_trades,
+        max_pending_trades=settings.MAX_TOTAL_PENDING_TRADES,
+        max_drawdown=_compute_max_drawdown(db),
+        total_fees=round(total_fees, 2),
+        btc=_strategy_stats(db, "btc"),
+        weather=_strategy_stats(db, "weather"),
     )
 
 

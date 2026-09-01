@@ -1,0 +1,4 @@
+# Optional: only needed if DATABASE_URL points at PostgreSQL instead of the
+# default SQLite (sqlite:///./tradingbot.db). Install with:
+#   pip install -r requirements.txt -r requirements-postgres.txt
+psycopg2-binary>=2.9.9

@@ -4,7 +4,7 @@ import json
 import logging
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List
 from dataclasses import dataclass
 
@@ -108,25 +108,46 @@ def _parse_event_to_btc_market(event: dict) -> Optional[BtcMarket]:
         except (json.JSONDecodeError, ValueError, TypeError):
             pass
 
-    # Parse timestamps
+    # Parse timestamps.
+    #
+    # event/market startDate+endDate are NOT the 5-minute betting window -
+    # verified live: for slug btc-updown-5m-1788248400, both startDate and
+    # endDate came back spanning ~23h43m (2026-08-31T08:02:26Z to
+    # 2026-09-01T07:45:00Z), not 5 minutes. Those fields describe when this
+    # recurring market slot was created/rotated, unrelated to the actual
+    # trading window. The window boundaries are only reliable from the
+    # slug's own embedded unix timestamp (btc-updown-5m-{end_ts}, the same
+    # value _compute_window_slugs() generates), so derive from that first
+    # and only fall back to startDate/endDate for a slug that doesn't match
+    # the expected pattern.
     slug = event.get("slug", "")
-    start_str = event.get("startDate") or market.get("startDate")
-    end_str = event.get("endDate") or market.get("endDate")
+    window_start = None
+    window_end = None
 
-    window_start = datetime.now(timezone.utc)
-    window_end = datetime.now(timezone.utc)
+    slug_ts_match = _BTC_SLUG_RE.match(slug)
+    if slug_ts_match:
+        end_ts = int(slug[len("btc-updown-5m-"):])
+        window_end = datetime.fromtimestamp(end_ts, tz=timezone.utc)
+        window_start = window_end - timedelta(minutes=5)
 
-    if start_str:
-        try:
-            window_start = datetime.fromisoformat(start_str.replace('Z', '+00:00'))
-        except (ValueError, AttributeError):
-            pass
+    if window_start is None or window_end is None:
+        start_str = event.get("startDate") or market.get("startDate")
+        end_str = event.get("endDate") or market.get("endDate")
 
-    if end_str:
-        try:
-            window_end = datetime.fromisoformat(end_str.replace('Z', '+00:00'))
-        except (ValueError, AttributeError):
-            pass
+        window_start = datetime.now(timezone.utc)
+        window_end = datetime.now(timezone.utc)
+
+        if start_str:
+            try:
+                window_start = datetime.fromisoformat(start_str.replace('Z', '+00:00'))
+            except (ValueError, AttributeError):
+                pass
+
+        if end_str:
+            try:
+                window_end = datetime.fromisoformat(end_str.replace('Z', '+00:00'))
+            except (ValueError, AttributeError):
+                pass
 
     return BtcMarket(
         slug=slug,

@@ -21,12 +21,10 @@
     "mapbox-gl": "^2.15.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "react-globe.gl": "^2.37.0",
     "react-leaflet": "^4.2.1",
     "react-map-gl": "^7.1.7",
     "react-simple-maps": "^3.0.0",
-    "recharts": "^2.10.4",
-    "three": "^0.182.0"
+    "recharts": "^2.10.4"
   },
   "devDependencies": {
     "@types/react": "^18.2.48",

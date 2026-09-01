@@ -39,7 +39,8 @@ class Trade(Base):
     settlement_time = Column(DateTime, nullable=True)
     settlement_value = Column(Float, nullable=True)  # 1.0=Up won, 0.0=Down won
     result = Column(String, default="pending")  # pending, win, loss
-    pnl = Column(Float, nullable=True)
+    pnl = Column(Float, nullable=True)  # net of fee
+    fee = Column(Float, nullable=True)  # taker fee already deducted from pnl above
 
     # Model performance tracking
     model_probability = Column(Float)
@@ -173,6 +174,11 @@ def ensure_schema():
         with engine.connect() as conn:
             with conn.begin():
                 conn.execute(text("ALTER TABLE trades ADD COLUMN market_type VARCHAR DEFAULT 'btc'"))
+
+    if "fee" not in columns:
+        with engine.connect() as conn:
+            with conn.begin():
+                conn.execute(text("ALTER TABLE trades ADD COLUMN fee FLOAT"))
 
     # Add calibration columns to signals table
     try:

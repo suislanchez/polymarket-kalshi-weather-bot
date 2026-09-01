@@ -1,4 +1,4 @@
-import { useState, useEffect, Suspense, lazy } from 'react'
+import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import { fetchDashboard, runScan, simulateTrade, startBot, stopBot } from './api'
@@ -13,8 +13,6 @@ import { WeatherPanel } from './components/WeatherPanel'
 import { EdgeDistribution } from './components/EdgeDistribution'
 import { formatCountdown } from './utils'
 import type { BtcWindow } from './types'
-
-const GlobeView = lazy(() => import('./components/GlobeView').then(m => ({ default: m.GlobeView })))
 
 function LiveClock() {
   const [time, setTime] = useState(new Date())
@@ -107,6 +105,7 @@ function App() {
   const weatherSignals = data?.weather_signals ?? []
   const weatherForecasts = data?.weather_forecasts ?? []
 
+  const emptyStrategyStats = { trades: 0, winning_trades: 0, win_rate: 0, pnl: 0, fees: 0 }
   const stats = data?.stats ?? {
     is_running: false,
     last_run: null,
@@ -114,7 +113,15 @@ function App() {
     total_pnl: 0,
     bankroll: 10000,
     winning_trades: 0,
-    win_rate: 0
+    win_rate: 0,
+    daily_pnl: 0,
+    daily_loss_limit: 300,
+    pending_trades: 0,
+    max_pending_trades: 20,
+    max_drawdown: 0,
+    total_fees: 0,
+    btc: emptyStrategyStats,
+    weather: emptyStrategyStats,
   }
   const equityCurve = data?.equity_curve ?? []
   const calibration = data?.calibration ?? null
@@ -237,6 +244,27 @@ function App() {
             </div>
           </div>
 
+          {/* By Strategy */}
+          <div className="shrink-0 border-b border-neutral-800 px-2 py-2">
+            <div className="text-[10px] text-neutral-500 uppercase tracking-wider mb-1.5">By Strategy</div>
+            <div className="space-y-1">
+              {[
+                { label: 'BTC', s: stats.btc },
+                { label: 'Weather', s: stats.weather },
+              ].map(({ label, s }) => (
+                <div key={label} className="flex items-center justify-between text-[10px]">
+                  <span className="text-neutral-400 w-14 shrink-0">{label}</span>
+                  <span className="text-neutral-600 tabular-nums w-10 shrink-0">{s.trades}t</span>
+                  <span className="text-neutral-600 tabular-nums w-12 shrink-0">{(s.win_rate * 100).toFixed(0)}% WR</span>
+                  <span className={`tabular-nums w-16 text-right shrink-0 ${s.pnl >= 0 ? 'text-green-500' : 'text-red-500'}`}>
+                    {s.pnl >= 0 ? '+' : ''}${s.pnl.toFixed(0)}
+                  </span>
+                  <span className="text-neutral-600 tabular-nums w-14 text-right shrink-0">-${s.fees.toFixed(2)} fee</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
           {/* Calibration */}
           {calibration && calibration.total_with_outcome > 0 && (
             <motion.div
@@ -267,28 +295,36 @@ function App() {
 
         {/* ===== CENTER COLUMN ===== */}
         <div className="flex flex-col min-h-0 border-r border-neutral-800">
-          {/* Globe - top 60% */}
-          <div className="relative" style={{ height: '58%' }}>
-            <div className="absolute inset-0">
-              <Suspense fallback={
-                <div className="w-full h-full flex items-center justify-center bg-black">
-                  <span className="text-[10px] text-neutral-600 uppercase tracking-wider">Loading Globe...</span>
-                </div>
-              }>
-                <GlobeView forecasts={weatherForecasts} signals={weatherSignals} />
-              </Suspense>
-            </div>
-            {/* Globe overlay: actionable count */}
-            <div className="absolute top-2 left-2 z-10">
-              <div className="px-2 py-1 bg-black/80 border border-neutral-800 text-[10px]">
-                <span className="text-neutral-500 uppercase tracking-wider mr-2">Markets</span>
-                <span className="text-amber-500 tabular-nums">{actionableCount} actionable</span>
-              </div>
-            </div>
+          {/* Markets actionable + risk strip */}
+          <div className="shrink-0 px-2 py-1 border-b border-neutral-800 flex items-center gap-4 flex-wrap">
+            <span>
+              <span className="text-neutral-500 uppercase tracking-wider text-[10px] mr-1.5">Markets</span>
+              <span className="text-amber-500 tabular-nums text-[10px]">{actionableCount} actionable</span>
+            </span>
+            <span>
+              <span className="text-neutral-500 uppercase tracking-wider text-[10px] mr-1.5">Daily P&L</span>
+              <span className={`tabular-nums text-[10px] ${stats.daily_pnl <= -stats.daily_loss_limit ? 'text-red-500 font-semibold' : stats.daily_pnl < 0 ? 'text-red-500/80' : 'text-green-500/80'}`}>
+                {stats.daily_pnl >= 0 ? '+' : ''}${stats.daily_pnl.toFixed(0)} / -${stats.daily_loss_limit.toFixed(0)}
+              </span>
+            </span>
+            <span>
+              <span className="text-neutral-500 uppercase tracking-wider text-[10px] mr-1.5">Pending</span>
+              <span className={`tabular-nums text-[10px] ${stats.pending_trades >= stats.max_pending_trades ? 'text-red-500 font-semibold' : 'text-neutral-300'}`}>
+                {stats.pending_trades}/{stats.max_pending_trades}
+              </span>
+            </span>
+            <span>
+              <span className="text-neutral-500 uppercase tracking-wider text-[10px] mr-1.5">Max DD</span>
+              <span className="tabular-nums text-[10px] text-neutral-300">-${stats.max_drawdown.toFixed(0)}</span>
+            </span>
+            <span>
+              <span className="text-neutral-500 uppercase tracking-wider text-[10px] mr-1.5">Fees Paid</span>
+              <span className="tabular-nums text-[10px] text-neutral-300">${stats.total_fees.toFixed(2)}</span>
+            </span>
           </div>
 
           {/* Bottom panels - 3 side by side */}
-          <div className="flex-1 min-h-0 grid grid-cols-3 border-t border-neutral-800">
+          <div className="flex-1 min-h-0 grid grid-cols-3">
             {/* Edge Distribution */}
             <div className="border-r border-neutral-800 flex flex-col min-h-0">
               <div className="px-2 py-1 border-b border-neutral-800 shrink-0">

@@ -1,6 +1,7 @@
 """Weather data fetcher using Open-Meteo Ensemble API and NWS observations."""
 import httpx
 import logging
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, date, timedelta
 from typing import Dict, List, Optional
@@ -54,6 +55,42 @@ CITY_CONFIG: Dict[str, dict] = {
 }
 
 
+def settlement_temp_f(temp_f: float) -> int:
+    """Whole-degree official high/low used for weather-market settlement.
+
+    NOAA and Polymarket city temperature markets settle on an integer
+    degree. Open-Meteo ensemble members are floats, so round half-up
+    (equivalent to round(h) for typical values, without banker's rounding
+    on *.5).
+    """
+    return int(math.floor(float(temp_f) + 0.5))
+
+
+def integer_temp_meets(
+    temp_f: float,
+    direction: str,
+    threshold_f: float,
+    threshold_high_f: Optional[float] = None,
+) -> bool:
+    """Whether a float ensemble member would settle YES for this contract.
+
+    Integer-high definition:
+    - above / "N°F or higher": round(h) >= N  (Kalshi B45.5 → integer >= 46)
+    - below / "N°F or below":  round(h) <= N  (Kalshi T45.5 → integer <= 45)
+    - between / "80-81°F":     round(h) in [80, 81]
+    """
+    t = settlement_temp_f(temp_f)
+    if direction == "above":
+        return t >= threshold_f
+    if direction == "below":
+        return t <= threshold_f
+    if direction == "between":
+        if threshold_high_f is None:
+            raise ValueError("between-bracket requires threshold_high_f")
+        return threshold_f <= t <= threshold_high_f
+    raise ValueError(f"unknown direction: {direction}")
+
+
 @dataclass
 class EnsembleForecast:
     """Ensemble weather forecast with per-member data."""
@@ -78,27 +115,52 @@ class EnsembleForecast:
             self.mean_low = statistics.mean(self.member_lows)
             self.std_low = statistics.stdev(self.member_lows) if len(self.member_lows) > 1 else 0.0
 
-    def probability_high_above(self, threshold_f: float) -> float:
-        """Fraction of ensemble members with daily high above threshold."""
-        if not self.member_highs:
+    def _probability_yes(
+        self,
+        members: List[float],
+        direction: str,
+        threshold_f: float,
+        threshold_high_f: Optional[float] = None,
+    ) -> float:
+        if not members:
             return 0.5
-        count = sum(1 for h in self.member_highs if h > threshold_f)
-        return count / len(self.member_highs)
+        count = sum(
+            1 for m in members
+            if integer_temp_meets(m, direction, threshold_f, threshold_high_f)
+        )
+        return count / len(members)
+
+    def probability_high_above(self, threshold_f: float) -> float:
+        """Fraction of members whose integer daily high is at/above threshold.
+
+        Matches 'N°F or higher' and Kalshi B-bounds (e.g. B45.5 → high >= 46).
+        """
+        return self._probability_yes(self.member_highs, "above", threshold_f)
 
     def probability_high_below(self, threshold_f: float) -> float:
-        """Fraction of ensemble members with daily high below threshold."""
-        return 1.0 - self.probability_high_above(threshold_f)
+        """Fraction of members whose integer daily high is at/below threshold.
+
+        Matches 'N°F or below' and Kalshi T-bounds (e.g. T45.5 → high <= 45).
+        Independent of probability_high_above: they are not complements at
+        an integer threshold (both include equality).
+        """
+        return self._probability_yes(self.member_highs, "below", threshold_f)
+
+    def probability_high_between(self, lo: float, hi: float) -> float:
+        """Fraction of members whose integer daily high is in [lo, hi]."""
+        return self._probability_yes(self.member_highs, "between", lo, hi)
 
     def probability_low_above(self, threshold_f: float) -> float:
-        """Fraction of ensemble members with daily low above threshold."""
-        if not self.member_lows:
-            return 0.5
-        count = sum(1 for l in self.member_lows if l > threshold_f)
-        return count / len(self.member_lows)
+        """Fraction of members whose integer daily low is at/above threshold."""
+        return self._probability_yes(self.member_lows, "above", threshold_f)
 
     def probability_low_below(self, threshold_f: float) -> float:
-        """Fraction of ensemble members with daily low below threshold."""
-        return 1.0 - self.probability_low_above(threshold_f)
+        """Fraction of members whose integer daily low is at/below threshold."""
+        return self._probability_yes(self.member_lows, "below", threshold_f)
+
+    def probability_low_between(self, lo: float, hi: float) -> float:
+        """Fraction of members whose integer daily low is in [lo, hi]."""
+        return self._probability_yes(self.member_lows, "between", lo, hi)
 
     @property
     def ensemble_agreement(self) -> float:

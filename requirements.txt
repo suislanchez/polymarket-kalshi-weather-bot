@@ -2,7 +2,6 @@
 fastapi==0.109.0
 uvicorn[standard]==0.27.0
 sqlalchemy==2.0.25
-psycopg2-binary==2.9.9
 pydantic==2.5.3
 pydantic-settings==2.1.0
 
@@ -12,11 +11,6 @@ aiohttp==3.9.1
 
 # Kalshi API auth (RSA-PSS signatures)
 cryptography>=42.0.0
-
-# Weather data (using Open-Meteo API)
-numpy==1.26.3
-pandas==2.1.4
-scipy==1.12.0
 
 # Scheduling
 apscheduler==3.10.4

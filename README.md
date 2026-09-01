@@ -31,6 +31,10 @@ Scans weather temperature markets on **Kalshi** (KXHIGH series) and **Polymarket
 
 ### 1. Backend Setup
 
+Requires **Python 3.10-3.13**. Python 3.14 is not yet supported — some
+pinned dependencies don't publish prebuilt wheels for it and fail to build
+from source.
+
 ```bash
 cd kalshi-trading-bot
 
@@ -40,6 +44,9 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 
 # Install dependencies
 pip install -r requirements.txt
+
+# Only if you're using PostgreSQL instead of the default SQLite:
+# pip install -r requirements-postgres.txt
 
 # Run the backend
 uvicorn backend.api.main:app --reload --port 8000
