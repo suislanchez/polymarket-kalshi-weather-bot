@@ -11,6 +11,7 @@ import { MicrostructurePanel } from './components/MicrostructurePanel'
 import { CalibrationPanel } from './components/CalibrationPanel'
 import { WeatherPanel } from './components/WeatherPanel'
 import { EdgeDistribution } from './components/EdgeDistribution'
+import { GlobeErrorBoundary } from './components/GlobeErrorBoundary'
 import { formatCountdown } from './utils'
 import type { BtcWindow } from './types'
 
@@ -270,13 +271,15 @@ function App() {
           {/* Globe - top 60% */}
           <div className="relative" style={{ height: '58%' }}>
             <div className="absolute inset-0">
-              <Suspense fallback={
-                <div className="w-full h-full flex items-center justify-center bg-black">
-                  <span className="text-[10px] text-neutral-600 uppercase tracking-wider">Loading Globe...</span>
-                </div>
-              }>
-                <GlobeView forecasts={weatherForecasts} signals={weatherSignals} />
-              </Suspense>
+              <GlobeErrorBoundary>
+                <Suspense fallback={
+                  <div className="w-full h-full flex items-center justify-center bg-black">
+                    <span className="text-[10px] text-neutral-600 uppercase tracking-wider">Loading Globe...</span>
+                  </div>
+                }>
+                  <GlobeView forecasts={weatherForecasts} signals={weatherSignals} />
+                </Suspense>
+              </GlobeErrorBoundary>
             </div>
             {/* Globe overlay: actionable count */}
             <div className="absolute top-2 left-2 z-10">

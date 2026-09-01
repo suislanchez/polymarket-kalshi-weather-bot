@@ -26,7 +26,7 @@
     "react-map-gl": "^7.1.7",
     "react-simple-maps": "^3.0.0",
     "recharts": "^2.10.4",
-    "three": "^0.182.0"
+    "three": "0.180.0"
   },
   "devDependencies": {
     "@types/react": "^18.2.48",

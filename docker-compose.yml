@@ -1,0 +1,29 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: weather-bot-backend
+    restart: unless-stopped
+    ports:
+      - "8600:8000"
+    environment:
+      - RAILWAY_ENVIRONMENT=docker
+      - DATABASE_URL=sqlite:////app/data/tradingbot.db
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: http://10.10.10.4:8600
+    container_name: weather-bot-frontend
+    restart: unless-stopped
+    ports:
+      - "3600:80"
+    depends_on:
+      - backend

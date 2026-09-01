@@ -62,13 +62,23 @@ async def generate_weather_signal(market: WeatherMarket) -> Optional[WeatherTrad
     if market.metric == "high":
         if market.direction == "above":
             model_yes_prob = forecast.probability_high_above(market.threshold_f)
-        else:
+        elif market.direction == "below":
             model_yes_prob = forecast.probability_high_below(market.threshold_f)
+        else:  # "between" - a ladder bracket, e.g. Polymarket's "80-81F"
+            model_yes_prob = (
+                forecast.probability_high_above(market.threshold_f - 1)
+                - forecast.probability_high_above(market.threshold_high_f)
+            )
     else:  # "low"
         if market.direction == "above":
             model_yes_prob = forecast.probability_low_above(market.threshold_f)
-        else:
+        elif market.direction == "below":
             model_yes_prob = forecast.probability_low_below(market.threshold_f)
+        else:  # "between"
+            model_yes_prob = (
+                forecast.probability_low_above(market.threshold_f - 1)
+                - forecast.probability_low_above(market.threshold_high_f)
+            )
 
     # Clip extreme probabilities (ensemble can be unanimous but don't bet 100%)
     model_yes_prob = max(0.05, min(0.95, model_yes_prob))
@@ -90,8 +100,12 @@ async def generate_weather_signal(market: WeatherMarket) -> Optional[WeatherTrad
     else:
         members = forecast.member_lows
 
-    above_count = sum(1 for m in members if m > market.threshold_f)
-    agreement_frac = max(above_count, len(members) - above_count) / len(members)
+    if market.direction == "between" and market.threshold_high_f is not None:
+        in_range_count = sum(1 for m in members if market.threshold_f <= m <= market.threshold_high_f)
+        agreement_frac = max(in_range_count, len(members) - in_range_count) / len(members)
+    else:
+        above_count = sum(1 for m in members if m > market.threshold_f)
+        agreement_frac = max(above_count, len(members) - above_count) / len(members)
     confidence = min(0.9, agreement_frac)
 
     # Kelly sizing
@@ -116,9 +130,14 @@ async def generate_weather_signal(market: WeatherMarket) -> Optional[WeatherTrad
         filter_notes.append(f"entry {entry_price:.0%} > {settings.WEATHER_MAX_ENTRY_PRICE:.0%}")
     filter_note = f" [{', '.join(filter_notes)}]" if filter_notes else ""
 
+    bracket_desc = (
+        f"{market.threshold_f:.0f}-{market.threshold_high_f:.0f}F"
+        if market.direction == "between" and market.threshold_high_f is not None
+        else f"{market.direction} {market.threshold_f:.0f}F"
+    )
     reasoning = (
         f"[{filter_status}]{filter_note} "
-        f"{market.city_name} {market.metric} {market.direction} {market.threshold_f:.0f}F on {market.target_date} | "
+        f"{market.city_name} {market.metric} {bracket_desc} on {market.target_date} | "
         f"Ensemble: {mean_val:.1f}F +/- {std_val:.1f}F ({forecast.num_members} members) | "
         f"Model YES: {model_yes_prob:.0%} vs Market: {market_yes_prob:.0%} | "
         f"Edge: {edge:+.1%} -> {direction.upper()} @ {entry_price:.0%} | "

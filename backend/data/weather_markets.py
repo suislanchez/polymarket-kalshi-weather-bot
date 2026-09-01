@@ -1,18 +1,26 @@
-"""Weather temperature market fetcher from Polymarket."""
+"""Weather temperature market fetcher from Polymarket.
+
+Polymarket lists "highest temperature" markets as negRisk ladders: one
+event per city+date (e.g. "Highest temperature in Miami on August 31?")
+containing ~10-11 mutually exclusive bracket markets ("79F or below",
+"80-81F", ..., "98F or higher"). Verified live 2026-09-01 against the
+Gamma API.
+"""
 import httpx
 import re
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 logger = logging.getLogger("trading_bot")
 
-# Map city names/variants found in market titles to our city keys
+# Map city names/variants found in event titles to our city keys.
+# Longest alias first so "new york city" matches before "new york".
 CITY_ALIASES = {
+    "new york city": "nyc",
     "new york": "nyc",
     "nyc": "nyc",
-    "new york city": "nyc",
     "chicago": "chicago",
     "miami": "miami",
     "los angeles": "los_angeles",
@@ -29,10 +37,19 @@ MONTH_MAP = {
     "jun": 6, "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
 }
 
+# "Highest temperature in {City} on {Date}?" - the event-level title.
+_EVENT_TITLE_RE = re.compile(r'highest temperature in\s+(.+?)\s+on\s+(.+?)\??$', re.IGNORECASE)
+
+# Bracket forms found in a market's groupItemTitle, e.g. "79°F or below",
+# "80-81°F", "98°F or higher".
+_BELOW_RE = re.compile(r'(\d+)\s*°?\s*f\s*or\s*below', re.IGNORECASE)
+_ABOVE_RE = re.compile(r'(\d+)\s*°?\s*f\s*or\s*higher', re.IGNORECASE)
+_RANGE_RE = re.compile(r'(\d+)\s*-\s*(\d+)\s*°?\s*f', re.IGNORECASE)
+
 
 @dataclass
 class WeatherMarket:
-    """A weather temperature prediction market."""
+    """A weather temperature prediction market (one bracket of a ladder)."""
     slug: str
     market_id: str
     platform: str
@@ -42,74 +59,24 @@ class WeatherMarket:
     target_date: date
     threshold_f: float       # Temperature threshold in Fahrenheit
     metric: str              # "high" or "low"
-    direction: str           # "above" or "below"
+    direction: str           # "above", "below", or "between" (range bracket)
     yes_price: float         # Price of YES outcome (0-1)
     no_price: float          # Price of NO outcome (0-1)
     volume: float = 0.0
     closed: bool = False
+    # Upper bound of the bracket, only set when direction == "between"
+    # (e.g. threshold_f=80, threshold_high_f=81 for the "80-81F" bracket).
+    threshold_high_f: Optional[float] = None
 
 
-def _parse_weather_market_title(title: str) -> Optional[dict]:
-    """
-    Parse a weather market title to extract city, threshold, metric, date.
-
-    Handles patterns like:
-    - "Will the high temperature in New York exceed 75°F on March 5?"
-    - "NYC high temperature above 80°F on March 10, 2026"
-    - "Chicago daily high over 60°F on March 3"
-    - "Will Miami's low be above 65°F on March 7?"
-    - "Temperature in Denver above 70°F on March 5, 2026"
-    """
-    title_lower = title.lower()
-
-    # Must be temperature-related
-    if not any(kw in title_lower for kw in ["temperature", "temp", "°f", "degrees", "high", "low"]):
-        return None
-
-    # Extract city
-    city_key = None
-    city_name = None
+def _match_city(text: str) -> Tuple[Optional[str], Optional[str]]:
+    """Match a city name fragment (from an event title) to our city keys."""
+    text_lower = text.lower().strip()
     for alias, key in sorted(CITY_ALIASES.items(), key=lambda x: -len(x[0])):
-        if alias in title_lower:
-            city_key = key
+        if alias in text_lower:
             from backend.data.weather import CITY_CONFIG
-            city_name = CITY_CONFIG[key]["name"]
-            break
-
-    if not city_key:
-        return None
-
-    # Extract threshold temperature
-    temp_match = re.search(r'(\d+)\s*°?\s*f', title_lower)
-    if not temp_match:
-        temp_match = re.search(r'(\d+)\s*degrees', title_lower)
-    if not temp_match:
-        return None
-    threshold_f = float(temp_match.group(1))
-
-    # Determine metric (high vs low)
-    metric = "high"  # default
-    if "low" in title_lower:
-        metric = "low"
-
-    # Determine direction
-    direction = "above"  # default
-    if any(kw in title_lower for kw in ["below", "under", "less than", "drop below"]):
-        direction = "below"
-
-    # Extract date
-    target_date = _extract_date(title_lower)
-    if not target_date:
-        return None
-
-    return {
-        "city_key": city_key,
-        "city_name": city_name,
-        "threshold_f": threshold_f,
-        "metric": metric,
-        "direction": direction,
-        "target_date": target_date,
-    }
+            return key, CITY_CONFIG[key]["name"]
+    return None, None
 
 
 def _extract_date(text: str) -> Optional[date]:
@@ -146,62 +113,62 @@ def _extract_date(text: str) -> Optional[date]:
     return None
 
 
+def _parse_bracket(label: str) -> Optional[dict]:
+    """Parse a ladder bracket label ("79°F or below" / "80-81°F" /
+    "98°F or higher") into a threshold/direction pair."""
+    match = _BELOW_RE.search(label)
+    if match:
+        return {"direction": "below", "threshold_f": float(match.group(1)), "threshold_high_f": None}
+
+    match = _ABOVE_RE.search(label)
+    if match:
+        return {"direction": "above", "threshold_f": float(match.group(1)), "threshold_high_f": None}
+
+    match = _RANGE_RE.search(label)
+    if match:
+        lo, hi = float(match.group(1)), float(match.group(2))
+        return {"direction": "between", "threshold_f": lo, "threshold_high_f": hi}
+
+    return None
+
+
 async def fetch_polymarket_weather_markets(city_keys: Optional[List[str]] = None) -> List[WeatherMarket]:
     """
-    Search Polymarket for weather temperature markets.
-    Searches for temperature/weather events and parses their titles.
+    Fetch "highest temperature" ladder markets from Polymarket.
+
+    Uses tag_slug=highest-temperature - the only query parameter that
+    actually filters this endpoint (verified live 2026-09-01: tag=Weather
+    and slug_contains=weather/temperature/temp- are silently ignored by
+    Gamma API, which just returns its unfiltered default event feed for
+    those - that's why this fetcher previously always found 0 markets).
+    Paginated via offset since the endpoint caps at 100 events/page.
     """
-    markets = []
+    markets: List[WeatherMarket] = []
 
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            # Search for weather/temperature events
-            for search_term in ["temperature", "weather high", "weather low"]:
-                try:
-                    response = await client.get(
-                        "https://gamma-api.polymarket.com/events",
-                        params={
-                            "closed": "false",
-                            "limit": 100,
-                            "tag": "Weather",
-                        }
-                    )
-                    response.raise_for_status()
-                    events = response.json()
+            offset = 0
+            while offset < 1000:  # safety cap, well above the current ~150 total events
+                response = await client.get(
+                    "https://gamma-api.polymarket.com/events",
+                    params={
+                        "tag_slug": "highest-temperature",
+                        "closed": "false",
+                        "limit": 100,
+                        "offset": offset,
+                    },
+                )
+                response.raise_for_status()
+                events = response.json()
+                if not events:
+                    break
 
-                    for event in events:
-                        event_slug = event.get("slug", "")
-                        for market_data in event.get("markets", []):
-                            market = _parse_polymarket_weather(market_data, event_slug, city_keys)
-                            if market:
-                                markets.append(market)
+                for event in events:
+                    markets.extend(_parse_weather_event(event, city_keys))
 
-                except Exception as e:
-                    logger.debug(f"Weather market search for '{search_term}' failed: {e}")
-
-            # Also try slug-based search for known patterns
-            for slug_pattern in ["weather", "temperature", "temp-"]:
-                try:
-                    response = await client.get(
-                        "https://gamma-api.polymarket.com/events",
-                        params={
-                            "closed": "false",
-                            "limit": 100,
-                            "slug_contains": slug_pattern,
-                        }
-                    )
-                    response.raise_for_status()
-                    events = response.json()
-
-                    for event in events:
-                        event_slug = event.get("slug", "")
-                        for market_data in event.get("markets", []):
-                            market = _parse_polymarket_weather(market_data, event_slug, city_keys)
-                            if market and not any(m.market_id == market.market_id for m in markets):
-                                markets.append(market)
-
-                except Exception as e:
-                    logger.debug(f"Weather slug search for '{slug_pattern}' failed: {e}")
+                if len(events) < 100:
+                    break
+                offset += 100
 
     except Exception as e:
         logger.warning(f"Failed to fetch weather markets: {e}")
@@ -210,29 +177,46 @@ async def fetch_polymarket_weather_markets(city_keys: Optional[List[str]] = None
     return markets
 
 
-def _parse_polymarket_weather(
+def _parse_weather_event(event: dict, city_keys: Optional[List[str]]) -> List[WeatherMarket]:
+    """Parse one "highest temperature" ladder event into its bracket markets."""
+    event_title = event.get("title", "") or ""
+    event_slug = event.get("slug", "")
+
+    match = _EVENT_TITLE_RE.search(event_title)
+    if not match:
+        return []
+
+    city_key, city_name = _match_city(match.group(1))
+    if not city_key:
+        return []
+    if city_keys and city_key not in city_keys:
+        return []
+
+    target_date = _extract_date(match.group(2).lower())
+    if not target_date or target_date < date.today():
+        return []
+
+    out = []
+    for market_data in event.get("markets", []):
+        market = _parse_bracket_market(market_data, event_slug, city_key, city_name, target_date)
+        if market:
+            out.append(market)
+    return out
+
+
+def _parse_bracket_market(
     market_data: dict,
     event_slug: str,
-    city_keys: Optional[List[str]] = None,
+    city_key: str,
+    city_name: str,
+    target_date: date,
 ) -> Optional[WeatherMarket]:
-    """Parse a Polymarket market dict into a WeatherMarket if it's a temp market."""
-    question = market_data.get("question", "") or market_data.get("groupItemTitle", "")
-    if not question:
+    """Parse one bracket market dict (a single row of the ladder) into a WeatherMarket."""
+    bracket_label = market_data.get("groupItemTitle", "") or ""
+    bracket = _parse_bracket(bracket_label)
+    if not bracket:
         return None
 
-    parsed = _parse_weather_market_title(question)
-    if not parsed:
-        return None
-
-    # Filter by requested cities
-    if city_keys and parsed["city_key"] not in city_keys:
-        return None
-
-    # Only trade markets for dates in the future (or today)
-    if parsed["target_date"] < date.today():
-        return None
-
-    # Parse prices
     outcome_prices = market_data.get("outcomePrices", [])
     if isinstance(outcome_prices, str):
         import json
@@ -257,19 +241,21 @@ def _parse_polymarket_weather(
         return None
 
     volume = float(market_data.get("volume", 0) or 0)
+    question = market_data.get("question", "") or bracket_label
 
     return WeatherMarket(
         slug=event_slug,
         market_id=str(market_data.get("id", "")),
         platform="polymarket",
         title=question,
-        city_key=parsed["city_key"],
-        city_name=parsed["city_name"],
-        target_date=parsed["target_date"],
-        threshold_f=parsed["threshold_f"],
-        metric=parsed["metric"],
-        direction=parsed["direction"],
+        city_key=city_key,
+        city_name=city_name,
+        target_date=target_date,
+        threshold_f=bracket["threshold_f"],
+        metric="high",
+        direction=bracket["direction"],
         yes_price=yes_price,
         no_price=no_price,
         volume=volume,
+        threshold_high_f=bracket["threshold_high_f"],
     )
