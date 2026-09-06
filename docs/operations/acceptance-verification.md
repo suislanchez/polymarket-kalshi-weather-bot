@@ -35,7 +35,7 @@ $PY scripts/verify_alpaca_paper.py --read-only
 
 ## What the last accepted run established
 
-- Python suite: 1369 passed. Frontend: 20 passed, production build clean.
+- Python suite: 1402 passed. Frontend: 24 passed, production build clean.
 - Migration manifest: 18/18 copied destinations rehash to their recorded
   SHA-256; 498 databases pass `PRAGMA integrity_check`.
 - With Archives unavailable, `POST /api/trading/paper/run` returns 409
@@ -49,3 +49,17 @@ $PY scripts/verify_alpaca_paper.py --read-only
 
 Task 18 (local-storage switchover) has not been performed. It needs explicit
 approval, and the plan's original `$SOURCE` path no longer exists.
+
+## Adversarial review, 2026-09-06
+
+The report carries an addendum recording an 8-dimension adversarial review of
+the implementation commits: 47 findings raised, 21 independently verified by
+skeptics instructed to refute them, 13 survived, 7 fixed. Two corrections to
+the report's own earlier claims are recorded there:
+
+- The venv is **not** self-contained on Archives. Its site-packages are, but
+  `pyvenv.cfg` points at a generation-stamped interpreter on the internal disk,
+  which is a single point of failure for the whole environment.
+- The live ledger digest has changed since the migration section was written —
+  explained by the schema migration plus 12 audit events written by CLI runs
+  during review. `unified_orders` is still empty and every event chain verifies.
