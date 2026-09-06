@@ -145,16 +145,31 @@ def decimal_stock_client(*, api_key: str, secret_key: str):
     Both halves are required. ``raw_data=True`` bypasses the float-typed ``Bar``
     model, and the ``_one_request`` override replaces the decode point that
     produces the floats in the first place. Either alone still yields floats.
+
+    The override reproduces the parent's error handling rather than
+    simplifying it: the retry loop in ``_request`` keys on ``RetryException``,
+    and ``APIError`` is what carries Alpaca's message back to the caller.
     """
     import json
 
+    from alpaca.common.exceptions import APIError, RetryException
     from alpaca.data.historical.stock import StockHistoricalDataClient
+    from requests.exceptions import HTTPError
 
     class _DecimalStockHistoricalDataClient(StockHistoricalDataClient):
         def _one_request(self, method, url, opts, retry):  # noqa: ANN001 - SDK signature
             response = self._session.request(method, url, **opts)
-            # Keep the SDK's retry semantics for 429/504 by raising as it does.
-            response.raise_for_status()
+            try:
+                response.raise_for_status()
+            except HTTPError as http_error:
+                # The parent's error fork, reproduced exactly. ``_request``
+                # catches only RetryException, so a bare raise here would make
+                # 429/504 fatal instead of retried -- and dropping
+                # ``response.text`` would strip the body that APIError.message
+                # and .code parse. Only the decode below may differ.
+                if response.status_code in self._retry_codes and retry > 0:
+                    raise RetryException()
+                raise APIError(response.text, http_error)
             if response.text != "":
                 return json.loads(response.text, parse_float=Decimal)
             return None

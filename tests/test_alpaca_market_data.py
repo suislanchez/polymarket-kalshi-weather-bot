@@ -211,3 +211,148 @@ def test_merged_pages_still_satisfy_the_loader_and_drive_the_strategy():
     # 60 bars clears the 51-bar minimum, so the strategy reaches a real verdict
     # rather than refusing for want of history.
     assert signal.reason != "insufficient_history"
+
+
+# ---------------------------------------------------------------------------
+# The transport seam.
+#
+# Everything above tests the pure transform. Nothing above ever ran the client
+# that fetches the bars, which is how ``_one_request`` shipped an override that
+# silently disabled the SDK's rate-limit retry. These tests drive the real
+# ``_request`` loop -- the actual consumer of the override -- with a real
+# ``requests.Response``, so ``raise_for_status`` behaves exactly as in
+# production. A fake response object with a hand-written ``raise_for_status``
+# would pass against the broken code, which is the whole failure mode.
+# ---------------------------------------------------------------------------
+
+import json as _json
+
+import requests
+from alpaca.common.exceptions import APIError
+
+from backend.trading.alpaca_data import decimal_stock_client
+
+BARS_BODY = _json.dumps(
+    {
+        "bars": {
+            "SPY": [
+                {
+                    "t": "2026-01-01T05:00:00Z",
+                    "o": 100.5,
+                    "h": 101.5,
+                    "l": 99.5,
+                    "c": 101.25,
+                    "v": 1000,
+                    "n": 5,
+                    "vw": 100.9,
+                }
+            ]
+        }
+    }
+)
+
+
+def canned(status, body):
+    """A real ``requests.Response``, not a stand-in.
+
+    ``raise_for_status`` is the branch under test; substituting our own would
+    test the substitute.
+    """
+    response = requests.Response()
+    response.status_code = status
+    response._content = body.encode()
+    response.url = "https://data.alpaca.markets/v2/stocks/bars"
+    response.encoding = "utf-8"
+    return response
+
+
+class RecordingSession:
+    """Hands back queued responses and records every attempt."""
+
+    def __init__(self, *responses):
+        self._responses = list(responses)
+        self.calls = []
+
+    def request(self, method, url, **opts):
+        self.calls.append((method, url))
+        if not self._responses:
+            raise AssertionError("client made more attempts than the test queued")
+        return self._responses.pop(0)
+
+
+@pytest.fixture
+def instant_retries(monkeypatch):
+    """The SDK sleeps ``_retry_wait`` seconds between attempts; the test must not."""
+    import alpaca.common.rest as rest
+
+    monkeypatch.setattr(rest.time, "sleep", lambda _seconds: None)
+
+
+@pytest.fixture
+def client():
+    stock_client = decimal_stock_client(api_key="not-a-real-key", secret_key="not-a-real-secret")
+    assert stock_client._retry_codes == [429, 504], "the retryable set moved; update these tests"
+    return stock_client
+
+
+@pytest.mark.parametrize("retryable_status", [429, 504])
+def test_retryable_status_is_retried_and_the_next_response_is_used(
+    client, instant_retries, retryable_status
+):
+    """A rate limit must cost one extra attempt, not the whole pull.
+
+    Pulling years of daily bars for several symbols is paginated, so a 429
+    mid-pull is the expected case rather than the exotic one. Surfacing it
+    aborts the run.
+    """
+    client._session = RecordingSession(
+        canned(retryable_status, '{"code": 42900000, "message": "rate limit"}'),
+        canned(200, BARS_BODY),
+    )
+
+    payload = client._request("GET", "/stocks/bars", {"symbols": "SPY"})
+
+    assert len(client._session.calls) == 2, f"{retryable_status} was not retried"
+    bar = payload["bars"]["SPY"][0]
+    assert type(bar["c"]) is Decimal, "the retried response must still decode exactly"
+    assert bar["c"] == Decimal("101.25")
+
+
+def test_retries_are_bounded_and_end_as_an_api_error_carrying_the_body(client, instant_retries):
+    """When the limit never clears, the caller gets Alpaca's message, not a bare HTTPError."""
+    body = '{"code": 42900000, "message": "rate limit exceeded"}'
+    client._session = RecordingSession(*[canned(429, body) for _ in range(4)])
+
+    with pytest.raises(APIError) as caught:
+        client._request("GET", "/stocks/bars", {"symbols": "SPY"})
+
+    # _retry defaults to 3: one initial attempt plus three retries, then stop.
+    assert len(client._session.calls) == 4
+    assert caught.value.message == "rate limit exceeded"
+
+
+def test_non_retryable_error_keeps_alpacas_message_and_status(client, instant_retries):
+    """A bad request must arrive as APIError with the body intact.
+
+    ``APIError.message`` and ``.code`` parse the response body, so an exception
+    that drops it cannot answer *why* the request failed -- exactly what a bare
+    ``raise_for_status`` produces.
+    """
+    client._session = RecordingSession(
+        canned(422, '{"code": 42210000, "message": "invalid symbol: NOPE"}')
+    )
+
+    with pytest.raises(APIError) as caught:
+        client._request("GET", "/stocks/bars", {"symbols": "NOPE"})
+
+    assert len(client._session.calls) == 1, "a 422 is not retryable"
+    assert caught.value.message == "invalid symbol: NOPE"
+    assert caught.value.code == 42210000
+    assert caught.value.status_code == 422
+
+
+def test_empty_body_decodes_to_none_rather_than_raising(client, instant_retries):
+    """The SDK treats an empty body as 'no payload'; the override must agree."""
+    client._session = RecordingSession(canned(200, ""))
+
+    assert client._request("GET", "/stocks/bars", {"symbols": "SPY"}) is None
