@@ -950,6 +950,15 @@ function App() {
             <div className="absolute inset-0 border-2 border-transparent border-t-green-500 rounded-full animate-spin" />
           </div>
           <div className="text-[10px] text-neutral-500 uppercase tracking-widest font-mono">Initializing</div>
+          {/* The weather dashboard aggregates several upstreams and can be slow
+              or unavailable. Paper-only state and the kill switch are exactly
+              what an operator needs while something is wrong, so they render
+              here rather than waiting behind an unrelated payload. */}
+          {tradingStatusQuery.data ? (
+            <div className="mt-6 w-64 text-left">
+              <TradingStatusPanel status={tradingStatusQuery.data} />
+            </div>
+          ) : null}
         </div>
       </div>
     )
