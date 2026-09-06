@@ -57,13 +57,38 @@ def test_the_fake_adapter_completes_a_run(tmp_path):
     assert body["symbols"] == ["SPY"]
 
 
-def test_a_run_with_no_proposal_is_still_a_success():
-    """No forced trades: declining to trade is a valid outcome, not an error."""
-    result = run(SCRIPT, "--adapter", "fake", "--symbols", "SPY", "--once", "--json")
+def test_a_run_with_no_proposal_is_still_a_success(monkeypatch, capsys):
+    """No forced trades: declining to trade is a valid outcome, not an error.
 
-    assert result.returncode == 0
-    body = json.loads(result.stdout)
-    assert "results" in body
+    Driven through the module rather than the CLI, because the deterministic
+    series is built to CROSS -- a subprocess run always proposes, so the
+    subprocess version of this test asserted exit 0 for a run that had
+    proposals in it and never once observed the case it names.
+    """
+    import importlib.util
+    import sys as _sys
+    from decimal import Decimal
+
+    spec = importlib.util.spec_from_file_location("run_paper_strategy", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    _sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+
+    def flat_bars(symbol, *, now, count=60):
+        """A flat series: no crossover, therefore no proposal."""
+        payload = module.deterministic_bars(symbol, now=now, count=count)
+        for bar in payload["bars"]:
+            for field in ("open", "high", "low", "close"):
+                bar[field] = str(Decimal("100"))
+        return payload
+
+    monkeypatch.setattr(module, "deterministic_bars", flat_bars)
+
+    exit_code = module.main(["--adapter", "fake", "--symbols", "SPY", "--once", "--json"])
+
+    body = json.loads(capsys.readouterr().out)
+    assert body["proposals"] == 0, "the fixture still produced a proposal"
+    assert exit_code == 0, "a zero-proposal run was reported as a failure"
 
 
 def test_the_fake_adapter_run_is_deterministic():

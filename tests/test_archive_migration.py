@@ -619,3 +619,73 @@ def test_preserve_as_legacy_also_rescues_a_plain_data_file(
     preserved = list(archive_root.rglob("audit.md"))
     assert len(preserved) >= 2, "the source copy was not preserved anywhere"
     assert (archive_root / "backups" / "migration-manifest.json").exists()
+
+
+# --- the manifest must describe the bytes that were archived -----------------
+#
+# plan() hashes each source at inventory time; copy_verified() re-hashes it at
+# copy time. Nothing reconciled the two, so a source written between those two
+# moments was recorded with a digest describing neither the archive nor the
+# current source -- and the run still exited 0 saying "copied and verified".
+
+
+def test_the_manifest_records_the_archived_digest_alongside_the_planned_one(
+    source, research, archive_root
+):
+    run_migration(source, research, archive_root, "--apply")
+
+    entries = {e["relative_path"]: e for e in manifest_of(archive_root)["entries"]}
+    ledger = entries["tradingbot.db"]
+    assert ledger["archived_sha256"] == sha256(
+        Path(ledger["destination"])
+    ), "the manifest does not describe the bytes on disk"
+    assert ledger["archived_size"] == Path(ledger["destination"]).stat().st_size
+    # Static source: the two digests agree, and the flag says so.
+    assert ledger["sha256"] == ledger["archived_sha256"]
+    assert ledger["source_changed_during_run"] is False
+
+
+def test_a_source_written_mid_run_is_flagged_not_silently_recorded(
+    source, research, archive_root, monkeypatch
+):
+    """The TOCTOU window, made deterministic.
+
+    digest() is patched to return the plan-time value once and a different one
+    afterwards, which is what a concurrent writer produces. The run must record
+    the archived digest and mark the entry, rather than exit 0 with a digest
+    that matches nothing.
+    """
+    mig = load_migration_module()
+    target = source / "reports" / "audit.md"
+
+    real_digest = mig.digest
+    seen = {"count": 0}
+
+    def shifting_digest(path):
+        if Path(path) == target:
+            seen["count"] += 1
+            if seen["count"] == 1:
+                return "0" * 64  # the plan-time reading
+        return real_digest(path)
+
+    monkeypatch.setattr(mig, "digest", shifting_digest)
+
+    roots = {
+        "legacy": archive_root / "data" / "legacy",
+        "ledgers": archive_root / "data" / "ledgers",
+        "research": archive_root / "data" / "research",
+        "snapshots": archive_root / "data" / "research" / "snapshots",
+        "secrets": archive_root / "backups" / "secrets",
+        "firecrawl": archive_root / "backups" / "firecrawl",
+    }
+    entries = mig.plan(source, roots)
+    entry = next(e for e in entries if e.relative_path == "reports/audit.md")
+
+    assert entry.sha256 == "0" * 64, "the fixture did not produce a plan-time reading"
+    mig.copy_verified(target, Path(entry.destination))
+    mig.stamp_archived(entry, Path(entry.destination))
+
+    assert entry.archived_sha256 == real_digest(Path(entry.destination))
+    assert entry.source_changed_during_run is True, (
+        "a digest that changed between plan and copy was not flagged"
+    )

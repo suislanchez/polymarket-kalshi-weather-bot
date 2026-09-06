@@ -19,6 +19,7 @@ import pytest
 
 from backend.core import scheduler as scheduler_module
 from backend.trading.domain import AssetClass, Side, TradeProposal, Venue
+from backend.trading.adapters.fake import FakePaperAdapter
 from backend.trading.risk import PortfolioState, RiskContext, evaluate_proposal
 
 
@@ -156,3 +157,76 @@ def test_a_tighter_lane_fraction_still_wins_over_the_ceiling(configured, monkeyp
     monkeypatch.setattr(scheduler_module.settings, "INITIAL_BANKROLL", 10_000.0)
 
     assert scheduler_module.paper_risk_limits().daily_loss_fraction == Decimal("0.005")
+
+
+def test_the_ceiling_is_observed_by_the_service_not_just_the_evaluator(
+    configured, monkeypatch, tmp_path
+):
+    """Routes through PaperExecutionService, which is what production calls.
+
+    The test above drives evaluate_proposal directly. That proves the evaluator
+    honours the limits it is handed, but not that the object production hands it
+    is the one paper_risk_limits() built -- which is the actual claim.
+    """
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from backend.models.database import Base
+    from backend.trading.service import PaperExecutionService, PaperExecutionSettings
+
+    monkeypatch.setattr(scheduler_module.settings, "WEATHER_MAX_TRADE_SIZE", 10_000.0)
+    monkeypatch.setattr(scheduler_module.settings, "EXECUTION_MODE", "paper")
+    monkeypatch.setattr(scheduler_module.settings, "LIVE_TRADING_ENABLED", False)
+    monkeypatch.setattr(scheduler_module.settings, "GLOBAL_TRADING_KILL_SWITCH", False)
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'gate.sqlite'}")
+    Base.metadata.create_all(engine)
+
+    def route(notional: str):
+        proposal = TradeProposal(
+            proposal_id=f"service-ceiling-{notional}",
+            strategy_id="test",
+            venue=Venue.ALPACA_PAPER,
+            asset_class=AssetClass.STOCK,
+            symbol="SPY",
+            side=Side.BUY,
+            notional=Decimal(notional),
+            reference_price=Decimal("100"),
+            market_data_at=NOW,
+            created_at=NOW,
+            rationale="service ceiling probe",
+        )
+        with sessionmaker(bind=engine, expire_on_commit=False)() as session:
+            service = PaperExecutionService(
+                session=session,
+                adapters={Venue.ALPACA_PAPER: FakePaperAdapter(clock=lambda: NOW)},
+                settings=PaperExecutionSettings(execution_mode="paper"),
+                clock=lambda: NOW,
+                kill_switch=scheduler_module.trading_kill_switch_engaged,
+            )
+            return service.execute(
+                proposal,
+                portfolio=PortfolioState(
+                    equity=Decimal("100000"),
+                    start_of_day_nlv=Decimal("100000"),
+                    daily_realized_pnl=Decimal("0"),
+                    gross_exposure=Decimal("0"),
+                    crypto_exposure=Decimal("0"),
+                ),
+                context=RiskContext(
+                    now=NOW,
+                    execution_mode="paper",
+                    idempotency_key=f"service-ceiling:{notional}",
+                ),
+                limits=scheduler_module.paper_risk_limits(),
+            )
+
+    # Ceiling is 40 (from the `configured` fixture): 60 must be refused...
+    assert route("60").decision.approved is False
+    # ...and raising only the ceiling must let the same size through.
+    monkeypatch.setattr(scheduler_module.settings, "MAX_ORDER_NOTIONAL_USD", 500.0)
+    approved = route("60")
+    assert approved.decision.approved is True, approved.decision.reason_codes
+    assert approved.report is not None and approved.report.status.value == "submitted"
+
+    engine.dispose()

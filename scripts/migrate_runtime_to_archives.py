@@ -83,6 +83,12 @@ class Entry:
     # Set when the canonical destination was already occupied by different,
     # live bytes and this source was preserved elsewhere instead.
     diverted_from: Optional[str] = None
+    # The bytes actually on disk after the copy. sha256/size above are read at
+    # inventory time; a source written between inventory and copy would leave
+    # them describing neither the archive nor the current source.
+    archived_sha256: Optional[str] = None
+    archived_size: Optional[int] = None
+    source_changed_during_run: bool = False
 
 
 def digest(path: Path) -> str:
@@ -183,6 +189,17 @@ def copy_verified(source_file: Path, destination: Path) -> None:
 
     if digest(destination) != expected:
         raise MigrationError(f"destination does not match source after rename: {destination}")
+
+
+def stamp_archived(entry: Entry, destination: Path) -> None:
+    """Record what actually landed, and flag a source that moved under us.
+
+    A manifest that only carries plan-time readings cannot be used to verify
+    the archive it describes, which is the one job an operator will ask of it.
+    """
+    entry.archived_sha256 = digest(destination)
+    entry.archived_size = destination.stat().st_size
+    entry.source_changed_during_run = entry.archived_sha256 != entry.sha256
 
 
 def check_sqlite(path: Path) -> None:
@@ -410,6 +427,7 @@ def main(argv: list[str]) -> int:
         except MigrationError as error:
             print(f"ERROR: {error}", file=sys.stderr)
             return 1
+        stamp_archived(entry, target)
         if entry.category == "secret":
             os.chmod(target, 0o600)
         if target.suffix in DATABASE_SUFFIXES:
@@ -439,9 +457,21 @@ def main(argv: list[str]) -> int:
     )
     os.chmod(manifest_path, 0o600)
 
+    moved = [e.relative_path for e in entries if e.source_changed_during_run]
     print(f"\napplied: {copied} files copied and verified")
+    if moved:
+        # Loud, and non-zero: the archive is intact (every copy was verified
+        # against the source as read), but the inventory no longer describes
+        # the source, so the run is not clean.
+        print(
+            f"WARNING: {len(moved)} source file(s) changed between inventory and "
+            "copy; the manifest records both digests and flags them:",
+            file=sys.stderr,
+        )
+        for name in moved[:10]:
+            print(f"  - {name}", file=sys.stderr)
     print(f"manifest: {manifest_path}")
-    return 0
+    return 3 if moved else 0
 
 
 if __name__ == "__main__":
