@@ -264,6 +264,54 @@ This is a **simulation tool** for educational purposes. It does not place real t
 
 MIT - do whatever you want with it.
 
+## Paper trading operator commands
+
+All three run from the Archives environment and refuse to do anything if the
+runtime is not paper-only. Prefix every command with `env -u PYTHONPATH`; the
+parent process exports a `PYTHONPATH` that injects unrelated packages.
+
+```bash
+ENVS=/Volumes/Archives/Hermes-Offload/2026-08-23/trading-system/envs
+PY="env -u PYTHONPATH PYTHONPATH=. $ENVS/unified-trading-py311/bin/python"
+
+$PY scripts/trading_preflight.py                                  # is it safe to trade?
+$PY scripts/run_paper_strategy.py --adapter fake --symbols SPY --once
+$PY scripts/verify_alpaca_paper.py --read-only                    # account, redacted
+$PY scripts/verify_alpaca_paper.py --submit-cancel SPY            # bounded round trip
+```
+
+**Preflight** checks paper mode, the Archives binding, ledger integrity,
+dependency imports, the kill switch, and adapter state. Missing Alpaca
+credentials are reported as `credential_ready: false` and do **not** fail it —
+the system is meant to be verifiable before keys exist.
+
+**`run_paper_strategy.py`** evaluates the 20/50 SMA strategy and routes any
+proposal through the real risk gate, ledger, and adapter. A run that proposes
+nothing exits 0: there are no forced trades. `--adapter fake` uses a
+deterministic synthetic series and writes to an **in-memory** ledger by
+default, so smoke-test orders never enter the append-only audit record; pass
+`--ledger archives` to route into the real ledger deliberately.
+
+**`verify_alpaca_paper.py`** parses the configured endpoint and compares the
+host whole against `paper-api.alpaca.markets`, before constructing a client.
+Substring matching would accept `paper-api.alpaca.markets.evil.com`.
+
+### Credentials
+
+Alpaca paper credentials live in the controlled Archives secret file, never in
+the repository and never in chat:
+
+```
+/Volumes/Archives/Hermes-Offload/2026-08-23/trading-system/secrets/alpaca-paper.env
+```
+
+Both halves are required: `ALPACA_API_KEY` and `ALPACA_API_SECRET`. Paper keys
+begin with `PK`; a key beginning `AK` is a live key and the adapter will refuse
+it. No command in this repository prints a credential value.
+
+Robinhood and Coinbase remain deferred and disconnected. No credentials for
+either are stored or read anywhere in the application.
+
 ## Trading runtime dependencies
 
 `requirements-trading.in` / `requirements-trading.txt` pin the paper-trading runtime.
