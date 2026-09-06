@@ -57,9 +57,28 @@ the implementation commits: 47 findings raised, 21 independently verified by
 skeptics instructed to refute them, 13 survived, 7 fixed. Two corrections to
 the report's own earlier claims are recorded there:
 
-- The venv is **not** self-contained on Archives. Its site-packages are, but
-  `pyvenv.cfg` points at a generation-stamped interpreter on the internal disk,
-  which is a single point of failure for the whole environment.
+- The venv **was not** self-contained on Archives; this is now fixed. The base
+  interpreter lives at `envs/cpython-3.11.15` and the venv is rebuilt against it
+  with `--copies`, so nothing reaches the internal disk. The exact package set
+  is pinned at `envs/unified-trading-py311.freeze.txt`, and the previous
+  environment is kept at `envs/unified-trading-py311.internal-dep-backup` until
+  you delete it.
 - The live ledger digest has changed since the migration section was written —
   explained by the schema migration plus 12 audit events written by CLI runs
   during review. `unified_orders` is still empty and every event chain verifies.
+
+## Rebuilding the environment
+
+Everything the runtime needs is on Archives. To rebuild from scratch:
+
+```bash
+ROOT=/Volumes/Archives/Hermes-Offload/2026-08-23/trading-system
+$ROOT/envs/cpython-3.11.15/bin/python3.11 -m venv --copies $ROOT/envs/unified-trading-py311
+env -u PYTHONPATH $ROOT/envs/unified-trading-py311/bin/python -m pip install \
+  -r $ROOT/envs/unified-trading-py311.freeze.txt
+```
+
+Use `--copies`, and build at the final path. A symlinked venv still reaches its
+base tree at runtime, and renaming a venv afterwards leaves every `bin/` shebang
+pointing at the old absolute path — `pytest`, `pip-audit` and `bandit` break
+while `python -m pytest` keeps working, which is a confusing way to find out.
