@@ -12,8 +12,10 @@ from backend.config import settings
 from pathlib import Path
 
 from backend.trading.execution_mode import (
+    KILL_SWITCH_SOURCE as _execution_kill_switch_source,
     archives_required_directories,
     archives_runtime_paths,
+    kill_switch_engaged as _execution_kill_switch_engaged,
     require_archives_runtime,
     require_paper_mode,
     sqlite_path as _sqlite_path,
@@ -1711,10 +1713,12 @@ _TRADING_CREDENTIAL_FIELDS = {
     "groq": ("GROQ_API_KEY",),
 }
 
-# The kill switch the execution service is actually built with. Reported by
-# name so an operator cannot flip a flag nothing reads: GLOBAL_TRADING_KILL_SWITCH
-# is declared in config and read by no production code path.
-_KILL_SWITCH_SOURCE = "LIVE_TRADING_ENABLED"
+# Every flag that actually halts trading, reported by name. GLOBAL_TRADING_KILL_SWITCH
+# used to be declared in config and read by no production code path, so this
+# reported LIVE_TRADING_ENABLED alone to stop an operator flipping a dead flag.
+# Both are now gates (backend/trading/execution_mode.KILL_SWITCH_FLAGS), so both
+# are named.
+_KILL_SWITCH_SOURCE = _execution_kill_switch_source
 
 _paper_run_lock = asyncio.Lock()
 
@@ -1785,7 +1789,7 @@ def _venue_states() -> list:
 
 
 def _kill_switch_engaged() -> bool:
-    return bool(getattr(settings, _KILL_SWITCH_SOURCE, False))
+    return _execution_kill_switch_engaged(settings)
 
 
 def _is_paper_mode() -> bool:

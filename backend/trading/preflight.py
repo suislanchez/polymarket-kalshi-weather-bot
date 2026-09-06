@@ -19,10 +19,12 @@ from pathlib import Path
 from typing import Any
 
 from backend.trading.execution_mode import (
+    KILL_SWITCH_SOURCE,
     ArchivesRuntimeError,
     ExecutionModeError,
     archives_required_directories,
     archives_runtime_paths,
+    kill_switch_engaged,
     require_archives_runtime,
     require_paper_mode,
 )
@@ -189,10 +191,13 @@ def run_preflight(settings) -> Preflight:
 
     # An engaged kill switch is a deliberate operator state, not a broken
     # runtime, so it is reported and does not fail preflight.
+    #
+    # Both the state and the reported name come from execution_mode, which is
+    # also what the execution service is built with. Computing this locally is
+    # how preflight came to print "ENGAGED" for a flag that stopped nothing.
     report.kill_switch = {
-        "engaged": bool(getattr(settings, "GLOBAL_TRADING_KILL_SWITCH", False))
-        or bool(getattr(settings, "LIVE_TRADING_ENABLED", False)),
-        "source": "GLOBAL_TRADING_KILL_SWITCH",
+        "engaged": kill_switch_engaged(settings),
+        "source": KILL_SWITCH_SOURCE,
     }
 
     report.adapters = _adapters(settings)

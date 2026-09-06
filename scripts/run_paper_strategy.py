@@ -116,7 +116,7 @@ def execute(session, proposal, *, adapter: str, now: datetime) -> dict:
     risk-rejected -- which is a complete, correctly recorded lifecycle and a
     demonstration that the gate holds, not a failed run.
     """
-    from backend.core.scheduler import paper_risk_limits
+    from backend.core.scheduler import paper_risk_limits, trading_kill_switch_engaged
     from backend.trading.adapters.fake import FakePaperAdapter
     from backend.trading.domain import Venue
     from backend.trading.execution_mode import archives_runtime_guard
@@ -132,7 +132,7 @@ def execute(session, proposal, *, adapter: str, now: datetime) -> dict:
         adapters={Venue.ALPACA_PAPER: FakePaperAdapter(clock=clock, equity=equity)},
         settings=PaperExecutionSettings(execution_mode=str(settings.EXECUTION_MODE)),
         clock=clock,
-        kill_switch=lambda: bool(getattr(settings, "LIVE_TRADING_ENABLED", False)),
+        kill_switch=trading_kill_switch_engaged,
         archives_guard=archives_runtime_guard(settings),
     )
     result = service.execute(

@@ -382,6 +382,13 @@ def partition_stock_and_crypto_symbols(symbols) -> tuple:
     return (stock or frozenset({"SPY"}), crypto or frozenset({"BTC/USD"}))
 
 
+def trading_kill_switch_engaged() -> bool:
+    """Zero-argument kill switch bound to live settings, for the service."""
+    from backend.trading.execution_mode import kill_switch_engaged
+
+    return kill_switch_engaged(settings)
+
+
 def paper_risk_limits() -> RiskLimits:
     """Deterministic risk policy for the shadow ledger route."""
     bankroll = _positive_amount(getattr(settings, "INITIAL_BANKROLL", 0.0)) or Decimal("1000")
@@ -515,7 +522,7 @@ def build_paper_execution_service(session):
             adapters=adapters,
             settings=PaperExecutionSettings(execution_mode=str(settings.EXECUTION_MODE)),
             clock=clock,
-            kill_switch=lambda: bool(getattr(settings, "LIVE_TRADING_ENABLED", False)),
+            kill_switch=trading_kill_switch_engaged,
             # Without this the service's own Archives checks return immediately and
             # both of them are dead code. A scheduler job outlives API startup, so
             # the re-check before each write is the only one that sees a mount lost

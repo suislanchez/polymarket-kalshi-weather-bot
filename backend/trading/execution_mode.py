@@ -201,3 +201,27 @@ def archives_runtime_guard(active_settings) -> Callable[[], None]:
         )
 
     return guard
+
+
+# The flags that halt trading. Both are gates, not just labels: a setting named
+# GLOBAL_TRADING_KILL_SWITCH that an operator can set while orders keep
+# submitting is worse than having no switch, because it is reached for exactly
+# when someone needs trading to stop.
+KILL_SWITCH_FLAGS = ("GLOBAL_TRADING_KILL_SWITCH", "LIVE_TRADING_ENABLED")
+
+# The name reported to operators. It lists every flag that actually gates, so
+# the reported source can never be a flag nothing reads.
+KILL_SWITCH_SOURCE = " or ".join(KILL_SWITCH_FLAGS)
+
+
+def kill_switch_engaged(active_settings: object) -> bool:
+    """True when any configured kill-switch flag is set.
+
+    Read from settings on every call rather than captured once, so a switch
+    thrown while a long-lived scheduler job is running is observed by the next
+    order rather than by the next process restart.
+    """
+    for flag in KILL_SWITCH_FLAGS:
+        if bool(getattr(active_settings, flag, False)):
+            return True
+    return False

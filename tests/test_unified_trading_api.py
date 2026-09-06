@@ -247,7 +247,25 @@ def test_status_reports_paper_mode_and_the_authoritative_kill_switch(
     assert body["paper_only"] is True
     assert body["kill_switch"]["engaged"] is False
     # Naming the source keeps an operator from flipping a flag nothing reads.
-    assert body["kill_switch"]["source"] == "LIVE_TRADING_ENABLED"
+    # Both named flags gate; asserting one literal string was correct only while
+    # GLOBAL_TRADING_KILL_SWITCH was inert.
+    source = body["kill_switch"]["source"]
+    assert "LIVE_TRADING_ENABLED" in source
+    assert "GLOBAL_TRADING_KILL_SWITCH" in source
+
+
+@pytest.mark.parametrize(
+    "flag", ["LIVE_TRADING_ENABLED", "GLOBAL_TRADING_KILL_SWITCH"]
+)
+def test_every_flag_the_status_names_actually_engages_it(
+    client, paper_mode, monkeypatch, flag
+):
+    """A named flag that leaves engaged False is the defect being prevented."""
+    assert flag in client.get(f"{TRADING_PREFIX}/status").json()["kill_switch"]["source"]
+
+    monkeypatch.setattr(settings, flag, True)
+
+    assert client.get(f"{TRADING_PREFIX}/status").json()["kill_switch"]["engaged"] is True
 
 
 def test_status_does_not_return_raw_archive_paths(client, paper_mode, monkeypatch):
