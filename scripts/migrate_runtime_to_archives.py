@@ -263,13 +263,33 @@ def research_entries(
             relative = path.relative_to(snapshots)
             if name_prefixes and not str(relative).startswith(name_prefixes):
                 continue
+            # The snapshot tree goes through the same classifier as the source
+            # tree. It is a shared directory, and hardcoding "data" here routed
+            # any .env or key sitting in it into the live snapshot root instead
+            # of backups/secrets -- bypassing the one rule that exists to stop
+            # exactly that.
+            category = classify(relative, set())
+            if category in ("repo", "recreate"):
+                # Nothing in the snapshot tree is Git-tracked or rebuildable
+                # from this repository, so those verdicts do not apply here.
+                category = "data"
+            # Namespaced by origin. The source tree and the snapshot tree are
+            # independent and both routinely contain a file called ".env";
+            # flattening them into one secrets/ directory makes the second copy
+            # collide with the first and abort the whole run.
+            if category == "secret":
+                destination = roots["secrets"] / "research-snapshots" / relative
+            elif category == "firecrawl":
+                destination = roots["firecrawl"] / "research-snapshots" / relative
+            else:
+                destination = roots["snapshots"] / relative
             entries.append(
                 Entry(
                     relative_path=f"<research-snapshots>/{relative}",
                     size=path.stat().st_size,
                     sha256=digest(path),
-                    category="data",
-                    destination=str(roots["snapshots"] / relative),
+                    category=category,
+                    destination=str(destination),
                 )
             )
     return entries

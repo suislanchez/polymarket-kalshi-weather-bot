@@ -134,3 +134,25 @@ def test_tightening_the_ceiling_actually_refuses_an_order_it_used_to_allow(
 from datetime import datetime, timezone  # noqa: E402
 
 NOW = datetime(2026, 9, 5, 12, 0, tzinfo=timezone.utc)
+
+
+def test_the_daily_loss_ceiling_bounds_the_lane_derived_fraction(configured, monkeypatch):
+    """MAX_DAILY_LOSS_FRACTION was the fifth inert knob, missed by 45a9787.
+
+    The lane derives its fraction from WEATHER_DAILY_LOSS_LIMIT / INITIAL_BANKROLL.
+    At stock defaults that is 200/10000 = 0.02, twice the declared 0.01 ceiling,
+    so the advertised limit was not the one enforced.
+    """
+    monkeypatch.setattr(scheduler_module.settings, "MAX_DAILY_LOSS_FRACTION", 0.01)
+    monkeypatch.setattr(scheduler_module.settings, "WEATHER_DAILY_LOSS_LIMIT", 200.0)
+    monkeypatch.setattr(scheduler_module.settings, "INITIAL_BANKROLL", 10_000.0)
+
+    assert scheduler_module.paper_risk_limits().daily_loss_fraction == Decimal("0.01")
+
+
+def test_a_tighter_lane_fraction_still_wins_over_the_ceiling(configured, monkeypatch):
+    monkeypatch.setattr(scheduler_module.settings, "MAX_DAILY_LOSS_FRACTION", 0.05)
+    monkeypatch.setattr(scheduler_module.settings, "WEATHER_DAILY_LOSS_LIMIT", 50.0)
+    monkeypatch.setattr(scheduler_module.settings, "INITIAL_BANKROLL", 10_000.0)
+
+    assert scheduler_module.paper_risk_limits().daily_loss_fraction == Decimal("0.005")

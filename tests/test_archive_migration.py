@@ -526,3 +526,60 @@ def test_ordinary_files_are_not_swept_up_as_secrets(relative):
     mig = load_migration_module()
 
     assert mig.classify(Path(relative), set()) != "secret"
+
+
+# --- the snapshot tree must go through the same classifier -------------------
+#
+# research_entries() hardcoded category="data" and a snapshots/ destination for
+# every file under --research-snapshot-source, so classify() never saw that
+# tree. The snapshot source is a shared directory: a .env or a .pem sitting in
+# it was archived as "data" into the live RESEARCH_SNAPSHOT_ROOT rather than to
+# backups/secrets at 0600.
+
+
+@pytest.fixture
+def snapshots_with_a_secret(tmp_path: Path) -> tuple[Path, Path]:
+    database = tmp_path / "res" / "prediction-market-edge-snapshots.sqlite"
+    make_sqlite(database, rows=2)
+    root = tmp_path / "res"
+    (root / "prediction-market-edge-log.md").write_text("relevant\n")
+    (root / ".env").write_text(f"SHARED_TREE_KEY={SECRET_VALUE}\n")
+    (root / "deploy.pem").write_text(f"-----BEGIN PRIVATE KEY-----\n{SECRET_VALUE}\n")
+    return database, root
+
+
+@pytest.mark.parametrize("name", [".env", "deploy.pem"])
+def test_a_secret_in_the_snapshot_tree_is_not_archived_as_data(
+    source, snapshots_with_a_secret, archive_root, name
+):
+    run_migration(source, snapshots_with_a_secret, archive_root, "--apply")
+
+    leaked = archive_root / "data" / "research" / "snapshots" / name
+    assert not leaked.exists(), f"{name} was archived into the live snapshot root"
+
+    backed_up = list((archive_root / "backups" / "secrets").rglob(name))
+    assert backed_up, f"{name} was not routed to the secret backup"
+    assert stat.S_IMODE(backed_up[0].stat().st_mode) == 0o600
+
+
+def test_the_snapshot_secret_is_labelled_secret_in_the_manifest(
+    source, snapshots_with_a_secret, archive_root
+):
+    run_migration(source, snapshots_with_a_secret, archive_root, "--apply")
+
+    entries = {e["relative_path"]: e for e in manifest_of(archive_root)["entries"]}
+    secrets = [e for p, e in entries.items() if p.endswith((".env", "deploy.pem"))]
+    assert secrets, "no snapshot secret reached the manifest"
+    for entry in secrets:
+        assert entry["category"] == "secret", f"{entry['relative_path']} labelled {entry['category']}"
+
+
+def test_ordinary_snapshot_files_still_reach_the_snapshot_root(
+    source, snapshots_with_a_secret, archive_root
+):
+    """The fix must not divert the research data it exists to migrate."""
+    run_migration(source, snapshots_with_a_secret, archive_root, "--apply")
+
+    assert (
+        archive_root / "data" / "research" / "snapshots" / "prediction-market-edge-log.md"
+    ).exists()

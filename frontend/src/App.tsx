@@ -975,6 +975,16 @@ function App() {
           >
             Retry
           </button>
+          {/* Same reason as the loading branch: the weather dashboard failing
+              is exactly when an operator needs to see paper-only state and the
+              kill switch. Covering only the loading branch made the
+              independence claim above true for a slow dashboard and false for
+              a broken one. */}
+          {tradingStatusQuery.data ? (
+            <div className="mt-6 w-64 text-left">
+              <TradingStatusPanel status={tradingStatusQuery.data} />
+            </div>
+          ) : null}
         </div>
       </div>
     )
@@ -1266,7 +1276,16 @@ function App() {
               {tradingPortfolioQuery.data ? (
                 <PortfolioPanel portfolio={tradingPortfolioQuery.data} />
               ) : null}
-              <UnifiedOrdersTable orders={tradingOrdersQuery.data ?? []} />
+              {/* An error and an empty list are different facts. Passing []
+                  on failure renders "no paper orders recorded yet", which
+                  asserts something the frontend does not know. */}
+              {tradingOrdersQuery.isError ? (
+                <div data-testid="orders-unavailable" className="text-[10px] text-red-400 py-3">
+                  Orders unavailable — could not read the ledger.
+                </div>
+              ) : (
+                <UnifiedOrdersTable orders={tradingOrdersQuery.data ?? []} />
+              )}
             </div>
           </div>
 

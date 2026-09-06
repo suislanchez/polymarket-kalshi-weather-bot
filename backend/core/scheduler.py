@@ -396,6 +396,12 @@ def paper_risk_limits() -> RiskLimits:
     daily_loss_fraction = Decimal("0.05") if daily_loss is None else min(
         Decimal("0.95"), max(Decimal("0.001"), daily_loss / bankroll)
     )
+    # Bounded by the declared ceiling, like max_order_notional. At stock
+    # defaults the lane derives 200/10000 = 0.02 while config advertises 0.01,
+    # so without this the enforced limit is twice the documented one.
+    daily_loss_ceiling = _positive_amount(getattr(settings, "MAX_DAILY_LOSS_FRACTION", 0.0))
+    if daily_loss_ceiling is not None:
+        daily_loss_fraction = min(daily_loss_fraction, daily_loss_ceiling)
     # The lane's own size, bounded by the global ceiling. Both directions
     # matter: a ceiling that cannot lower a lane is decorative, and a ceiling
     # that raises a tighter lane limit would loosen risk by configuration.

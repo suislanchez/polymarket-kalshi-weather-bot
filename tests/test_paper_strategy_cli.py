@@ -178,3 +178,47 @@ def test_verification_refuses_a_live_runtime(override):
 
     assert result.returncode != 0
     assert "Traceback" not in result.stderr
+
+
+# --- the two axes must not be conflated --------------------------------------
+#
+# --adapter selects the MARKET DATA source. Execution in this CLI always goes
+# through the deterministic fake paper adapter, because no production Alpaca
+# client factory exists -- AlpacaPaperAdapter is constructed nowhere outside
+# tests. Reporting "adapter: alpaca" while running the fake one, and defaulting
+# that run to the real Archives ledger, wrote simulated fills into the
+# append-only audit record this CLI claims to protect.
+
+
+def test_output_names_the_execution_adapter_separately_from_the_data_source():
+    result = run(SCRIPT, "--adapter", "fake", "--symbols", "SPY", "--once", "--json")
+
+    body = json.loads(result.stdout)
+    assert body["market_data"] == "fake"
+    assert body["execution_adapter"] == "fake", (
+        "the CLI must say which adapter actually executed"
+    )
+
+
+def test_neither_data_source_writes_to_the_real_ledger_by_default():
+    """Simulated fills must never default into the append-only audit record."""
+    for source in ("fake", "alpaca"):
+        result = run(
+            SCRIPT, "--adapter", source, "--symbols", "SPY", "--once", "--json",
+            ALPACA_API_KEY=SECRET_KEY, ALPACA_API_SECRET=SECRET_VALUE,
+        )
+        if result.returncode != 0:
+            continue  # refusing (e.g. bad credentials) also protects the ledger
+        assert json.loads(result.stdout)["ledger"] == "memory", (
+            f"--adapter {source} defaulted to the real ledger"
+        )
+
+
+def test_routing_to_the_real_ledger_requires_an_explicit_flag():
+    result = run(
+        SCRIPT, "--adapter", "fake", "--symbols", "SPY", "--once", "--json",
+        "--ledger", "archives",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["ledger"] == "archives"

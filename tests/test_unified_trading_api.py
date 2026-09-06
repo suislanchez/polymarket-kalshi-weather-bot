@@ -298,7 +298,12 @@ def test_status_reports_lane_flags_and_venue_states(client, paper_mode):
     venues = {venue["venue"]: venue for venue in body["venues"]}
     assert "polymarket_paper" in venues
     assert "kalshi_paper" in venues
-    assert all(venue["simulation"] is True for venue in venues.values())
+    # Scoped to the prediction venues, which is what the claim was always
+    # about. "all venues are simulations" only held while Alpaca -- a real
+    # paper broker -- was missing from the list entirely.
+    for name in ("polymarket_paper", "kalshi_paper"):
+        assert venues[name]["simulation"] is True, f"{name} must stay a simulation"
+    assert venues["alpaca_paper"]["simulation"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -733,3 +738,33 @@ def test_order_identity_is_not_sourced_from_adapter_metadata(client, factory, pa
     body = client.get(f"{TRADING_PREFIX}/orders").text
 
     assert "METADATA_SYMBOL_SENTINEL" not in body
+
+
+def test_status_lists_the_alpaca_venue_so_its_states_are_reachable(
+    client, paper_mode, monkeypatch
+):
+    """The dashboard distinguishes Alpaca disconnected/configured/connected.
+
+    "Connected" requires the venue to appear in status.venues with
+    execution_enabled. _venue_states() returned only the two prediction venues,
+    so that state was unreachable from any real response and the panel test that
+    asserted it did so against a hand-built fixture the API cannot produce.
+    """
+    monkeypatch.setattr(settings, "STOCK_CRYPTO_LANE_ENABLED", True)
+
+    venues = {v["venue"]: v for v in client.get(f"{TRADING_PREFIX}/status").json()["venues"]}
+
+    assert "alpaca_paper" in venues, "the Alpaca venue is absent from status"
+    assert venues["alpaca_paper"]["execution_enabled"] is True
+    assert venues["alpaca_paper"]["simulation"] is False
+
+
+def test_the_alpaca_venue_reports_monitor_only_when_the_lane_is_off(
+    client, paper_mode, monkeypatch
+):
+    monkeypatch.setattr(settings, "STOCK_CRYPTO_LANE_ENABLED", False)
+
+    venues = {v["venue"]: v for v in client.get(f"{TRADING_PREFIX}/status").json()["venues"]}
+
+    assert venues["alpaca_paper"]["execution_enabled"] is False
+    assert venues["alpaca_paper"]["monitor_only"] is True

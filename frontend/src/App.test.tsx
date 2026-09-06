@@ -61,6 +61,33 @@ function renderApp() {
   )
 }
 
+describe('App when the weather dashboard has failed', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('shows the Connection Error screen, confirming the guarded branch', async () => {
+    const api = await import('./api')
+    vi.mocked(api.fetchDashboard).mockRejectedValue(new Error('upstream down'))
+    renderApp()
+    expect(await screen.findByText(/connection error/i)).toBeInTheDocument()
+  })
+
+  it('still reports paper-only state', async () => {
+    const api = await import('./api')
+    vi.mocked(api.fetchDashboard).mockRejectedValue(new Error('upstream down'))
+    renderApp()
+    expect(await screen.findByTestId('paper-only-badge')).toHaveTextContent(/paper only/i)
+  })
+
+  it('still reports the kill switch', async () => {
+    const api = await import('./api')
+    vi.mocked(api.fetchDashboard).mockRejectedValue(new Error('upstream down'))
+    renderApp()
+    expect(await screen.findByTestId('kill-switch')).toHaveTextContent(/disengaged/i)
+  })
+})
+
 describe('App while the weather dashboard is still loading', () => {
   beforeEach(() => {
     vi.clearAllMocks()

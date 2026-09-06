@@ -11,11 +11,20 @@ data is read or any order is built. The service performs its own re-check
 immediately before submitting -- that backstop catches an Archives mount lost
 mid-run -- but it is a backstop, not the gate.
 
-**The fake adapter writes to an isolated in-memory ledger by default.** The
-Archives ledger is an append-only audit record of real paper trading. Synthetic
-smoke-test orders written into it would be indistinguishable from real ones
-afterwards, which is a worse outcome than any convenience it buys. Pass
-``--ledger archives`` to route a fake run into the real ledger deliberately.
+**``--adapter`` selects the MARKET DATA source, not the executing broker.**
+Execution always goes through the deterministic fake paper adapter, because no
+production Alpaca client factory exists in this repository --
+``AlpacaPaperAdapter`` is constructed nowhere outside tests. Real broker
+submission is ``verify_alpaca_paper.py --submit-cancel``, not this command. The
+output reports ``market_data`` and ``execution_adapter`` as separate fields so
+the distinction cannot be lost.
+
+**Every run writes to an isolated in-memory ledger by default.** The Archives
+ledger is an append-only audit record of real paper trading. Simulated fills
+written into it are indistinguishable from real ones afterwards, which is worse
+than any convenience it buys -- and it applies to both data sources, since both
+execute through the simulator. Pass ``--ledger archives`` to route a run into
+the real ledger deliberately.
 
 A run that proposes nothing exits 0. There are no forced trades, so an exit code
 that punished "declined to trade" would push an operator to loosen the thing
@@ -176,14 +185,26 @@ def fail(message: str, *, as_json: bool) -> int:
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--adapter", choices=("fake", "alpaca"), required=True)
+    parser.add_argument(
+        "--adapter",
+        choices=("fake", "alpaca"),
+        required=True,
+        help=(
+            "market data source: 'fake' is a deterministic synthetic series, "
+            "'alpaca' pulls real daily bars. Execution is the fake paper "
+            "adapter either way -- see the module docstring."
+        ),
+    )
     parser.add_argument("--symbols", nargs="+", required=True)
     parser.add_argument("--once", action="store_true", help="one pass, then exit")
     parser.add_argument(
         "--ledger",
         choices=("memory", "archives"),
         default=None,
-        help="default: memory for --adapter fake, archives for --adapter alpaca",
+        help=(
+            "default: memory. Both data sources execute through the simulator, "
+            "so neither may write to the real audit ledger without being asked."
+        ),
     )
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
@@ -210,7 +231,10 @@ def main(argv: list[str]) -> int:
             as_json=args.json,
         )
 
-    ledger = args.ledger or ("memory" if args.adapter == "fake" else "archives")
+    # Memory for both. The previous default routed --adapter alpaca into the
+    # real ledger while still executing through the simulator, which is exactly
+    # the audit contamination this CLI is supposed to prevent.
+    ledger = args.ledger or "memory"
     now = datetime.now(timezone.utc)
 
     from sqlalchemy import create_engine
@@ -267,6 +291,10 @@ def main(argv: list[str]) -> int:
     body = {
         "ok": True,
         "adapter": args.adapter,
+        "market_data": args.adapter,
+        # Named separately and explicitly: this is the adapter that actually
+        # produced the execution reports below.
+        "execution_adapter": "fake",
         "ledger": ledger,
         "symbols": list(args.symbols),
         "results": results,
@@ -275,7 +303,9 @@ def main(argv: list[str]) -> int:
     if args.json:
         print(json.dumps(body, indent=2))
     else:
-        print(f"adapter={args.adapter} ledger={ledger}")
+        print(
+            f"market data={args.adapter}  execution adapter=fake  ledger={ledger}"
+        )
         for entry in results:
             print(f"  {entry['symbol']:<10} {entry['reason']}")
         print(f"\n{body['proposals']} proposal(s). Zero proposals is a valid run.")

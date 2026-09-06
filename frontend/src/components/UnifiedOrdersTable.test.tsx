@@ -91,3 +91,13 @@ describe('UnifiedOrdersTable', () => {
     expect(screen.queryByTestId('order-client-1')).not.toBeInTheDocument()
   })
 })
+
+describe('UnifiedOrdersTable empty vs unavailable', () => {
+  it('does not claim a valid zero-order run when it has no data at all', () => {
+    // The empty state asserts a fact ("no orders recorded yet"). App must not
+    // reach it by passing [] on a failed fetch; this pins the wording so the
+    // distinction stays visible if the component is reused.
+    render(<UnifiedOrdersTable orders={[]} />)
+    expect(screen.getByTestId('orders-empty')).toHaveTextContent(/no paper orders recorded/i)
+  })
+})

@@ -1770,9 +1770,22 @@ def _archives_binding() -> dict:
 
 
 def _venue_states() -> list:
-    """Both prediction venues are internal simulations, always."""
+    """Every venue the runtime knows about, so each of its states is reachable.
+
+    Alpaca was omitted, which made the dashboard's "connected" state
+    unreachable: it requires this list to carry alpaca_paper with
+    execution_enabled. The prediction venues remain internal simulations
+    always; Alpaca is a real paper broker, hence simulation=False.
+    """
     kalshi_enabled = bool(getattr(settings, "WEATHER_KALSHI_PAPER_EXECUTION_ENABLED", False))
+    stock_lane = bool(getattr(settings, "STOCK_CRYPTO_LANE_ENABLED", False))
     return [
+        TradingVenueStateResponse(
+            venue="alpaca_paper",
+            simulation=False,
+            execution_enabled=stock_lane,
+            monitor_only=not stock_lane,
+        ),
         TradingVenueStateResponse(
             venue="polymarket_paper",
             simulation=True,
