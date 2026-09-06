@@ -62,7 +62,9 @@ function renderApp() {
 }
 
 describe('App while the weather dashboard is still loading', () => {
-  beforeEach(() => vi.clearAllMocks())
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
 
   it('shows the spinner, confirming the guarded branch is the one under test', async () => {
     renderApp()
