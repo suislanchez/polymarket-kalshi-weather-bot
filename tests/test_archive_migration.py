@@ -583,3 +583,39 @@ def test_ordinary_snapshot_files_still_reach_the_snapshot_root(
     assert (
         archive_root / "data" / "research" / "snapshots" / "prediction-market-edge-log.md"
     ).exists()
+
+
+def test_preserve_as_legacy_also_rescues_a_plain_data_file(
+    source, research, archive_root
+):
+    """The divert must not collapse onto the destination it is escaping.
+
+    A 'data' file already routes to data/legacy/<relative>, which is exactly
+    where the divert sent it -- so the divert was a no-op and the run still
+    aborted. The earlier divert test only used tradingbot.db, a 'database' that
+    routes to data/ledgers, which is why this went unnoticed.
+    """
+    run_migration(source, research, archive_root, "--apply")
+    report = archive_root / "data" / "legacy" / "reports" / "audit.md"
+    assert report.exists(), "fixture changed; this test needs a migrated data file"
+    report.write_text("this destination moved on independently\n")
+    destination_hash = sha256(report)
+
+    result = subprocess.run(
+        [
+            sys.executable, str(SCRIPT),
+            "--source", str(source),
+            "--research-db-source", str(research[0]),
+            "--research-snapshot-source", str(research[1]),
+            "--archive-root", str(archive_root),
+            "--on-existing-mismatch", "preserve-as-legacy",
+            "--apply",
+        ],
+        capture_output=True, text=True,
+    )
+
+    assert result.returncode == 0, f"the run aborted instead of diverting: {result.stderr}"
+    assert sha256(report) == destination_hash, "the diverging destination was overwritten"
+    preserved = list(archive_root.rglob("audit.md"))
+    assert len(preserved) >= 2, "the source copy was not preserved anywhere"
+    assert (archive_root / "backups" / "migration-manifest.json").exists()

@@ -395,7 +395,13 @@ def main(argv: list[str]) -> int:
             # than overwrite, and say so in the manifest: a migration that
             # silently replaced a live ledger with its own predecessor would
             # destroy exactly the history it exists to protect.
-            diverted = roots["legacy"] / entry.relative_path.replace("<", "").replace(">", "")
+            relative = entry.relative_path.replace("<", "").replace(">", "")
+            diverted = roots["legacy"] / relative
+            if diverted == target:
+                # A 'data' file already routes to data/legacy, so diverting it
+                # there lands on the very destination being escaped and the
+                # copy fails anyway. Give the superseded source its own subtree.
+                diverted = roots["legacy"] / "_superseded" / relative
             entry.diverted_from = entry.destination
             entry.destination = str(diverted)
             target = diverted
