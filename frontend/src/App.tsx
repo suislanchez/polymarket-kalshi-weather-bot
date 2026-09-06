@@ -1,8 +1,11 @@
 import { useState, useEffect, Suspense, lazy } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
-import { fetchDashboard, fetchPolymarketWeatherSourceStates, runScan, simulateTrade, startBot, stopBot } from './api'
+import { fetchDashboard, fetchPolymarketWeatherSourceStates, fetchTradingOrders, fetchTradingPortfolio, fetchTradingStatus, runScan, simulateTrade, startBot, stopBot } from './api'
 import { StatsCards } from './components/StatsCards'
+import { TradingStatusPanel } from './components/TradingStatusPanel'
+import { PortfolioPanel } from './components/PortfolioPanel'
+import { UnifiedOrdersTable } from './components/UnifiedOrdersTable'
 import { SignalsTable } from './components/SignalsTable'
 import { TradesTable } from './components/TradesTable'
 import { EquityChart } from './components/EquityChart'
@@ -784,6 +787,24 @@ function App() {
     refetchInterval: 10000,
   })
 
+  // The trading surface is read-only and independent of the weather dashboard
+  // payload, so a failure on either side must not blank the other.
+  const tradingStatusQuery = useQuery({
+    queryKey: ['trading-status'],
+    queryFn: fetchTradingStatus,
+    refetchInterval: 10000,
+  })
+  const tradingOrdersQuery = useQuery({
+    queryKey: ['trading-orders'],
+    queryFn: fetchTradingOrders,
+    refetchInterval: 10000,
+  })
+  const tradingPortfolioQuery = useQuery({
+    queryKey: ['trading-portfolio'],
+    queryFn: fetchTradingPortfolio,
+    refetchInterval: 10000,
+  })
+
   const scanMutation = useMutation({
     mutationFn: runScan,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
@@ -1216,6 +1237,27 @@ function App() {
             </div>
             <div className="flex-1 overflow-y-auto min-h-0">
               <OpenPositionRiskPanel rows={openPositionRiskRows} summary={openPositionRiskSummary} />
+            </div>
+          </div>
+
+          {/* Unified paper trading: posture, portfolio, normalized orders */}
+          <div className="flex flex-col min-h-0 border-t border-neutral-800" style={{ height: '25%' }}>
+            <div className="px-2 py-1 border-b border-neutral-800 flex items-center justify-between shrink-0">
+              <span className="text-[10px] text-neutral-500 uppercase tracking-wider">Paper Trading</span>
+              <span className="text-[10px] text-neutral-600 tabular-nums">
+                {tradingOrdersQuery.data?.length ?? 0} orders
+              </span>
+            </div>
+            <div className="flex-1 overflow-y-auto min-h-0 px-2 py-2 space-y-3">
+              {tradingStatusQuery.data ? (
+                <TradingStatusPanel status={tradingStatusQuery.data} />
+              ) : (
+                <div className="text-[10px] text-neutral-600">Trading status unavailable.</div>
+              )}
+              {tradingPortfolioQuery.data ? (
+                <PortfolioPanel portfolio={tradingPortfolioQuery.data} />
+              ) : null}
+              <UnifiedOrdersTable orders={tradingOrdersQuery.data ?? []} />
             </div>
           </div>
 

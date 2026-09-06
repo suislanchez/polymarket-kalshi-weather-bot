@@ -677,3 +677,74 @@ export interface DashboardData {
   open_position_risk_rows: OpenPositionRiskRow[]
   open_position_risk_summary: OpenPositionRiskSummary
 }
+
+// ---------------------------------------------------------------------------
+// Unified paper trading.
+//
+// Money and quantities arrive as STRINGS. The backend declares them that way
+// deliberately: a Decimal serialized through a plain dict becomes a float and
+// loses the precision the ledger preserved. Parsing them to `number` here would
+// reintroduce exactly that loss on the display side, so they stay strings and
+// are formatted, never arithmetic'd.
+// ---------------------------------------------------------------------------
+
+export interface TradingKillSwitch {
+  engaged: boolean
+  source: string
+}
+
+export interface TradingVenueState {
+  venue: string
+  simulation: boolean
+  execution_enabled: boolean
+  monitor_only: boolean
+}
+
+/** The SHAPE of the Archives binding, never its contents. */
+export interface TradingArchives {
+  root_configured: boolean
+  root_available: boolean
+  runtime_paths_contained: boolean
+  required_directories_present: boolean
+}
+
+export interface TradingStatus {
+  execution_mode: string
+  paper_only: boolean
+  kill_switch: TradingKillSwitch
+  lanes: Record<string, boolean>
+  venues: TradingVenueState[]
+  /** Presence only. The API never sends credential values. */
+  credentials: Record<string, boolean>
+  archives: TradingArchives
+}
+
+export interface UnifiedOrder {
+  client_order_id: string
+  proposal_id: string | null
+  venue: string
+  asset_class: string | null
+  symbol: string | null
+  side: string | null
+  status: string
+  broker_order_id: string | null
+  rejection_reason: string | null
+  filled_quantity: string
+  filled_notional: string
+  average_fill_price: string | null
+  occurred_at: string
+}
+
+export interface TradingPosition {
+  symbol: string
+  quantity: string
+  notional: string
+}
+
+export interface TradingPortfolio {
+  available: boolean
+  reason: string | null
+  equity: string | null
+  cash: string | null
+  positions: TradingPosition[]
+}
