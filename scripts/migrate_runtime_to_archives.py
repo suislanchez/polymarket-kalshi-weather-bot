@@ -50,9 +50,22 @@ RECREATE_DIRS = frozenset(
 )
 RECREATE_SUFFIXES = frozenset({".pyc", ".pyo"})
 
-SECRET_NAMES = frozenset({".env", ".envrc", "credentials", "credentials.json"})
-SECRET_SUFFIXES = frozenset({".pem", ".key", ".p12", ".pfx", ".keystore"})
-SECRET_DIRS = frozenset({".secrets", "secrets"})
+# Key material is recognised by name, by suffix, by directory, and by an
+# unmistakable substring. All four are needed: an SSH private key is `id_rsa`
+# with no suffix at all, and a file called `secrets.yaml` sitting in `config/`
+# matches none of the first three.
+SECRET_NAMES = frozenset(
+    {
+        ".env", ".envrc", ".netrc", ".pgpass", "credentials", "credentials.json",
+        "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
+    }
+)
+SECRET_SUFFIXES = frozenset({".pem", ".key", ".p12", ".pfx", ".keystore", ".jks", ".asc"})
+SECRET_DIRS = frozenset({".secrets", "secrets", "keys", "certs", ".ssh", ".gnupg", ".aws"})
+# Matched against the file name only. Over-classification is fail-safe -- the
+# file is copied to backups/secrets at 0600 instead of data/legacy -- but the
+# terms are kept narrow so ordinary source is not swept in.
+SECRET_NAME_FRAGMENTS = ("secret", "credential", "private_key", "privatekey")
 
 DATABASE_SUFFIXES = frozenset({".db", ".sqlite", ".sqlite3"})
 
@@ -102,11 +115,14 @@ def classify(relative: Path, tracked: set[str]) -> str:
         return "recreate"
     if parts and parts[0] == ".firecrawl":
         return "firecrawl"
+    lowered_name = relative.name.lower()
     if (
-        relative.name in SECRET_NAMES
-        or relative.name.startswith(".env.")
-        or relative.suffix in SECRET_SUFFIXES
+        lowered_name in SECRET_NAMES
+        or lowered_name.startswith(".env.")
+        or lowered_name.startswith("id_rsa")
+        or relative.suffix.lower() in SECRET_SUFFIXES
         or any(part in SECRET_DIRS for part in parts)
+        or any(fragment in lowered_name for fragment in SECRET_NAME_FRAGMENTS)
     ):
         return "secret"
     if str(relative) in tracked:

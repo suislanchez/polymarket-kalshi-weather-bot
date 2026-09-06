@@ -36,6 +36,24 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def load_migration_module():
+    """Import the script as a module.
+
+    It must be registered in sys.modules before exec_module: the script uses
+    `from __future__ import annotations`, so @dataclass resolves its string
+    annotations by looking the module up there, and fails with a bare
+    AttributeError if it is absent.
+    """
+    import importlib.util
+    import sys
+
+    spec = importlib.util.spec_from_file_location("migrate_runtime_to_archives", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def make_sqlite(path: Path, rows: int = 3) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(path)
@@ -468,3 +486,43 @@ def test_fail_remains_the_default_for_an_existing_mismatch(source, research, arc
     result = run_migration(source, research, archive_root, "--apply")
 
     assert result.returncode != 0
+
+
+# --- classification of key material ----------------------------------------
+#
+# A secret routed to data/legacy instead of backups/secrets is filed in the
+# wrong place and labelled "data" in the manifest. mkstemp creates at 0600 and
+# os.replace preserves it, so the mode happens to survive -- but relying on
+# that would make the explicit chmod the only stated guarantee and the real one
+# an accident.
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "id_rsa",                    # bare private key, no suffix
+        "id_ed25519",
+        ".ssh/id_ecdsa",
+        "config/secrets.yaml",       # named secret, not under a secrets/ dir
+        "keys/alpaca.txt",           # key material by directory
+        "certs/chain.txt",
+        ".netrc",
+        "app/service_credentials.ini",
+    ],
+)
+def test_key_material_is_classified_as_secret(relative):
+    mig = load_migration_module()
+
+    assert mig.classify(Path(relative), set()) == "secret", (
+        f"{relative} would be copied outside backups/secrets"
+    )
+
+
+@pytest.mark.parametrize(
+    "relative", ["backend/config.py", "tradingbot.db", "README.md", "reports/audit.md"]
+)
+def test_ordinary_files_are_not_swept_up_as_secrets(relative):
+    """Over-classification is fail-safe but must not swallow the whole tree."""
+    mig = load_migration_module()
+
+    assert mig.classify(Path(relative), set()) != "secret"
