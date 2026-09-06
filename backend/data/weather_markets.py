@@ -1,4 +1,5 @@
 """Weather temperature market fetcher from Polymarket."""
+import asyncio
 import httpx
 import json
 import re
@@ -9,6 +10,16 @@ from typing import List, Optional
 
 from backend.core.weather_methodology import parse_settlement_metadata
 from backend.data.polymarket_client import PolymarketClient, map_outcome_tokens
+
+# How many markets are enriched at once. Each market issues five lookups, so
+# the real ceiling on in-flight requests is this times five.
+#
+# Bounded rather than unbounded on purpose: a full slate is ~99 markets, and
+# fanning all of them out would put ~500 requests at Polymarket simultaneously.
+# The client catches its own failures and returns None, so a rate-limited run
+# would not raise -- it would quietly produce a slate with missing prices,
+# which is worse than being slow.
+MAX_CONCURRENT_MARKET_FETCHES = 6
 
 logger = logging.getLogger("trading_bot")
 
@@ -254,6 +265,10 @@ async def fetch_polymarket_weather_markets(city_keys: Optional[List[str]] = None
     try:
         async with httpx.AsyncClient(timeout=15.0, headers={"User-Agent": "Mozilla/5.0"}) as client:
             pm_client = PolymarketClient(client=client)  # type: ignore[arg-type]
+            # Collected across all three searches, then enriched in one bounded
+            # pass. Doing it per search would leave the concurrency window the
+            # width of a single event.
+            pending: List[tuple] = []
             # public-search currently surfaces active grouped daily weather slates
             # more reliably than /events?tag=Weather for Polymarket weather.
             for query in ["highest temperature", "lowest temperature", "temperature"]:
@@ -271,10 +286,7 @@ async def fetch_polymarket_weather_markets(city_keys: Optional[List[str]] = None
                             continue
                         event_slug = event.get("slug", "")
                         for market_data in event.get("markets", []) or []:
-                            market = await _parse_polymarket_weather(market_data, event_slug, city_keys, event, client, pm_client)
-                            if market and market.market_id not in seen_market_ids:
-                                seen_market_ids.add(market.market_id)
-                                markets.append(market)
+                            pending.append((market_data, event_slug, event))
                 except Exception as e:
                     logger.debug(f"Polymarket public-search for '{query}' failed: {e}")
 
@@ -295,10 +307,7 @@ async def fetch_polymarket_weather_markets(city_keys: Optional[List[str]] = None
                     for event in events:
                         event_slug = event.get("slug", "")
                         for market_data in event.get("markets", []):
-                            market = await _parse_polymarket_weather(market_data, event_slug, city_keys, event, client, pm_client)
-                            if market and market.market_id not in seen_market_ids:
-                                seen_market_ids.add(market.market_id)
-                                markets.append(market)
+                            pending.append((market_data, event_slug, event))
 
                 except Exception as e:
                     logger.debug(f"Weather market search for '{search_term}' failed: {e}")
@@ -320,13 +329,15 @@ async def fetch_polymarket_weather_markets(city_keys: Optional[List[str]] = None
                     for event in events:
                         event_slug = event.get("slug", "")
                         for market_data in event.get("markets", []):
-                            market = await _parse_polymarket_weather(market_data, event_slug, city_keys, event, client, pm_client)
-                            if market and market.market_id not in seen_market_ids:
-                                seen_market_ids.add(market.market_id)
-                                markets.append(market)
+                            pending.append((market_data, event_slug, event))
 
                 except Exception as e:
                     logger.debug(f"Weather slug search for '{slug_pattern}' failed: {e}")
+
+            for market in await _enrich_markets(pending, city_keys, client, pm_client):
+                if market and market.market_id not in seen_market_ids:
+                    seen_market_ids.add(market.market_id)
+                    markets.append(market)
 
     except Exception as e:
         logger.warning(f"Failed to fetch weather markets: {e}")
@@ -405,6 +416,43 @@ async def _fetch_yes_token_book(
     return await _fetch_outcome_token_book(market_data, client, "yes")
 
 
+async def _enrich_markets(
+    pending: List[tuple],
+    city_keys: Optional[List[str]],
+    client: httpx.AsyncClient,
+    pm_client: PolymarketClient,
+) -> List["WeatherMarket"]:
+    """Parse a collected slate concurrently, bounded, isolating each failure.
+
+    Order is preserved so the caller's first-seen dedup keeps the behaviour it
+    had when this was a serial loop.
+    """
+    if not pending:
+        return []
+
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_MARKET_FETCHES)
+
+    async def enrich(market_data, event_slug, event_data):
+        async with semaphore:
+            return await _parse_polymarket_weather(
+                market_data, event_slug, city_keys, event_data, client, pm_client
+            )
+
+    settled = await asyncio.gather(
+        *(enrich(md, slug, ev) for md, slug, ev in pending), return_exceptions=True
+    )
+
+    enriched: List["WeatherMarket"] = []
+    for result in settled:
+        if isinstance(result, BaseException):
+            # One bad market must not take the slate with it.
+            logger.debug(f"Polymarket weather market enrichment failed: {result}")
+            continue
+        if result is not None:
+            enriched.append(result)
+    return enriched
+
+
 async def _parse_polymarket_weather(
     market_data: dict,
     event_slug: str,
@@ -469,14 +517,44 @@ async def _parse_polymarket_weather(
     yes_token = outcome_token_map.get("yes")
     yes_token_id = yes_token.token_id if yes_token else None
 
+    # Five independent reads, all keyed off a market already in hand. Nothing
+    # orders them, so awaiting them in sequence cost five round trips per
+    # market for no reason.
+    book_calls = []
     if client is not None:
-        best_bid, best_ask, top_ask_size = await _fetch_yes_token_book(market_data, client)
-        no_best_bid, no_best_ask, no_top_ask_size = await _fetch_outcome_token_book(market_data, client, "no")
+        book_calls = [
+            _fetch_yes_token_book(market_data, client),
+            _fetch_outcome_token_book(market_data, client, "no"),
+        ]
+    quote_calls = []
     if pm_client is not None and yes_token_id:
-        yes_midpoint = await pm_client.fetch_midpoint(yes_token_id)
-        yes_last_price = await pm_client.fetch_price(yes_token_id)
-        recent_trades = await pm_client.fetch_trades(market=str(market_data.get("id", "")), limit=100)
-        recent_trades_count = len(recent_trades)
+        quote_calls = [
+            pm_client.fetch_midpoint(yes_token_id),
+            pm_client.fetch_price(yes_token_id),
+            pm_client.fetch_trades(market=str(market_data.get("id", "")), limit=100),
+        ]
+
+    if book_calls or quote_calls:
+        # return_exceptions keeps one failed lookup from discarding the other
+        # four. The helpers already swallow their own errors and return None,
+        # so this is the belt to that pair of braces.
+        settled = await asyncio.gather(*book_calls, *quote_calls, return_exceptions=True)
+        cursor = 0
+        if book_calls:
+            yes_book, no_book = settled[cursor], settled[cursor + 1]
+            cursor += 2
+            if not isinstance(yes_book, BaseException):
+                best_bid, best_ask, top_ask_size = yes_book
+            if not isinstance(no_book, BaseException):
+                no_best_bid, no_best_ask, no_top_ask_size = no_book
+        if quote_calls:
+            midpoint, last_price, trades = settled[cursor], settled[cursor + 1], settled[cursor + 2]
+            if not isinstance(midpoint, BaseException):
+                yes_midpoint = midpoint
+            if not isinstance(last_price, BaseException):
+                yes_last_price = last_price
+            if not isinstance(trades, BaseException):
+                recent_trades_count = len(trades)
 
     return WeatherMarket(
         slug=event_slug,

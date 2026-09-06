@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
 from typing import List, Optional
 import asyncio
+import time
 import json
 import os
 
@@ -1137,10 +1138,21 @@ async def get_weather_forecasts():
         city_keys = [c.strip() for c in settings.WEATHER_CITIES.split(",") if c.strip()]
         forecasts = []
 
-        for city_key in city_keys:
-            if city_key not in CITY_CONFIG:
+        # One ensemble fetch per city, and 17 cities is the normal
+        # configuration. They are independent, so awaiting them in sequence was
+        # 17 round trips deep for no reason. gather preserves order, so the
+        # response is identical to the serial version's.
+        known_cities = [c for c in city_keys if c in CITY_CONFIG]
+        settled = await asyncio.gather(
+            *(fetch_ensemble_forecast(city_key) for city_key in known_cities),
+            return_exceptions=True,
+        )
+
+        for forecast in settled:
+            if isinstance(forecast, BaseException):
+                # One city's upstream failing must not empty the panel.
+                logger.debug(f"Ensemble forecast failed: {forecast}")
                 continue
-            forecast = await fetch_ensemble_forecast(city_key)
             if forecast:
                 forecasts.append(WeatherForecastResponse(
                     city_key=forecast.city_key,
@@ -1373,9 +1385,58 @@ async def reset_bot(db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"Reset failed: {e}")
 
 
+# The dashboard aggregate fans out to Polymarket, Kalshi and one ensemble
+# forecast per configured city. Even fully parallelised that is tens of seconds
+# of upstream work, and the frontend polls this endpoint every 10 seconds -- so
+# uncached, every poll, reload and open tab starts its own crawl and they queue
+# behind one another. Set to 0 to disable.
+DASHBOARD_CACHE_TTL_SECONDS = float(
+    getattr(settings, "DASHBOARD_CACHE_TTL_SECONDS", 45.0)
+)
+
+# (built_at, payload)
+_dashboard_cache: Optional[tuple] = None
+_dashboard_cache_lock = asyncio.Lock()
+
+
+async def _cached_dashboard(build):
+    """Return the cached aggregate, or build it once and share the result.
+
+    The lock is the point. A plain TTL cache still lets simultaneous misses
+    each run the full crawl, which is exactly the reload-storm this endpoint
+    suffers from; single-flight collapses them into one.
+    """
+    global _dashboard_cache
+
+    ttl = DASHBOARD_CACHE_TTL_SECONDS
+    if ttl <= 0:
+        return await build()
+
+    cached = _dashboard_cache
+    if cached is not None and (time.time() - cached[0]) < ttl:
+        return cached[1]
+
+    async with _dashboard_cache_lock:
+        # Re-check: whoever held the lock may have just built it.
+        cached = _dashboard_cache
+        if cached is not None and (time.time() - cached[0]) < ttl:
+            return cached[1]
+
+        payload = await build()
+        # Only a successful build is cached; caching a failure would pin the
+        # dashboard broken for the whole TTL.
+        _dashboard_cache = (time.time(), payload)
+        return payload
+
+
 @app.get("/api/dashboard", response_model=DashboardData)
 async def get_dashboard(db: Session = Depends(get_db)):
-    """Get all dashboard data in one call."""
+    """Get all dashboard data in one call, cached briefly."""
+    return await _cached_dashboard(lambda: _build_dashboard(db))
+
+
+async def _build_dashboard(db: Session):
+    """Assemble the dashboard aggregate. Expensive; see _cached_dashboard."""
     stats = await get_stats(db)
     legacy_sections_enabled = _legacy_dashboard_sections_enabled()
 

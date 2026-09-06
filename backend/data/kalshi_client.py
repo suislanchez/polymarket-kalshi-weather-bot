@@ -1,4 +1,5 @@
 """Kalshi API client with RSA-PSS signature authentication."""
+import asyncio
 import base64
 import hashlib
 import logging
@@ -8,6 +9,15 @@ from typing import Any, Dict, Optional
 
 import httpx
 from cryptography.hazmat.primitives import hashes, serialization
+
+# Kalshi rate-limits per key. Callers of this client catch their own exceptions
+# and carry on, so an un-retried 429 does not fail a run -- it silently removes
+# whatever that request was fetching. Retrying here protects every caller.
+#
+# Bounded, because retrying forever would hang a request instead of degrading
+# it, and the dashboard is already the slowest thing in the app.
+RATE_LIMIT_MAX_ATTEMPTS = 4
+RATE_LIMIT_BACKOFF_SECONDS = 0.5
 from cryptography.hazmat.primitives.asymmetric import padding
 
 from backend.config import settings
@@ -83,10 +93,31 @@ class KalshiClient:
         if kalshi_credentials_present():
             headers = self._sign_request("GET", full_path)
 
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.get(url, headers=headers, params=params)
-            response.raise_for_status()
-            return response.json()
+        for attempt in range(1, RATE_LIMIT_MAX_ATTEMPTS + 1):
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.get(url, headers=headers, params=params)
+                if (
+                    response.status_code == 429
+                    and attempt < RATE_LIMIT_MAX_ATTEMPTS
+                ):
+                    # Exponential, and honouring Retry-After when the server
+                    # bothers to send one.
+                    delay = RATE_LIMIT_BACKOFF_SECONDS * (2 ** (attempt - 1))
+                    retry_after = response.headers.get("Retry-After")
+                    if retry_after:
+                        try:
+                            delay = max(delay, float(retry_after))
+                        except (TypeError, ValueError):
+                            pass
+                    logger.debug(
+                        f"Kalshi rate limited on {path}; retrying in {delay}s "
+                        f"(attempt {attempt}/{RATE_LIMIT_MAX_ATTEMPTS})"
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                # Every other status, and the final 429, raise as before.
+                response.raise_for_status()
+                return response.json()
 
     async def get_markets(self, params: Optional[Dict[str, Any]] = None) -> dict:
         """Fetch markets with optional filters."""

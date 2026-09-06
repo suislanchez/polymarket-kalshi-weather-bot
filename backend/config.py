@@ -54,6 +54,11 @@ class Settings(BaseSettings):
     # Unified paper-trading runtime. Live trading is rejected during app startup.
     EXECUTION_MODE: str = "paper"
     LIVE_TRADING_ENABLED: bool = False
+    # How long /api/dashboard may serve a cached aggregate. The endpoint fans
+    # out to Polymarket, Kalshi and one forecast per city; the frontend polls
+    # it every 10s. 0 disables the cache.
+    DASHBOARD_CACHE_TTL_SECONDS: float = 45.0
+
     ACTIVE_PRODUCT_SCOPE: str = "unified_paper"
     STOCK_CRYPTO_LANE_ENABLED: bool = False
     # Bounded cadence for the unified stock/crypto paper lane. Only consulted

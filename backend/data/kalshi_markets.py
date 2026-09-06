@@ -1,4 +1,5 @@
 """Kalshi weather temperature market fetcher."""
+import asyncio
 from dataclasses import dataclass
 import logging
 import re
@@ -8,6 +9,11 @@ from typing import Dict, List, Optional
 from backend.data.kalshi_client import KalshiClient
 from backend.data.weather_markets import WeatherMarket
 from backend.data.weather_station_map import KALSHI_WEATHER_STATION_MAP, get_station_mapping_for_city
+
+# How many cities are crawled at once. Each city walks its series with cursor
+# pagination and fetches an orderbook per market, so this bounds a fan-out that
+# is several requests deep per city rather than one.
+MAX_CONCURRENT_CITY_FETCHES = 4
 
 logger = logging.getLogger("trading_bot")
 
@@ -203,7 +209,8 @@ async def fetch_kalshi_weather_markets(
 
     cities = city_keys or list(CITY_SERIES.keys())
 
-    for city_key in cities:
+    async def collect_city(city_key: str) -> List[WeatherMarket]:
+        city_markets: List[WeatherMarket] = []
         station_mapping = get_station_mapping_for_city(city_key)
         if station_mapping:
             series_tickers = station_mapping.series_tickers
@@ -211,7 +218,7 @@ async def fetch_kalshi_weather_markets(
             primary_series = CITY_SERIES.get(city_key)
             series_tickers = (primary_series,) if primary_series else ()
         if not series_tickers:
-            continue
+            return city_markets
 
         city_name = CITY_NAMES.get(city_key, city_key)
 
@@ -280,7 +287,7 @@ async def fetch_kalshi_weather_markets(
                         no_best_bid = max(0.0, 1.0 - book_top.best_ask) if book_top.best_ask is not None else None
                         no_best_ask = max(0.0, 1.0 - book_top.best_bid) if book_top.best_bid is not None else None
 
-                        markets.append(WeatherMarket(
+                        city_markets.append(WeatherMarket(
                             slug=ticker,
                             market_id=ticker,
                             platform="kalshi",
@@ -317,6 +324,28 @@ async def fetch_kalshi_weather_markets(
 
             except Exception as e:
                 logger.warning(f"Failed to fetch Kalshi markets for {city_key} ({series}): {e}")
+
+        return city_markets
+
+    # Cities are independent -- each queries its own series and its own
+    # orderbooks, and nothing downstream depends on completion order. Bounded
+    # so a 17-city slate does not open 17 paginated crawls at Kalshi at once.
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_CITY_FETCHES)
+
+    async def guarded(city_key: str) -> List[WeatherMarket]:
+        async with semaphore:
+            return await collect_city(city_key)
+
+    # gather preserves input order, so the resulting slate is ordered exactly as
+    # the serial loop left it.
+    for result in await asyncio.gather(
+        *(guarded(city_key) for city_key in cities), return_exceptions=True
+    ):
+        if isinstance(result, BaseException):
+            # One city failing must not cost the rest of the slate.
+            logger.warning(f"Kalshi city fetch failed: {result}")
+            continue
+        markets.extend(result)
 
     logger.info(f"Found {len(markets)} Kalshi weather markets")
     return markets
