@@ -1,5 +1,5 @@
 # Backend
-fastapi==0.109.0
+fastapi==0.109.1
 uvicorn[standard]==0.27.0
 sqlalchemy==2.0.25
 psycopg2-binary==2.9.9
@@ -8,7 +8,6 @@ pydantic-settings==2.1.0
 
 # Data fetching
 httpx==0.26.0
-aiohttp==3.9.1
 
 # Kalshi API auth (RSA-PSS signatures)
 cryptography>=42.0.0
@@ -29,8 +28,7 @@ groq>=0.4.0
 structlog>=24.1.0
 
 # Utils
-python-dotenv==1.0.0
-orjson==3.9.10
+python-dotenv==1.2.2
 
 # Unified prediction-market SDK (optional integration layer)
 pmxt==2.46.14
