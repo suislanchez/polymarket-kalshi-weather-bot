@@ -389,18 +389,33 @@ def paper_risk_limits() -> RiskLimits:
     daily_loss_fraction = Decimal("0.05") if daily_loss is None else min(
         Decimal("0.95"), max(Decimal("0.001"), daily_loss / bankroll)
     )
-    max_order = _positive_amount(getattr(settings, "WEATHER_MAX_TRADE_SIZE", 0.0)) or Decimal("100")
+    # The lane's own size, bounded by the global ceiling. Both directions
+    # matter: a ceiling that cannot lower a lane is decorative, and a ceiling
+    # that raises a tighter lane limit would loosen risk by configuration.
+    lane_order_size = (
+        _positive_amount(getattr(settings, "WEATHER_MAX_TRADE_SIZE", 0.0)) or Decimal("100")
+    )
+    order_ceiling = _positive_amount(getattr(settings, "MAX_ORDER_NOTIONAL_USD", 0.0))
+    max_order = lane_order_size if order_ceiling is None else min(lane_order_size, order_ceiling)
+
+    def configured_fraction(name: str, fallback: str) -> Decimal:
+        """Read a declared risk fraction, falling back only if it is unusable."""
+        value = _positive_amount(getattr(settings, name, 0.0))
+        return Decimal(fallback) if value is None else value
+
     stock_symbols, crypto_symbols = partition_stock_and_crypto_symbols(
         stock_crypto_symbols()
     )
     return RiskLimits(
         max_order_notional=max_order,
-        max_order_equity_fraction=Decimal("0.03"),
-        max_symbol_exposure_fraction=Decimal("0.10"),
-        max_gross_exposure_fraction=Decimal("0.50"),
-        max_crypto_exposure_fraction=Decimal("0.20"),
+        max_order_equity_fraction=configured_fraction("MAX_ORDER_EQUITY_FRACTION", "0.01"),
+        max_symbol_exposure_fraction=configured_fraction("MAX_SYMBOL_EXPOSURE_FRACTION", "0.05"),
+        max_gross_exposure_fraction=configured_fraction("MAX_GROSS_EXPOSURE_FRACTION", "0.25"),
+        max_crypto_exposure_fraction=configured_fraction("MAX_CRYPTO_EXPOSURE_FRACTION", "0.10"),
         daily_loss_fraction=daily_loss_fraction,
-        stock_crypto_max_quote_age_seconds=_STOCK_CRYPTO_MAX_QUOTE_AGE_SECONDS,
+        stock_crypto_max_quote_age_seconds=configured_fraction(
+            "MAX_MARKET_DATA_AGE_SECONDS", str(_STOCK_CRYPTO_MAX_QUOTE_AGE_SECONDS)
+        ),
         weather_max_quote_age_seconds=_WEATHER_MAX_QUOTE_AGE_SECONDS,
         allowed_stock_symbols=stock_symbols,
         allowed_crypto_symbols=crypto_symbols,
