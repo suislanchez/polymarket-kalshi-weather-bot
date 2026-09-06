@@ -294,8 +294,9 @@ def route_one_real_order(session, *, metadata=None, rationale=None):
     Hand-built UnifiedOrder rows would encode this author's beliefs about four
     things the schema actually decides -- that Decimals are strings, that
     occurred_at round-trips through a TypeDecorator, that the ORM attribute is
-    order_metadata while the column is metadata, and that there is no symbol
-    column at all. Driving the real service asserts against the real shape.
+    order_metadata while the column is metadata, and that the identity columns
+    are populated from the domain order rather than the report. Driving the
+    real service asserts against the real shape.
     """
     from backend.core import scheduler as scheduler_module
     from backend.trading.risk import PortfolioState
@@ -684,3 +685,33 @@ def test_the_run_route_commits_what_the_lane_wrote(
 
     with factory() as verifier:
         assert verifier.query(TradingEvent).count() == 1
+
+
+def test_orders_carry_the_instrument_identity(client, factory, paper_mode):
+    """An order row that cannot name its instrument is not auditable.
+
+    unified_orders is keyed by client_order_id and the event log by
+    proposal_id, so before these columns existed nothing connected a filled
+    order to the symbol and direction it was placed for.
+    """
+    with factory() as session:
+        route_one_real_order(session)
+
+    order = client.get(f"{TRADING_PREFIX}/orders").json()[0]
+
+    assert order["symbol"], "the order does not say which instrument it was for"
+    assert order["side"] in ("buy", "sell")
+    assert order["asset_class"] == "prediction_weather"
+    assert order["proposal_id"], "the order cannot be joined to its audit events"
+
+
+def test_order_identity_is_not_sourced_from_adapter_metadata(client, factory, paper_mode):
+    """The identity columns must come from the typed order, not report metadata."""
+    with factory() as session:
+        route_one_real_order(
+            session, metadata={"symbol": "METADATA_SYMBOL_SENTINEL"}
+        )
+
+    body = client.get(f"{TRADING_PREFIX}/orders").text
+
+    assert "METADATA_SYMBOL_SENTINEL" not in body

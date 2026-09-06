@@ -778,7 +778,11 @@ class UnifiedOrderResponse(BaseModel):
     """
 
     client_order_id: str
+    proposal_id: Optional[str] = None
     venue: str
+    asset_class: Optional[str] = None
+    symbol: Optional[str] = None
+    side: Optional[str] = None
     status: str
     broker_order_id: Optional[str] = None
     rejection_reason: Optional[str] = None

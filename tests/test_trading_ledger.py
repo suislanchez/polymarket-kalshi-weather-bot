@@ -869,3 +869,93 @@ def test_ledger_and_projection_do_not_mutate_legacy_trade_or_signal(session: Ses
     session.refresh(signal)
     assert (trade.market_type, trade.entry_price, trade.size, trade.settled) == before_trade
     assert (signal.market_type, signal.edge, signal.executed) == before_signal
+
+
+# ---------------------------------------------------------------------------
+# Order identity on the projection.
+#
+# unified_orders is keyed by client_order_id; the trading event log is keyed by
+# proposal_id. Nothing joined the two, so an operator reading the orders table
+# could see that *an* order was filled without being able to say which symbol
+# or which direction. The identity fields come from NormalizedOrder -- typed
+# domain values -- and never from report.metadata, which adapters populate
+# freely and which the API deliberately refuses to echo.
+# ---------------------------------------------------------------------------
+
+from backend.trading.domain import AssetClass, NormalizedOrder, Side
+
+
+def normalized_order(**overrides: object) -> NormalizedOrder:
+    values: dict[str, object] = {
+        "client_order_id": "client-1",
+        "proposal_id": "proposal-1",
+        "venue": Venue.ALPACA_PAPER,
+        "asset_class": AssetClass.STOCK,
+        "symbol": "SPY",
+        "side": Side.BUY,
+        "status": OrderStatus.SUBMITTED,
+        "created_at": NOW,
+        "quantity": Decimal("3"),
+    }
+    values.update(overrides)
+    return NormalizedOrder(**values)
+
+
+def test_projection_records_the_orders_identity_from_the_domain_order(session):
+    upsert_order_projection(session, execution_report(), normalized_order())
+
+    row = session.query(UnifiedOrder).one()
+    assert row.symbol == "SPY"
+    assert row.side == "buy"
+    assert row.asset_class == "stock"
+    assert row.proposal_id == "proposal-1"
+
+
+def test_identity_survives_a_later_report_that_carries_no_order(session):
+    """Fills arrive as reports alone; they must not blank the identity."""
+    upsert_order_projection(session, execution_report(), normalized_order())
+    upsert_order_projection(
+        session,
+        execution_report(
+            status=OrderStatus.FILLED,
+            filled_quantity=Decimal("3"),
+            filled_notional=Decimal("300.00"),
+            average_fill_price=Decimal("100.00"),
+        ),
+    )
+
+    row = session.query(UnifiedOrder).one()
+    assert row.status == "filled"
+    assert row.symbol == "SPY", "a fill report erased the symbol"
+    assert row.side == "buy"
+
+
+def test_conflicting_identity_for_one_client_order_id_is_refused(session):
+    """The same client order cannot become a different instrument."""
+    upsert_order_projection(session, execution_report(), normalized_order())
+
+    with pytest.raises(LedgerValidationError):
+        upsert_order_projection(
+            session, execution_report(), normalized_order(symbol="QQQ")
+        )
+
+
+def test_identity_is_not_taken_from_adapter_controlled_metadata(session):
+    """An adapter that invents a symbol in metadata cannot set the column."""
+    upsert_order_projection(
+        session,
+        execution_report(metadata={"symbol": "EVIL", "side": "sell"}),
+        normalized_order(),
+    )
+
+    row = session.query(UnifiedOrder).one()
+    assert row.symbol == "SPY"
+    assert row.side == "buy"
+
+
+def test_projection_refuses_an_order_for_a_different_client_order_id(session):
+    """The order and the report must describe the same order."""
+    with pytest.raises(LedgerValidationError):
+        upsert_order_projection(
+            session, execution_report(), normalized_order(client_order_id="client-2")
+        )

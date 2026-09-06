@@ -141,7 +141,7 @@ class _Adapter(Protocol):
 
 
 AppendEvent = Callable[[Session, LedgerEventInput], object]
-UpsertProjection = Callable[[Session, ExecutionReport], object]
+UpsertProjection = Callable[[Session, ExecutionReport, NormalizedOrder], object]
 Clock = Callable[[], datetime]
 KillSwitch = Callable[[], bool]
 ArchivesGuard = Callable[[], None]
@@ -374,7 +374,7 @@ class PaperExecutionService:
         report = self._submit(adapter, order, now)
         for event_type in self._report_event_types(report):
             record(event_type, report.occurred_at, self._report_payload(report, event_type))
-        self._upsert_projection(self._session, report)
+        self._upsert_projection(self._session, report, order)
 
         result = PaperExecutionResult(proposal, decision, order, report)
         self._cache_pending_result(
@@ -994,7 +994,7 @@ class PaperExecutionService:
             report.occurred_at,
             self._report_payload(report, "order_rejected"),
         )
-        self._upsert_projection(self._session, report)
+        self._upsert_projection(self._session, report, order)
         return PaperExecutionResult(proposal, decision, order, report)
 
     @staticmethod

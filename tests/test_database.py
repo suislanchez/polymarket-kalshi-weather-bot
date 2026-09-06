@@ -185,6 +185,10 @@ def test_new_table_names_columns_indexes_and_constraints(fresh_database):
     assert set(order_columns) == {
         "id",
         "client_order_id",
+        "proposal_id",
+        "asset_class",
+        "symbol",
+        "side",
         "venue",
         "status",
         "broker_order_id",
@@ -200,6 +204,11 @@ def test_new_table_names_columns_indexes_and_constraints(fresh_database):
     assert order_columns["status"]["nullable"] is False
     assert order_columns["filled_quantity"]["nullable"] is False
     assert order_columns["filled_notional"]["nullable"] is False
+    # The identity columns are nullable on purpose: a later execution report
+    # updates the row without restating the order, and rows written before
+    # these columns existed cannot be backfilled.
+    for identity_column in ("proposal_id", "asset_class", "symbol", "side"):
+        assert order_columns[identity_column]["nullable"] is True
     order_unique_sets = {
         tuple(constraint["column_names"])
         for constraint in schema.get_unique_constraints("unified_orders")

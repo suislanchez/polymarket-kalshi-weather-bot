@@ -259,6 +259,14 @@ class UnifiedOrder(Base):
 
     id = Column(Integer, primary_key=True)
     client_order_id = Column(String, nullable=False, index=True)
+    # Order identity, copied from the typed NormalizedOrder at submit time.
+    # Nullable because a later execution report updates the same row without
+    # restating the order, and because rows written before these columns
+    # existed cannot be reconstructed.
+    proposal_id = Column(String, nullable=True, index=True)
+    asset_class = Column(String, nullable=True)
+    symbol = Column(String, nullable=True)
+    side = Column(String, nullable=True)
     venue = Column(String, nullable=False)
     status = Column(String, nullable=False)
     broker_order_id = Column(String, nullable=True)
@@ -324,6 +332,28 @@ def init_db():
 def ensure_schema():
     """Ensure newer schema fields exist even if migration wasn't run."""
     inspector = inspect(engine)
+
+    # Order identity columns on unified_orders. Added after the table shipped,
+    # so an existing ledger needs them applied in place. This runs before the
+    # trades inspection below, which returns early on a database that has no
+    # legacy trades table -- a path that would otherwise skip this migration.
+    try:
+        unified_order_columns = [col["name"] for col in inspector.get_columns("unified_orders")]
+    except Exception:
+        unified_order_columns = []
+
+    if unified_order_columns:
+        with engine.connect() as conn:
+            for col in ("proposal_id", "asset_class", "symbol", "side"):
+                if col not in unified_order_columns:
+                    try:
+                        with conn.begin():
+                            conn.execute(
+                                text(f"ALTER TABLE unified_orders ADD COLUMN {col} VARCHAR")
+                            )
+                    except Exception:
+                        pass  # column already exists
+
     try:
         columns = [col["name"] for col in inspector.get_columns("trades")]
     except Exception:

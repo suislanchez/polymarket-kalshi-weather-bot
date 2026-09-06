@@ -1797,7 +1797,11 @@ def _unified_order_response(row) -> UnifiedOrderResponse:
     """Explicit projection. order_metadata is deliberately not carried."""
     return UnifiedOrderResponse(
         client_order_id=str(row.client_order_id),
+        proposal_id=(str(row.proposal_id) if row.proposal_id else None),
         venue=str(row.venue),
+        asset_class=(str(row.asset_class) if row.asset_class else None),
+        symbol=(str(row.symbol) if row.symbol else None),
+        side=(str(row.side) if row.side else None),
         status=str(row.status),
         broker_order_id=(str(row.broker_order_id) if row.broker_order_id else None),
         rejection_reason=(str(row.rejection_reason) if row.rejection_reason else None),

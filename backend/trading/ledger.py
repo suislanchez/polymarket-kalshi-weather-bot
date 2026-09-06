@@ -19,7 +19,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from backend.models.database import TradingEvent, UnifiedOrder
-from backend.trading.domain import ExecutionReport
+from backend.trading.domain import ExecutionReport, NormalizedOrder
 
 
 ZERO_CHAIN_HASH = "0" * 64
@@ -400,8 +400,19 @@ def verify_event_chain(session: Session, aggregate_id: str) -> ChainVerification
     return ChainVerification(normalized_aggregate_id, True, count, None)
 
 
-def upsert_order_projection(session: Session, report: ExecutionReport) -> UnifiedOrder:
-    """Create or update one client-order projection, flushing without commit."""
+def upsert_order_projection(
+    session: Session,
+    report: ExecutionReport,
+    order: NormalizedOrder | None = None,
+) -> UnifiedOrder:
+    """Create or update one client-order projection, flushing without commit.
+
+    order supplies the instrument identity. It is optional because a later
+    execution report -- a fill arriving after submission -- updates the same row
+    without restating the order. The identity is read only from the typed
+    domain order; report.metadata is adapter-controlled and is never a
+    source for these columns.
+    """
     validation_failed = False
     validated = None
     try:
@@ -424,6 +435,18 @@ def upsert_order_projection(session: Session, report: ExecutionReport) -> Unifie
         average_fill_price = (
             None if report.average_fill_price is None else str(report.average_fill_price)
         )
+        identity = None
+        if order is not None:
+            if type(order) is not NormalizedOrder:
+                raise ValueError
+            if order.client_order_id != client_order_id:
+                raise ValueError
+            identity = (
+                _nonblank_string(order.proposal_id),
+                _nonblank_string(order.asset_class.value),
+                _nonblank_string(order.symbol),
+                _nonblank_string(order.side.value),
+            )
         validated = (
             client_order_id,
             occurred_at,
@@ -435,6 +458,7 @@ def upsert_order_projection(session: Session, report: ExecutionReport) -> Unifie
             filled_quantity,
             filled_notional,
             average_fill_price,
+            identity,
         )
     except Exception:
         validation_failed = True
@@ -451,6 +475,7 @@ def upsert_order_projection(session: Session, report: ExecutionReport) -> Unifie
         filled_quantity,
         filled_notional,
         average_fill_price,
+        identity,
     ) = validated
 
     projection = _storage_scalar(
@@ -473,6 +498,25 @@ def upsert_order_projection(session: Session, report: ExecutionReport) -> Unifie
     projection.average_fill_price = average_fill_price
     projection.occurred_at = occurred_at
     projection.order_metadata = order_metadata
+
+    if identity is not None:
+        existing = (
+            projection.proposal_id,
+            projection.asset_class,
+            projection.symbol,
+            projection.side,
+        )
+        if any(value is not None for value in existing) and existing != identity:
+            raise LedgerValidationError(
+                "order identity conflicts with existing projection"
+            ) from None
+        (
+            projection.proposal_id,
+            projection.asset_class,
+            projection.symbol,
+            projection.side,
+        ) = identity
+
     _add_and_flush(session, pending, "order projection conflicts with existing data")
     return projection
 
