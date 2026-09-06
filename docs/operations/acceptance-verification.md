@@ -35,7 +35,7 @@ $PY scripts/verify_alpaca_paper.py --read-only
 
 ## What the last accepted run established
 
-- Python suite: 1402 passed. Frontend: 24 passed, production build clean.
+- Python suite: 1405 passed. Frontend: 24 passed, production build clean.
 - Migration manifest: 18/18 copied destinations rehash to their recorded
   SHA-256; 498 databases pass `PRAGMA integrity_check`.
 - With Archives unavailable, `POST /api/trading/paper/run` returns 409
