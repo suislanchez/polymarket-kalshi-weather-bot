@@ -1,0 +1,36 @@
+{
+  "name": "T2",
+  "title": "Sep 1 chat 10:45 PM: 8 sector ETFs SMA 20/100 (basket confirmed from chat: XLB XLE XLF XLK XLI XLV XLY XLP)",
+  "source": "Strategy Lab conversation 2026-09-01 22:45 PT",
+  "template": "sma_crossover",
+  "asset_class": "equity",
+  "symbols": [
+    "XLB",
+    "XLE",
+    "XLF",
+    "XLK",
+    "XLI",
+    "XLV",
+    "XLY",
+    "XLP"
+  ],
+  "start": "2023-09-05",
+  "end": "2026-09-01",
+  "params": {
+    "fast": 20,
+    "slow": 100
+  },
+  "rules": {
+    "hold": 30,
+    "stop_pct": 0,
+    "target_pct": 0,
+    "notional": 500,
+    "cost_bps": 10
+  },
+  "reported": {
+    "trades": 40,
+    "net_pnl": 490.26,
+    "win_rate_pct": 55.0,
+    "avg_return_pct": 2.45
+  }
+}

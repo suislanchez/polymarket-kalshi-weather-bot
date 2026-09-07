@@ -1,0 +1,46 @@
+{
+  "name": "S4",
+  "title": "AI infrastructure & power 30-session volume-2.0 breakout",
+  "template": "breakout",
+  "asset_class": "equity",
+  "symbols": [
+    "VRT",
+    "ANET",
+    "SMCI",
+    "DELL",
+    "CEG",
+    "VST",
+    "NRG",
+    "ETN"
+  ],
+  "start": "2023-09-05",
+  "end": "2026-09-04",
+  "params": {
+    "n": 30,
+    "volume_multiple": 2.0
+  },
+  "rules": {
+    "hold": 30,
+    "stop_pct": 20,
+    "target_pct": 0,
+    "notional": 1000,
+    "cost_bps": 50
+  },
+  "variants": [
+    {
+      "label": "A",
+      "params": {
+        "n": 50
+      },
+      "note": "50-session lookback, same volume filter"
+    },
+    {
+      "label": "B",
+      "params": {
+        "n": 30,
+        "volume_multiple": 0
+      },
+      "note": "30-session lookback, no volume filter"
+    }
+  ]
+}

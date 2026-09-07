@@ -1,0 +1,13 @@
+{
+  "name": "T6",
+  "title": "Library row 'SEC-Frozen Negative-Trial Recovery v212' (Lab-run pullback recovery; parameters from the matching shadow config)",
+  "source": "Shared library 2026-09-06 + Tradebot shadow config 'Negative-trial recovery'",
+  "template": "pullback_recovery",
+  "asset_class": "equity",
+  "symbols": ["NKTR", "CRBP", "MCRB", "PRTA", "MGNX", "RIGL"],
+  "start": "2023-09-05",
+  "end": "2026-09-02",
+  "params": {"lookback": 20, "pullback_pct": 5, "fast": 5, "slow": 20, "volume_multiple": 0},
+  "rules": {"hold": 15, "stop_pct": 20, "target_pct": 25, "notional": 1000, "cost_bps": 25},
+  "reported": {"trades": 119, "net_pnl": 1159.84, "win_rate_pct": 49.58, "max_dd_pct": -48.88}
+}

@@ -1,0 +1,33 @@
+{
+  "name": "T5",
+  "title": "Quantum breakout shadow config (trade count / win rate only)",
+  "source": "Tradebot shadow card config, dashboard 2026-09-06",
+  "template": "breakout",
+  "asset_class": "equity",
+  "symbols": [
+    "IONQ",
+    "RGTI",
+    "QBTS",
+    "QUBT",
+    "ARQQ"
+  ],
+  "start": "2023-09-05",
+  "end": "2026-09-01",
+  "params": {
+    "n": 30,
+    "volume_multiple": 2.0
+  },
+  "rules": {
+    "hold": 30,
+    "stop_pct": 20,
+    "target_pct": 0,
+    "notional": 1000,
+    "cost_bps": 100
+  },
+  "reported": {
+    "trades": 11,
+    "net_pnl": 16142.52,
+    "win_rate_pct": 54.55,
+    "note": "standalone P&L uses $5,000 isolated accounting, so only trade count and win rate are comparable"
+  }
+}

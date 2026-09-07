@@ -1,0 +1,48 @@
+{
+  "name": "S9",
+  "title": "Crypto-equity 15% pullback, reclaim 20-SMA",
+  "template": "pullback_recovery",
+  "asset_class": "equity",
+  "symbols": [
+    "MSTR",
+    "COIN",
+    "MARA",
+    "RIOT",
+    "CLSK",
+    "HUT",
+    "IREN",
+    "WULF"
+  ],
+  "start": "2023-09-05",
+  "end": "2026-09-04",
+  "params": {
+    "lookback": 20,
+    "pullback_pct": 15,
+    "fast": 5,
+    "slow": 20,
+    "volume_multiple": 0
+  },
+  "rules": {
+    "hold": 30,
+    "stop_pct": 25,
+    "target_pct": 0,
+    "notional": 1000,
+    "cost_bps": 50
+  },
+  "variants": [
+    {
+      "label": "A",
+      "params": {
+        "pullback_pct": 10
+      },
+      "note": "10% pullback"
+    },
+    {
+      "label": "B",
+      "params": {
+        "pullback_pct": 20
+      },
+      "note": "20% pullback"
+    }
+  ]
+}

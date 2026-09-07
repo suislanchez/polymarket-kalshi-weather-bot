@@ -1,0 +1,46 @@
+{
+  "name": "S2",
+  "title": "Leveraged-ETF 50-session volume breakout",
+  "template": "breakout",
+  "asset_class": "equity",
+  "symbols": [
+    "TQQQ",
+    "UPRO",
+    "SOXL",
+    "FAS",
+    "LABU",
+    "TECL",
+    "CURE",
+    "NUGT"
+  ],
+  "start": "2023-09-05",
+  "end": "2026-09-04",
+  "params": {
+    "n": 50,
+    "volume_multiple": 1.5
+  },
+  "rules": {
+    "hold": 30,
+    "stop_pct": 20,
+    "target_pct": 0,
+    "notional": 1000,
+    "cost_bps": 25
+  },
+  "variants": [
+    {
+      "label": "A",
+      "params": {
+        "n": 30
+      },
+      "note": "30-session lookback, same volume filter"
+    },
+    {
+      "label": "B",
+      "params": {
+        "n": 50,
+        "volume_multiple": 0
+      },
+      "note": "50-session lookback, no volume filter"
+    }
+  ]
+}

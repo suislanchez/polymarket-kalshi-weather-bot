@@ -1,0 +1,36 @@
+{
+  "name": "T1",
+  "title": "Sep 1 chat 10:46 PM: 8-stock 60-session breakout proxy",
+  "source": "Strategy Lab conversation 2026-09-01 22:46 PT",
+  "template": "breakout",
+  "asset_class": "equity",
+  "symbols": [
+    "AAPL",
+    "MSFT",
+    "GOOGL",
+    "AMZN",
+    "META",
+    "NVDA",
+    "V",
+    "JPM"
+  ],
+  "start": "2023-09-05",
+  "end": "2026-09-01",
+  "params": {
+    "n": 60,
+    "volume_multiple": 0
+  },
+  "rules": {
+    "hold": 30,
+    "stop_pct": 8,
+    "target_pct": 20,
+    "notional": 500,
+    "cost_bps": 10
+  },
+  "reported": {
+    "trades": 95,
+    "net_pnl": 1442.21,
+    "win_rate_pct": 64.21,
+    "avg_return_pct": 3.04
+  }
+}

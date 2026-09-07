@@ -1,0 +1,34 @@
+{
+  "name": "T3",
+  "title": "Sep 1 chat 10:41 PM: SPY EFA AGG DBC GLD VNQ SMA 20/100",
+  "source": "Strategy Lab conversation 2026-09-01 22:41 PT",
+  "template": "sma_crossover",
+  "asset_class": "equity",
+  "symbols": [
+    "SPY",
+    "EFA",
+    "AGG",
+    "DBC",
+    "GLD",
+    "VNQ"
+  ],
+  "start": "2023-09-05",
+  "end": "2026-09-01",
+  "params": {
+    "fast": 20,
+    "slow": 100
+  },
+  "rules": {
+    "hold": 30,
+    "stop_pct": 0,
+    "target_pct": 0,
+    "notional": 500,
+    "cost_bps": 10
+  },
+  "reported": {
+    "trades": 20,
+    "net_pnl": 22.38,
+    "win_rate_pct": 40.0,
+    "avg_return_pct": 0.22
+  }
+}

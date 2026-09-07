@@ -1,0 +1,49 @@
+{
+  "name": "T4",
+  "title": "Leveraged Bull Pullback executable config (per-ETF fixed $1,000 closed P&L)",
+  "source": "Tradebot card config, dashboard 2026-09-06",
+  "template": "pullback_recovery",
+  "asset_class": "equity",
+  "symbols": [
+    "TQQQ",
+    "UPRO",
+    "SOXL",
+    "FAS",
+    "LABU",
+    "TECL",
+    "CURE",
+    "NUGT"
+  ],
+  "start": "2023-09-05",
+  "end": "2026-09-04",
+  "params": {
+    "lookback": 20,
+    "pullback_pct": 10,
+    "fast": 10,
+    "slow": 30,
+    "volume_multiple": 0
+  },
+  "rules": {
+    "hold": 30,
+    "stop_pct": 20,
+    "target_pct": 20,
+    "notional": 1000,
+    "cost_bps": 10
+  },
+  "reported": {
+    "trades": 71,
+    "net_pnl": 2989.73,
+    "win_rate_pct": 81.82,
+    "note": "71 supported closed trades; 3 open excluded; net_pnl is the sum of the listed per-ETF figures; win rate is from the shared replay (11 trades) so weight it lightly"
+  },
+  "reported_by_symbol": {
+    "CURE": 220.03,
+    "FAS": -41.37,
+    "LABU": -163.72,
+    "NUGT": 775.12,
+    "SOXL": 537.57,
+    "TECL": 49.57,
+    "TQQQ": 661.17,
+    "UPRO": 951.36
+  }
+}
