@@ -1,11 +1,12 @@
 import { useState, useEffect, Suspense, lazy } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
-import { fetchDashboard, fetchPolymarketWeatherSourceStates, fetchTradingOrders, fetchTradingPortfolio, fetchTradingStatus, runScan, simulateTrade, startBot, stopBot } from './api'
+import { fetchDashboard, fetchMirrorSnapshot, fetchPolymarketWeatherSourceStates, fetchTradingOrders, fetchTradingPortfolio, fetchTradingStatus, runScan, simulateTrade, startBot, stopBot } from './api'
 import { StatsCards } from './components/StatsCards'
 import { TradingStatusPanel } from './components/TradingStatusPanel'
 import { PortfolioPanel } from './components/PortfolioPanel'
 import { UnifiedOrdersTable } from './components/UnifiedOrdersTable'
+import { MirrorPanel } from './components/MirrorPanel'
 import { SignalsTable } from './components/SignalsTable'
 import { TradesTable } from './components/TradesTable'
 import { EquityChart } from './components/EquityChart'
@@ -804,6 +805,12 @@ function App() {
     queryFn: fetchTradingPortfolio,
     refetchInterval: 10000,
   })
+  // A pushed observation; it changes rarely and is never portfolio state.
+  const robinhoodMirrorQuery = useQuery({
+    queryKey: ['trading-mirror', 'robinhood'],
+    queryFn: () => fetchMirrorSnapshot('robinhood'),
+    refetchInterval: 60000,
+  })
 
   const scanMutation = useMutation({
     mutationFn: runScan,
@@ -956,7 +963,7 @@ function App() {
               here rather than waiting behind an unrelated payload. */}
           {tradingStatusQuery.data ? (
             <div className="mt-6 w-64 text-left">
-              <TradingStatusPanel status={tradingStatusQuery.data} />
+              <TradingStatusPanel status={tradingStatusQuery.data} mirrors={{ robinhood: robinhoodMirrorQuery.data }} />
             </div>
           ) : null}
         </div>
@@ -982,7 +989,7 @@ function App() {
               a broken one. */}
           {tradingStatusQuery.data ? (
             <div className="mt-6 w-64 text-left">
-              <TradingStatusPanel status={tradingStatusQuery.data} />
+              <TradingStatusPanel status={tradingStatusQuery.data} mirrors={{ robinhood: robinhoodMirrorQuery.data }} />
             </div>
           ) : null}
         </div>
@@ -1269,12 +1276,15 @@ function App() {
             </div>
             <div className="flex-1 overflow-y-auto min-h-0 px-2 py-2 space-y-3">
               {tradingStatusQuery.data ? (
-                <TradingStatusPanel status={tradingStatusQuery.data} />
+                <TradingStatusPanel status={tradingStatusQuery.data} mirrors={{ robinhood: robinhoodMirrorQuery.data }} />
               ) : (
                 <div className="text-[10px] text-neutral-600">Trading status unavailable.</div>
               )}
               {tradingPortfolioQuery.data ? (
                 <PortfolioPanel portfolio={tradingPortfolioQuery.data} />
+              ) : null}
+              {robinhoodMirrorQuery.data ? (
+                <MirrorPanel snapshot={robinhoodMirrorQuery.data} />
               ) : null}
               {/* An error and an empty list are different facts. Passing []
                   on failure renders "no paper orders recorded yet", which

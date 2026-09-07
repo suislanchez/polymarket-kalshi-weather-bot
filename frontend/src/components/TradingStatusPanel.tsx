@@ -1,7 +1,9 @@
-import type { TradingStatus, TradingVenueState } from '../types'
+import type { MirrorSnapshot, TradingStatus, TradingVenueState } from '../types'
 
 interface Props {
   status: TradingStatus
+  /** Optional read-only mirrors keyed by venue; changes a deferred row's state text only. */
+  mirrors?: Partial<Record<string, MirrorSnapshot>>
 }
 
 /** Venues the system will not connect until a separately approved phase. */
@@ -36,7 +38,7 @@ function simulationState(venue: TradingVenueState): { state: string; tone: strin
   return { state: venue.execution_enabled ? 'Enabled' : 'Disabled', tone: '#a1a1aa' }
 }
 
-function venueRows(status: TradingStatus): VenueRow[] {
+function venueRows(status: TradingStatus, mirrors?: Props['mirrors']): VenueRow[] {
   const rows: VenueRow[] = []
 
   const alpaca = alpacaState(status)
@@ -54,13 +56,20 @@ function venueRows(status: TradingStatus): VenueRow[] {
   }
 
   for (const venue of DEFERRED_VENUES) {
-    rows.push({ key: venue, label: venue, state: 'Deferred / disabled', tone: '#525252' })
+    // A mirror never makes a deferred venue executable. It only changes what
+    // the row says: the system can *see* the account, not act on it.
+    const mirror = mirrors?.[venue]
+    rows.push(
+      mirror?.available
+        ? { key: venue, label: venue, state: 'Read-only mirror', tone: '#d97706' }
+        : { key: venue, label: venue, state: 'Deferred / disabled', tone: '#525252' },
+    )
   }
 
   return rows
 }
 
-export function TradingStatusPanel({ status }: Props) {
+export function TradingStatusPanel({ status, mirrors }: Props) {
   const paperOnly = status.paper_only
   const killEngaged = status.kill_switch.engaged
   const archivesAvailable = status.archives.root_available && status.archives.root_configured
@@ -100,7 +109,7 @@ export function TradingStatusPanel({ status }: Props) {
       </div>
 
       <div className="space-y-1 border-t border-neutral-800 pt-2">
-        {venueRows(status).map((row) => (
+        {venueRows(status, mirrors).map((row) => (
           <div
             key={row.key}
             data-testid={`venue-${row.key}`}

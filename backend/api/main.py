@@ -82,6 +82,7 @@ from backend.api.schemas import (
     TradingKillSwitchResponse,
     TradingPortfolioResponse,
     TradingPositionResponse,
+    MirrorSnapshotResponse,
     TradingStatusResponse,
     TradingVenueStateResponse,
     UnifiedOrderResponse,
@@ -2110,6 +2111,31 @@ def _paper_run_response(outcome) -> PaperRunResponse:
             )
         )
     return PaperRunResponse(ran=True, proposals=outcome.proposals, results=results)
+
+
+@app.get("/api/trading/mirror/{venue}", response_model=MirrorSnapshotResponse)
+async def get_trading_mirror(venue: str, db: Session = Depends(get_db)):
+    """The latest read-only snapshot an agent pushed for a mirrored venue.
+
+    Served from its own table, never from the risk gate's portfolio state, and
+    every account identifier in it was masked before it was stored.
+    """
+    from backend.trading.mirror import MIRROR_VENUES, latest_snapshot
+
+    if venue not in MIRROR_VENUES:
+        raise HTTPException(status_code=404, detail="not a mirror venue")
+    row = latest_snapshot(db, venue)
+    if row is None:
+        return MirrorSnapshotResponse(available=False, venue=venue)
+    payload = row.payload if isinstance(row.payload, dict) else {}
+    return MirrorSnapshotResponse(
+        available=True,
+        venue=venue,
+        captured_at=row.captured_at,
+        source_agent=str(row.source_agent),
+        total_value=str(row.total_value),
+        accounts=payload.get("accounts", []),
+    )
 
 
 @app.post("/api/trading/paper/run")

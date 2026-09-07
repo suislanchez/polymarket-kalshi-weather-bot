@@ -33,6 +33,7 @@ vi.mock('./api', () => ({
   fetchDashboard: vi.fn(() => new Promise(() => {})),
   fetchPolymarketWeatherSourceStates: vi.fn(() => new Promise(() => {})),
   fetchTradingStatus: vi.fn(async () => STATUS),
+  fetchMirrorSnapshot: vi.fn(async () => ({ available: false, venue: 'robinhood', captured_at: null, source_agent: null, total_value: null, accounts: [] })),
   fetchTradingOrders: vi.fn(async () => []),
   fetchTradingPortfolio: vi.fn(async () => ({
     available: false,

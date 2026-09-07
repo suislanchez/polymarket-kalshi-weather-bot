@@ -278,6 +278,28 @@ class UnifiedOrder(Base):
     order_metadata = Column("metadata", JSON, nullable=False)
 
 
+class MirroredPortfolioSnapshot(Base):
+    """A read-only mirror of an external brokerage account, as reported by an agent.
+
+    This table is deliberately outside the trading domain's portfolio state.
+    Nothing in risk.py or service.py reads it: a snapshot is an *observation*
+    an agent pushed, not account state the risk gate may size against. The
+    payload is the already-normalised, already-masked form -- raw broker
+    responses never reach this row.
+    """
+
+    __tablename__ = "mirrored_portfolio_snapshots"
+
+    id = Column(Integer, primary_key=True)
+    venue = Column(String, nullable=False, index=True)
+    captured_at = Column(UTCDateTime(), nullable=False, index=True)
+    source_agent = Column(String, nullable=False)
+    account_count = Column(Integer, nullable=False)
+    position_count = Column(Integer, nullable=False)
+    total_value = Column(String, nullable=False)
+    payload = Column(JSON, nullable=False)
+
+
 class AILog(Base):
     """Log of all AI API calls."""
     __tablename__ = "ai_logs"

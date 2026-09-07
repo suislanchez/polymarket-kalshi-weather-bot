@@ -170,6 +170,10 @@ def test_the_trading_surface_is_exactly_the_declared_allowlist():
         (f"{TRADING_PREFIX}/events", "GET"),
         (f"{TRADING_PREFIX}/portfolio", "GET"),
         (f"{TRADING_PREFIX}/paper/run", "POST"),
+        # Read-only mirror of an external brokerage, served from its own table.
+        # GET only: there is deliberately no route that accepts a snapshot over
+        # HTTP -- ingestion is scripts/mirror_robinhood.py, run by an agent.
+        (f"{TRADING_PREFIX}/mirror/{{venue}}", "GET"),
     }
 
 

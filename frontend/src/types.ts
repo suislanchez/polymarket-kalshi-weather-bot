@@ -748,3 +748,32 @@ export interface TradingPortfolio {
   cash: string | null
   positions: TradingPosition[]
 }
+
+/** A read-only observation an agent pushed for an external brokerage. Not portfolio state. */
+export interface MirroredPosition {
+  asset_class: string
+  symbol: string
+  quantity: string
+  average_cost: string | null
+}
+
+export interface MirroredAccount {
+  label: string
+  /** Already masked to the last four digits. */
+  account_ref: string
+  tradable_by_agent: boolean
+  currency: string
+  total_value: string
+  cash: string
+  buying_power: string
+  positions: MirroredPosition[]
+}
+
+export interface MirrorSnapshot {
+  available: boolean
+  venue: string
+  captured_at: string | null
+  source_agent: string | null
+  total_value: string | null
+  accounts: MirroredAccount[]
+}

@@ -822,6 +822,37 @@ class TradingPortfolioResponse(BaseModel):
     positions: List[TradingPositionResponse] = []
 
 
+class MirroredPositionResponse(BaseModel):
+    asset_class: str
+    symbol: str
+    quantity: str
+    average_cost: Optional[str] = None
+
+
+class MirroredAccountResponse(BaseModel):
+    """account_ref is already masked to the last four digits; never a number."""
+
+    label: str
+    account_ref: str
+    tradable_by_agent: bool
+    currency: str
+    total_value: str
+    cash: str
+    buying_power: str
+    positions: List[MirroredPositionResponse]
+
+
+class MirrorSnapshotResponse(BaseModel):
+    """A read-only observation an agent pushed. Not portfolio state."""
+
+    available: bool
+    venue: str
+    captured_at: Optional[datetime] = None
+    source_agent: Optional[str] = None
+    total_value: Optional[str] = None
+    accounts: List[MirroredAccountResponse] = []
+
+
 class PaperRunResultResponse(BaseModel):
     """One proposal's outcome. Never the domain model.
 

@@ -132,3 +132,24 @@ describe('TradingStatusPanel', () => {
     expect(container.textContent).not.toMatch(/secret/i)
   })
 })
+
+
+describe('TradingStatusPanel with a mirror', () => {
+  const mirror = {
+    available: true, venue: 'robinhood', captured_at: '2026-09-07T00:40:00Z',
+    source_agent: 'claude-desktop-mcp', total_value: '1', accounts: [],
+  }
+
+  it('shows a mirrored deferred venue as read-only, never as connected', () => {
+    render(<TradingStatusPanel status={status()} mirrors={{ robinhood: mirror }} />)
+    const state = within(screen.getByTestId('venue-robinhood')).getByTestId('venue-state')
+    expect(state).toHaveTextContent(/read-only mirror/i)
+    expect(state).not.toHaveTextContent(/connected/i)
+  })
+
+  it('leaves an unmirrored deferred venue as deferred', () => {
+    render(<TradingStatusPanel status={status()} mirrors={{ robinhood: mirror }} />)
+    expect(within(screen.getByTestId('venue-coinbase')).getByTestId('venue-state'))
+      .toHaveTextContent(/deferred \/ disabled/i)
+  })
+})
