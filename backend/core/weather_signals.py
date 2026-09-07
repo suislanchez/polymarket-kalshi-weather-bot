@@ -480,38 +480,50 @@ def _annotate_bucket_set_sanity(signals: List[WeatherTradingSignal]) -> None:
             signal.kelly_fraction = 0.0
 
 
-async def scan_for_weather_signals() -> List[WeatherTradingSignal]:
+async def scan_for_weather_signals(
+    markets: Optional[List[WeatherMarket]] = None,
+) -> List[WeatherTradingSignal]:
     """
     Scan weather markets and generate ensemble-based signals.
+
+    ``markets`` lets a caller that has already fetched the slate hand it in.
+    The dashboard fetches both venues for its divergence panel and then called
+    this, which fetched both again -- Kalshi alone is ~11s even parallelised.
+    ``None`` means fetch; an empty list means there is nothing to scan and is
+    respected as such.
     """
     signals = []
 
     city_keys = [c.strip() for c in settings.WEATHER_CITIES.split(",") if c.strip()]
 
     logger.info("=" * 50)
-    logger.info("WEATHER SCAN: Fetching temperature markets...")
 
-    markets = []
+    if markets is None:
+        logger.info("WEATHER SCAN: Fetching temperature markets...")
+        markets = []
 
-    # Polymarket
-    try:
-        poly_markets = await fetch_polymarket_weather_markets(city_keys)
-        markets.extend(poly_markets)
-        logger.info(f"Polymarket: {len(poly_markets)} weather markets")
-    except Exception as e:
-        logger.error(f"Failed to fetch Polymarket weather markets: {e}")
-
-    # Kalshi public market-data endpoints do not require credentials. Keep this
-    # path read-only/simulation-safe and do not block weather discovery on
-    # private exchange account setup.
-    if settings.KALSHI_ENABLED or settings.WEATHER_RESEARCH_ENABLED:
+        # Polymarket
         try:
-            from backend.data.kalshi_markets import fetch_kalshi_weather_markets
-            kalshi_markets = await fetch_kalshi_weather_markets(city_keys)
-            markets.extend(kalshi_markets)
-            logger.info(f"Kalshi: {len(kalshi_markets)} weather markets")
+            poly_markets = await fetch_polymarket_weather_markets(city_keys)
+            markets.extend(poly_markets)
+            logger.info(f"Polymarket: {len(poly_markets)} weather markets")
         except Exception as e:
-            logger.error(f"Failed to fetch Kalshi weather markets: {e}")
+            logger.error(f"Failed to fetch Polymarket weather markets: {e}")
+
+        # Kalshi public market-data endpoints do not require credentials. Keep this
+        # path read-only/simulation-safe and do not block weather discovery on
+        # private exchange account setup.
+        if settings.KALSHI_ENABLED or settings.WEATHER_RESEARCH_ENABLED:
+            try:
+                from backend.data.kalshi_markets import fetch_kalshi_weather_markets
+                kalshi_markets = await fetch_kalshi_weather_markets(city_keys)
+                markets.extend(kalshi_markets)
+                logger.info(f"Kalshi: {len(kalshi_markets)} weather markets")
+            except Exception as e:
+                logger.error(f"Failed to fetch Kalshi weather markets: {e}")
+    else:
+        logger.info("WEATHER SCAN: using %s pre-fetched markets", len(markets))
+        markets = list(markets)
 
     logger.info(f"Found {len(markets)} total weather temperature markets")
 

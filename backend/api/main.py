@@ -176,6 +176,11 @@ WEATHER_MARKET_TYPES = ("weather", "kalshi_weather", "polymarket_weather", "temp
 ENTERTAINMENT_MARKET_TYPES = ("entertainment", "rt", "rotten_tomatoes", "box_office")
 
 
+# Scopes that explicitly ask for the legacy BTC / RT-entertainment sections.
+# "all" is pinned by an existing test as legacy-on.
+LEGACY_DASHBOARD_SCOPES = frozenset({"all", "legacy", "btc"})
+
+
 def _legacy_dashboard_sections_enabled() -> bool:
     """Return whether /api/dashboard should include legacy BTC/RT sections.
 
@@ -184,7 +189,12 @@ def _legacy_dashboard_sections_enabled() -> bool:
     """
     scope = (getattr(settings, "ACTIVE_PRODUCT_SCOPE", "weather") or "weather").strip().lower()
     explicit_legacy = bool(getattr(settings, "DASHBOARD_LEGACY_SECTIONS_ENABLED", False))
-    return explicit_legacy or scope not in {"weather", "weather_only", "weather-only"}
+    # Legacy is on when explicitly enabled, or when the scope names the legacy
+    # product. It used to be "on for any scope that isn't weather", and the
+    # rename to unified_paper silently switched every BTC/RT section -- and
+    # ~17s of fetching per cold load -- back on while both off-switches in
+    # config said otherwise. An allowlist cannot be flipped by a rename.
+    return explicit_legacy or scope in LEGACY_DASHBOARD_SCOPES
 
 
 def _dashboard_legacy_note() -> Optional[str]:
@@ -1435,6 +1445,109 @@ async def get_dashboard(db: Session = Depends(get_db)):
     return await _cached_dashboard(lambda: _build_dashboard(db))
 
 
+from backend.core.weather_divergence import find_cross_venue_weather_divergences
+from backend.core.weather_signals import scan_for_weather_signals
+from backend.data.weather import CITY_CONFIG, fetch_ensemble_forecast
+from backend.data.weather_markets import fetch_polymarket_weather_markets
+from backend.data.kalshi_markets import fetch_kalshi_weather_markets
+
+
+async def _fetch_weather_slate(city_keys):
+    """Both venues, once each, at the same time.
+
+    A venue that fails contributes nothing rather than taking the other venue
+    down with it -- the same posture the scan takes.
+    """
+
+    async def polymarket():
+        return await fetch_polymarket_weather_markets(city_keys)
+
+    async def kalshi():
+        if not (settings.KALSHI_ENABLED or settings.WEATHER_RESEARCH_ENABLED):
+            return []
+        return await fetch_kalshi_weather_markets(city_keys)
+
+    settled = await asyncio.gather(polymarket(), kalshi(), return_exceptions=True)
+    markets = []
+    for venue, result in zip(("polymarket", "kalshi"), settled):
+        if isinstance(result, BaseException):
+            logger.warning(f"Weather slate: {venue} fetch failed: {result}")
+            continue
+        markets.extend(result)
+    return markets
+
+
+async def _fetch_forecast_panel(city_keys):
+    """One ensemble forecast per configured city, fetched together."""
+    known = [c for c in city_keys if c in CITY_CONFIG]
+    settled = await asyncio.gather(
+        *(fetch_ensemble_forecast(c) for c in known), return_exceptions=True
+    )
+    panel = []
+    for forecast in settled:
+        if isinstance(forecast, BaseException):
+            logger.debug(f"Ensemble forecast failed: {forecast}")
+            continue
+        if not forecast:
+            continue
+        panel.append(WeatherForecastResponse(
+            city_key=forecast.city_key,
+            city_name=forecast.city_name,
+            target_date=forecast.target_date.isoformat(),
+            mean_high=forecast.mean_high,
+            std_high=forecast.std_high,
+            mean_low=forecast.mean_low,
+            std_low=forecast.std_low,
+            num_members=forecast.num_members,
+            ensemble_agreement=forecast.ensemble_agreement,
+        ))
+    return panel
+
+
+async def _build_weather_section(city_keys):
+    """Signals, divergences and forecasts, fetching each venue exactly once.
+
+    Previously scan_for_weather_signals() fetched both venues, then this code
+    fetched both again for the divergence panel, then fetched 17 forecasts one
+    at a time, all in sequence. The slate is now fetched once and handed to the
+    scan; the scan and the forecast panel are independent and run together.
+    """
+    markets = await _fetch_weather_slate(city_keys)
+
+    scanned, forecasts = await asyncio.gather(
+        scan_for_weather_signals(markets=markets),
+        _fetch_forecast_panel(city_keys),
+        return_exceptions=True,
+    )
+    if isinstance(scanned, BaseException):
+        logger.warning(f"Weather signal scan failed: {scanned}")
+        scanned = []
+    if isinstance(forecasts, BaseException):
+        logger.warning(f"Forecast panel failed: {forecasts}")
+        forecasts = []
+
+    signals_data = [_weather_signal_to_response(s) for s in scanned]
+    divergences_data = [
+        WeatherDivergenceResponse(
+            city_key=row.city_key,
+            target_date=row.target_date.isoformat(),
+            metric=row.metric,
+            direction=row.direction,
+            threshold_f=row.threshold_f,
+            polymarket_market_id=row.polymarket_market_id,
+            kalshi_market_id=row.kalshi_market_id,
+            polymarket_yes_price=row.polymarket_yes_price,
+            kalshi_yes_price=row.kalshi_yes_price,
+            probability_gap=row.probability_gap,
+            buy_yes_venue=row.buy_yes_venue,
+            sell_yes_venue=row.sell_yes_venue,
+            min_volume=row.min_volume,
+        )
+        for row in find_cross_venue_weather_divergences(markets)[:20]
+    ]
+    return signals_data, divergences_data, forecasts
+
+
 async def _build_dashboard(db: Session):
     """Assemble the dashboard aggregate. Expensive; see _cached_dashboard."""
     stats = await get_stats(db)
@@ -1595,57 +1708,16 @@ async def _build_dashboard(db: Session):
     weather_forecasts_data = []
     if settings.WEATHER_ENABLED:
         try:
-            from backend.core.weather_divergence import find_cross_venue_weather_divergences
-            from backend.core.weather_signals import scan_for_weather_signals
-            from backend.data.weather import fetch_ensemble_forecast, CITY_CONFIG
-            from backend.data.weather_markets import fetch_polymarket_weather_markets
-            from backend.data.kalshi_markets import fetch_kalshi_weather_markets
-
-            wx_signals = await scan_for_weather_signals()
-            weather_signals_data = [_weather_signal_to_response(s) for s in wx_signals]
-
             city_keys = [c.strip() for c in settings.WEATHER_CITIES.split(",") if c.strip()]
-            markets = await fetch_polymarket_weather_markets(city_keys)
-            if settings.KALSHI_ENABLED or settings.WEATHER_RESEARCH_ENABLED:
-                markets.extend(await fetch_kalshi_weather_markets(city_keys))
-            divergences = find_cross_venue_weather_divergences(markets)
-            weather_divergences_data = [
-                WeatherDivergenceResponse(
-                    city_key=row.city_key,
-                    target_date=row.target_date.isoformat(),
-                    metric=row.metric,
-                    direction=row.direction,
-                    threshold_f=row.threshold_f,
-                    polymarket_market_id=row.polymarket_market_id,
-                    kalshi_market_id=row.kalshi_market_id,
-                    polymarket_yes_price=row.polymarket_yes_price,
-                    kalshi_yes_price=row.kalshi_yes_price,
-                    probability_gap=row.probability_gap,
-                    buy_yes_venue=row.buy_yes_venue,
-                    sell_yes_venue=row.sell_yes_venue,
-                    min_volume=row.min_volume,
-                )
-                for row in divergences[:20]
-            ]
-
-            for city_key in city_keys:
-                if city_key not in CITY_CONFIG:
-                    continue
-                forecast = await fetch_ensemble_forecast(city_key)
-                if forecast:
-                    weather_forecasts_data.append(WeatherForecastResponse(
-                        city_key=forecast.city_key,
-                        city_name=forecast.city_name,
-                        target_date=forecast.target_date.isoformat(),
-                        mean_high=forecast.mean_high,
-                        std_high=forecast.std_high,
-                        mean_low=forecast.mean_low,
-                        std_low=forecast.std_low,
-                        num_members=forecast.num_members,
-                        ensemble_agreement=forecast.ensemble_agreement,
-                    ))
-        except Exception:
-            pass
+            (
+                weather_signals_data,
+                weather_divergences_data,
+                weather_forecasts_data,
+            ) = await _build_weather_section(city_keys)
+        except Exception as error:
+            # The dashboard must not 500 because weather did; but an empty
+            # panel with no trace of why is how the 108s load hid for so long.
+            logger.warning(f"Dashboard weather section failed: {error}")
 
     signal_review_queue = SignalReviewQueueResponse(
         **summarize_signal_review_queue(
