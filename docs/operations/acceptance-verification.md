@@ -82,3 +82,14 @@ Use `--copies`, and build at the final path. A symlinked venv still reaches its
 base tree at runtime, and renaming a venv afterwards leaves every `bin/` shebang
 pointing at the old absolute path — `pytest`, `pip-audit` and `bandit` break
 while `python -m pytest` keeps working, which is a confusing way to find out.
+
+## Robinhood read-only mirror (2026-09-07)
+
+`scripts/mirror_robinhood.py --from-raw <json> --source-agent <name>` ingests
+the raw outputs of the Robinhood MCP read tools, masks account numbers to the
+last four digits, and records a snapshot served at
+`GET /api/trading/mirror/robinhood`. It is an observation, never portfolio
+state: the risk gate cannot read it (tested), and no route accepts a snapshot
+over HTTP. Any test exercising `--ledger archives` must use a throwaway ledger
+under `$ROOT/.tmp/test-ledgers/` and assert the live event count unchanged —
+see report §19 for why. Report §18–§19 carry the evidence.
