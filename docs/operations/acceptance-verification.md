@@ -44,8 +44,8 @@ $PY scripts/verify_alpaca_paper.py --read-only
   submit/cancel leaving zero open orders and zero positions.
 - Nine starlette advisories remain, blocked by FastAPI's `starlette<0.36.0`
   pin. Exposure and mitigation are recorded in the report.
-- `/api/dashboard` takes ~105s because it fetches a Polymarket midpoint per
-  market serially inside the request. Pre-existing, and the largest open issue.
+- `/api/dashboard` cold load is 12.6s (was 108s) and cached reloads are
+  instant; see report §16–§17, including the legacy-gate defect found on the way.
 
 Task 18 (local-storage switchover) has not been performed. It needs explicit
 approval, and the plan's original `$SOURCE` path no longer exists.
