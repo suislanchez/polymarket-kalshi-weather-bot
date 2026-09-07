@@ -239,11 +239,58 @@ def test_neither_data_source_writes_to_the_real_ledger_by_default():
         )
 
 
-def test_routing_to_the_real_ledger_requires_an_explicit_flag():
-    result = run(
-        SCRIPT, "--adapter", "fake", "--symbols", "SPY", "--once", "--json",
-        "--ledger", "archives",
-    )
+def _live_ledger_event_count() -> int:
+    """Rows in the CONFIGURED ledger -- the one production writes to."""
+    import sqlite3
+    from backend.config import Settings
 
-    assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout)["ledger"] == "archives"
+    path = Settings().DATABASE_URL.replace("sqlite:///", "")
+    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        return connection.execute("SELECT COUNT(*) FROM trading_events").fetchone()[0]
+    finally:
+        connection.close()
+
+
+def test_routing_to_the_real_ledger_requires_an_explicit_flag():
+    """--ledger archives must be honoured -- against a THROWAWAY ledger.
+
+    An earlier version of this test ran the flag against the configured
+    database, which is the production audit ledger. Every suite run appended a
+    synthetic proposal/rejection pair to an append-only, hash-chained record:
+    thirty-two rows over one day before it was noticed. Preflight requires the
+    ledger to live under the Archives root, so the throwaway goes in
+    $ROOT/.tmp rather than tmp_path, and the live count is asserted unchanged.
+    """
+    import uuid
+    from backend.config import Settings
+
+    live_before = _live_ledger_event_count()
+    archives_root = Path(Settings().TRADING_ARCHIVES_ROOT)
+    scratch_dir = Path(Settings().TRADING_DATA_ROOT).parent / ".tmp" / "test-ledgers"
+    assert archives_root in scratch_dir.parents, "throwaway ledger must sit under the Archives root"
+    scratch_dir.mkdir(parents=True, exist_ok=True)
+    throwaway = scratch_dir / f"cli-{uuid.uuid4().hex}.sqlite"
+    # Preflight checks the ledger's integrity BEFORE the script initialises
+    # it, so a path that does not exist yet is refused as "missing". Create the
+    # schema first; the script's own init_db() is idempotent on top of it.
+    from sqlalchemy import create_engine
+    from backend.models.database import Base
+    engine = create_engine(f"sqlite:///{throwaway}")
+    Base.metadata.create_all(engine)
+    engine.dispose()
+    try:
+        result = run(
+            SCRIPT, "--adapter", "fake", "--symbols", "SPY", "--once", "--json",
+            "--ledger", "archives",
+            DATABASE_URL=f"sqlite:///{throwaway}",
+        )
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout)["ledger"] == "archives"
+        assert throwaway.exists(), "the archives-ledger path was not the one written to"
+    finally:
+        throwaway.unlink(missing_ok=True)
+
+    assert _live_ledger_event_count() == live_before, (
+        "a test wrote to the production audit ledger"
+    )
