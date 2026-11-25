@@ -125,20 +125,34 @@ async def fetch_kalshi_weather_markets(
                     if parsed["target_date"] < today:
                         continue
 
-                    yes_price = (m.get("yes_ask") or 0) / 100.0
-                    no_price = (m.get("no_ask") or 0) / 100.0
+                    # Kalshi returns prices in dollars as strings (e.g., "0.0100")
+                    # Use mid prices: (bid + ask) / 2 for each side
+                    # For binary markets: YES mid + NO mid ≈ 1.0
+                    yes_bid = float(m.get("yes_bid_dollars", 0) or 0)
+                    yes_ask = float(m.get("yes_ask_dollars", 0) or 0)
+                    no_bid = float(m.get("no_bid_dollars", 0) or 0)
+                    no_ask = float(m.get("no_ask_dollars", 0) or 0)
 
-                    # Fallback to last/mid prices
-                    if yes_price <= 0:
-                        yes_price = (m.get("last_price") or 50) / 100.0
-                    if no_price <= 0:
-                        no_price = 1.0 - yes_price
+                    # Calculate mid prices
+                    yes_mid = (yes_bid + yes_ask) / 2 if (yes_bid > 0 or yes_ask > 0) else 0
+                    no_mid = (no_bid + no_ask) / 2 if (no_bid > 0 or no_ask > 0) else 0
+
+                    # Prefer YES mid, fallback to 1 - NO mid, fallback to last price
+                    if yes_mid > 0:
+                        yes_price = yes_mid
+                    elif no_mid > 0:
+                        yes_price = 1.0 - no_mid
+                    else:
+                        last = float(m.get("last_price_dollars", 0) or 0)
+                        yes_price = last if last > 0 else 0.5
+
+                    no_price = 1.0 - yes_price
 
                     # Skip fully resolved or illiquid
                     if yes_price > 0.98 or yes_price < 0.02:
                         continue
 
-                    volume = float(m.get("volume", 0) or 0)
+                    volume = float(m.get("volume_fp", 0) or 0)
 
                     markets.append(WeatherMarket(
                         slug=ticker,

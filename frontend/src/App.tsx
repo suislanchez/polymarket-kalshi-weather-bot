@@ -1,4 +1,4 @@
-import { useState, useEffect, Suspense, lazy } from 'react'
+import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import { fetchDashboard, runScan, simulateTrade, startBot, stopBot } from './api'
@@ -13,8 +13,6 @@ import { WeatherPanel } from './components/WeatherPanel'
 import { EdgeDistribution } from './components/EdgeDistribution'
 import { formatCountdown } from './utils'
 import type { BtcWindow } from './types'
-
-const GlobeView = lazy(() => import('./components/GlobeView').then(m => ({ default: m.GlobeView })))
 
 function LiveClock() {
   const [time, setTime] = useState(new Date())
@@ -106,6 +104,7 @@ function App() {
   const windows = data?.windows ?? []
   const weatherSignals = data?.weather_signals ?? []
   const weatherForecasts = data?.weather_forecasts ?? []
+  const weatherMarkets = data?.weather_markets ?? []
 
   const stats = data?.stats ?? {
     is_running: false,
@@ -267,28 +266,28 @@ function App() {
 
         {/* ===== CENTER COLUMN ===== */}
         <div className="flex flex-col min-h-0 border-r border-neutral-800">
-          {/* Globe - top 60% */}
-          <div className="relative" style={{ height: '58%' }}>
-            <div className="absolute inset-0">
-              <Suspense fallback={
-                <div className="w-full h-full flex items-center justify-center bg-black">
-                  <span className="text-[10px] text-neutral-600 uppercase tracking-wider">Loading Globe...</span>
+          {/* Weather Markets - top ~62% */}
+          <div className="relative flex-1 min-h-0">
+            <div className="absolute inset-0 flex flex-col">
+              <div className="px-2 py-1 border-b border-neutral-800 flex items-center justify-between shrink-0">
+                <span className="text-[10px] text-neutral-500 uppercase tracking-wider">Weather Markets</span>
+                <div className="flex items-center gap-3">
+                  <span className="text-neutral-600 text-[9px] uppercase tracking-wider">
+                    {weatherMarkets.length} live{weatherForecasts.length > 0 ? ` · ${weatherForecasts.length} cities` : ''}
+                  </span>
+                  <span className="px-1.5 py-0.5 text-[8px] font-bold uppercase bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                    {actionableCount} actionable
+                  </span>
                 </div>
-              }>
-                <GlobeView forecasts={weatherForecasts} signals={weatherSignals} />
-              </Suspense>
-            </div>
-            {/* Globe overlay: actionable count */}
-            <div className="absolute top-2 left-2 z-10">
-              <div className="px-2 py-1 bg-black/80 border border-neutral-800 text-[10px]">
-                <span className="text-neutral-500 uppercase tracking-wider mr-2">Markets</span>
-                <span className="text-amber-500 tabular-nums">{actionableCount} actionable</span>
+              </div>
+              <div className="flex-1 min-h-0 overflow-y-auto">
+                <WeatherPanel forecasts={weatherForecasts} signals={weatherSignals} markets={weatherMarkets} />
               </div>
             </div>
           </div>
 
-          {/* Bottom panels - 3 side by side */}
-          <div className="flex-1 min-h-0 grid grid-cols-3 border-t border-neutral-800">
+          {/* Bottom panels - 2 side by side */}
+          <div className="flex-1 min-h-0 grid grid-cols-2 border-t border-neutral-800">
             {/* Edge Distribution */}
             <div className="border-r border-neutral-800 flex flex-col min-h-0">
               <div className="px-2 py-1 border-b border-neutral-800 shrink-0">
@@ -300,7 +299,7 @@ function App() {
             </div>
 
             {/* BTC Windows */}
-            <div className="border-r border-neutral-800 flex flex-col min-h-0">
+            <div className="flex flex-col min-h-0">
               <div className="px-2 py-1 border-b border-neutral-800 shrink-0">
                 <span className="text-[10px] text-neutral-500 uppercase tracking-wider">BTC Windows</span>
               </div>
@@ -312,17 +311,6 @@ function App() {
                 ) : (
                   <div className="text-[10px] text-neutral-600 p-2">No active windows</div>
                 )}
-              </div>
-            </div>
-
-            {/* Weather Forecasts */}
-            <div className="flex flex-col min-h-0">
-              <div className="px-2 py-1 border-b border-neutral-800 flex items-center justify-between shrink-0">
-                <span className="text-[10px] text-neutral-500 uppercase tracking-wider">Weather</span>
-                <span className="px-1 py-0.5 text-[8px] font-bold uppercase bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">WX</span>
-              </div>
-              <div className="flex-1 min-h-0 overflow-y-auto">
-                <WeatherPanel forecasts={weatherForecasts} signals={weatherSignals} />
               </div>
             </div>
           </div>

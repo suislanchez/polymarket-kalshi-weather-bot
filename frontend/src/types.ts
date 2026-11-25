@@ -125,6 +125,24 @@ export interface WeatherSignal {
   platform?: string
 }
 
+export interface WeatherMarket {
+  slug: string
+  market_id: string
+  platform: string
+  title: string
+  city_key: string
+  city_name: string
+  target_date: string
+  threshold_f: number
+  metric: 'high' | 'low'
+  direction: 'above' | 'below'
+  yes_price: number
+  no_price: number
+  volume: number
+  pred_mean?: number | null
+  pred_std?: number | null
+}
+
 export interface DashboardData {
   stats: BotStats
   btc_price: BtcPrice | null
@@ -136,4 +154,5 @@ export interface DashboardData {
   calibration: CalibrationSummary | null
   weather_signals: WeatherSignal[]
   weather_forecasts: WeatherForecast[]
+  weather_markets: WeatherMarket[]
 }

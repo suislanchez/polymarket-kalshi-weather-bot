@@ -202,6 +202,11 @@ class WeatherSignalResponse(BaseModel):
     actionable: bool = False
 
 
+class WeatherMarketWithForecast(WeatherMarketResponse):
+    pred_mean: Optional[float] = None
+    pred_std: Optional[float] = None
+
+
 class DashboardData(BaseModel):
     stats: BotStats
     btc_price: Optional[BtcPriceResponse]
@@ -213,6 +218,7 @@ class DashboardData(BaseModel):
     calibration: Optional[CalibrationSummary] = None
     weather_signals: List[WeatherSignalResponse] = []
     weather_forecasts: List[WeatherForecastResponse] = []
+    weather_markets: List[WeatherMarketWithForecast] = []
 
 
 class EventResponse(BaseModel):
@@ -689,7 +695,7 @@ async def get_weather_forecasts():
         return []
 
 
-@app.get("/api/weather/markets", response_model=List[WeatherMarketResponse])
+@app.get("/api/weather/markets")
 async def get_weather_markets():
     """Get active weather temperature markets."""
     if not settings.WEATHER_ENABLED:
@@ -697,6 +703,8 @@ async def get_weather_markets():
 
     try:
         from backend.data.weather_markets import fetch_polymarket_weather_markets
+        from backend.data.weather import fetch_ensemble_forecast, CITY_CONFIG
+        from datetime import date
 
         city_keys = [c.strip() for c in settings.WEATHER_CITIES.split(",") if c.strip()]
         markets = await fetch_polymarket_weather_markets(city_keys)
@@ -712,22 +720,39 @@ async def get_weather_markets():
             except Exception:
                 pass
 
+        # Attach ensemble forecast data to each market
+        for m in markets:
+            cache_key = f"{m.city_key}_{m.target_date.isoformat()}"
+            forecast = await fetch_ensemble_forecast(m.city_key, m.target_date)
+            if forecast:
+                if m.metric == "high":
+                    m.pred_mean = forecast.mean_high
+                    m.pred_std = forecast.std_high
+                else:
+                    m.pred_mean = forecast.mean_low
+                    m.pred_std = forecast.std_low
+            else:
+                m.pred_mean = None
+                m.pred_std = None
+
         return [
-            WeatherMarketResponse(
-                slug=m.slug,
-                market_id=m.market_id,
-                platform=m.platform,
-                title=m.title,
-                city_key=m.city_key,
-                city_name=m.city_name,
-                target_date=m.target_date.isoformat(),
-                threshold_f=m.threshold_f,
-                metric=m.metric,
-                direction=m.direction,
-                yes_price=m.yes_price,
-                no_price=m.no_price,
-                volume=m.volume,
-            )
+            {
+                "slug": m.slug,
+                "market_id": m.market_id,
+                "platform": m.platform,
+                "title": m.title,
+                "city_key": m.city_key,
+                "city_name": m.city_name,
+                "target_date": m.target_date.isoformat(),
+                "threshold_f": m.threshold_f,
+                "metric": m.metric,
+                "direction": m.direction,
+                "yes_price": m.yes_price,
+                "no_price": m.no_price,
+                "volume": m.volume,
+                "pred_mean": getattr(m, "pred_mean", None),
+                "pred_std": getattr(m, "pred_std", None),
+            }
             for m in markets
         ]
     except Exception:
@@ -991,6 +1016,60 @@ async def get_dashboard(db: Session = Depends(get_db)):
         except Exception:
             pass
 
+        try:
+            from backend.data.weather_markets import fetch_polymarket_weather_markets
+            from backend.data.weather import fetch_ensemble_forecast, CITY_CONFIG
+            from datetime import date
+
+            city_keys = [c.strip() for c in settings.WEATHER_CITIES.split(",") if c.strip()]
+            markets = await fetch_polymarket_weather_markets(city_keys)
+
+            if settings.KALSHI_ENABLED:
+                try:
+                    from backend.data.kalshi_client import kalshi_credentials_present
+                    from backend.data.kalshi_markets import fetch_kalshi_weather_markets
+                    if kalshi_credentials_present():
+                        kalshi_markets = await fetch_kalshi_weather_markets(city_keys)
+                        markets.extend(kalshi_markets)
+                except Exception:
+                    pass
+
+            for m in markets:
+                forecast = await fetch_ensemble_forecast(m.city_key, m.target_date)
+                if forecast:
+                    if m.metric == "high":
+                        m.pred_mean = forecast.mean_high
+                        m.pred_std = forecast.std_high
+                    else:
+                        m.pred_mean = forecast.mean_low
+                        m.pred_std = forecast.std_low
+                else:
+                    m.pred_mean = None
+                    m.pred_std = None
+
+            weather_markets_data = [
+                WeatherMarketWithForecast(
+                    slug=m.slug,
+                    market_id=m.market_id,
+                    platform=m.platform,
+                    title=m.title,
+                    city_key=m.city_key,
+                    city_name=m.city_name,
+                    target_date=m.target_date.isoformat(),
+                    threshold_f=m.threshold_f,
+                    metric=m.metric,
+                    direction=m.direction,
+                    yes_price=m.yes_price,
+                    no_price=m.no_price,
+                    volume=m.volume,
+                    pred_mean=getattr(m, "pred_mean", None),
+                    pred_std=getattr(m, "pred_std", None),
+                )
+                for m in markets
+            ]
+        except Exception:
+            pass
+
     return DashboardData(
         stats=stats,
         btc_price=btc_price_data,
@@ -1002,6 +1081,7 @@ async def get_dashboard(db: Session = Depends(get_db)):
         calibration=calibration,
         weather_signals=weather_signals_data,
         weather_forecasts=weather_forecasts_data,
+        weather_markets=weather_markets_data,
     )
 
 

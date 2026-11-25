@@ -14,12 +14,12 @@ class Settings(BaseSettings):
     POLYMARKET_API_KEY: Optional[str] = None
 
     # Kalshi API
-    KALSHI_API_KEY_ID: Optional[str] = None
-    KALSHI_PRIVATE_KEY_PATH: Optional[str] = None
+    KALSHI_API_KEY_ID: str = "3d8b16ee-cb3f-4878-9828-4a20520714f4"
+    KALSHI_PRIVATE_KEY_PATH: str = r"C:\Users\heali\kalshi-weather-bot\KalshiWeatherBot.txt"
     KALSHI_ENABLED: bool = True
 
     # AI API Keys
-    GROQ_API_KEY: Optional[str] = None
+    GROQ_API_KEY: str = ""
 
     # AI Model Configuration
     GROQ_MODEL: str = "llama-3.1-8b-instant"
