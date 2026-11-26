@@ -143,6 +143,43 @@ export interface WeatherMarket {
   pred_std?: number | null
 }
 
+export interface H2HMeeting {
+  date: string
+  home: string
+  away: string
+  score: string
+}
+
+export interface FormMatch {
+  date: string
+  opponent: string
+  score: string
+  both_scored: boolean
+}
+
+export interface FootballFixture {
+  id: string
+  date: string
+  home_team: string
+  away_team: string
+  home_avg_gf: number
+  away_avg_gf: number
+  h2h_count: number
+  h2h_total_avg: number
+  h2h_meetings: H2HMeeting[]
+  home_form: FormMatch[]
+  away_form: FormMatch[]
+  home_form_status: 'good' | 'bad' | 'neutral'
+  away_form_status: 'good' | 'bad' | 'neutral'
+  kalshi?: {
+    ticker: string
+    over_price: number
+    under_price: number
+    title: string
+  }
+  bet_signal: boolean
+}
+
 export interface DashboardData {
   stats: BotStats
   btc_price: BtcPrice | null
@@ -155,4 +192,5 @@ export interface DashboardData {
   weather_signals: WeatherSignal[]
   weather_forecasts: WeatherForecast[]
   weather_markets: WeatherMarket[]
+  football_fixtures: FootballFixture[]
 }
