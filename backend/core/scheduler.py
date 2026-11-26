@@ -218,7 +218,7 @@ async def weather_scan_and_trade_job():
 
             MAX_TRADES_PER_SCAN = 3
             MIN_TRADE_SIZE = 10
-            MAX_WEATHER_ALLOCATION = 500.0  # Max total exposure to weather markets
+            MAX_WEATHER_ALLOCATION = settings.WEATHER_MAX_ALLOCATION  # Max total exposure to weather markets
 
             # Check weather allocation limit
             weather_pending = db.query(func.coalesce(func.sum(Trade.size), 0.0)).filter(
@@ -231,7 +231,7 @@ async def weather_scan_and_trade_job():
                 return
 
             trades_executed = 0
-            for signal in actionable[:MAX_TRADES_PER_SCAN]:
+            for signal in actionable:
                 # Check if we already have a trade for this market
                 existing = db.query(Trade).filter(
                     Trade.market_ticker == signal.market.market_id,
@@ -255,7 +255,7 @@ async def weather_scan_and_trade_job():
 
                 trade = Trade(
                     market_ticker=signal.market.market_id,
-                    platform="polymarket",
+                    platform=signal.market.platform,
                     event_slug=signal.market.slug,
                     market_type="weather",
                     direction=signal.direction,

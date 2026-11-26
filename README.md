@@ -32,17 +32,22 @@ Scans weather temperature markets on **Kalshi** (KXHIGH series) and **Polymarket
 ### 1. Backend Setup
 
 ```bash
-cd kalshi-trading-bot
+cd kalshi-weather-bot
 
 # Create virtual environment
 python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+# On Windows:
+venv\Scripts\activate
+# On macOS/Linux:
+# source venv/bin/activate
 
 # Install dependencies
 pip install -r requirements.txt
 
-# Run the backend
-uvicorn backend.api.main:app --reload --port 8000
+# Run the backend (from project root)
+python run.py
+# Or directly with uvicorn:
+# uvicorn backend.api.main:app --reload --port 8000
 ```
 
 Backend will be at: http://localhost:8000
@@ -152,7 +157,16 @@ Capped at 5% of bankroll and $75 (BTC) or $100 (Weather) per trade.
 
 ## Configuration
 
-All settings in `backend/config.py`, overridable via environment variables:
+All settings in `backend/config.py`, overridable via environment variables. Create a `.env` file from `.env.example`:
+
+```bash
+cp .env.example .env
+# Edit .env with your API keys
+```
+
+Required for Kalshi weather markets:
+- `KALSHI_API_KEY_ID` — Your Kalshi API key ID
+- `KALSHI_PRIVATE_KEY_PATH` — Path to RSA private key PEM file (e.g., `.\KalshiWeatherBot.txt`)
 
 ### BTC Settings
 | Setting | Default | Description |
@@ -214,7 +228,7 @@ Add more cities by editing `WEATHER_CITIES` in config and adding entries to `CIT
 ## Project Structure
 
 ```
-kalshi-trading-bot/
+kalshi-weather-bot/
 ├── backend/
 │   ├── api/
 │   │   └── main.py                 # FastAPI routes + dashboard
@@ -237,10 +251,10 @@ kalshi-trading-bot/
 ├── frontend/
 │   ├── src/
 │   │   ├── components/
-│   │   │   ├── GlobeView.tsx        # 3D globe with city markers
+│   │   │   ├── GlobeView.tsx        # 3D globe with city markers (legacy)
 │   │   │   ├── EdgeDistribution.tsx # Edge distribution chart
 │   │   │   ├── MicrostructurePanel.tsx # RSI gauge + indicator meters
-│   │   │   ├── WeatherPanel.tsx     # Weather forecasts per city
+│   │   │   ├── WeatherPanel.tsx     # Weather forecasts + markets panel
 │   │   │   ├── CalibrationPanel.tsx # Prediction accuracy tracking
 │   │   │   ├── StatsCards.tsx       # Performance metrics
 │   │   │   ├── SignalsTable.tsx     # BTC + Weather signals combined

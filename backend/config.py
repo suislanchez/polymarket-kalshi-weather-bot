@@ -62,9 +62,10 @@ class Settings(BaseSettings):
     WEATHER_ENABLED: bool = True
     WEATHER_SCAN_INTERVAL_SECONDS: int = 300  # 5 min
     WEATHER_SETTLEMENT_INTERVAL_SECONDS: int = 1800  # 30 min
-    WEATHER_MIN_EDGE_THRESHOLD: float = 0.08  # 8% — weather has more signal than 5-min BTC
-    WEATHER_MAX_ENTRY_PRICE: float = 0.70
+    WEATHER_MIN_EDGE_THRESHOLD: float = 0.70  # 70% edge required
+    WEATHER_MAX_ENTRY_PRICE: float = 0.90
     WEATHER_MAX_TRADE_SIZE: float = 100.0
+    WEATHER_MAX_ALLOCATION: float = 1000000.0  # Max total pending weather exposure (no practical limit)
     WEATHER_CITIES: str = "nyc,chicago,miami,los_angeles,denver"
 
     class Config:
