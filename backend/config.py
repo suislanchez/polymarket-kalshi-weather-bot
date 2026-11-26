@@ -68,6 +68,13 @@ class Settings(BaseSettings):
     WEATHER_MAX_ALLOCATION: float = 1000000.0  # Max total pending weather exposure (no practical limit)
     WEATHER_CITIES: str = "nyc,chicago,miami,los_angeles,denver"
 
+    # Football (optional)
+    FOOTBALL_DATA_API_KEY: Optional[str] = None
+    API_FOOTBALL_KEY: Optional[str] = None
+    DATAHUB_API_KEY: Optional[str] = None
+    EPL_LEAGUE_ID: int = 39
+    LIGA_LEAGUE_ID: int = 140
+
     class Config:
         env_file = ".env"
 
