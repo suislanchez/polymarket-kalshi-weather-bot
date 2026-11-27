@@ -18,7 +18,8 @@ from backend.data.football import (
     MatchResultData,
     TeamStatsData,
 )
-from backend.data.kalshi_client import KalshiClient
+from backend.config import settings
+from backend.data.kalshi_client import KalshiClient, kalshi_credentials_present
 
 logger = logging.getLogger("football_bot")
 
@@ -168,7 +169,7 @@ async def assemble_fixtures() -> List[FootballFixtureResponse]:
 
     kalshi_markets = {"markets": []}
     kalshi_client = None
-    if KalshiClient().kalshi_credentials_present():
+    if kalshi_credentials_present():
         try:
             kalshi_client = KalshiClient()
             kalshi_markets = await kalshi_client.get_markets(params={"series_ticker": "KXEPLTOTAL"})

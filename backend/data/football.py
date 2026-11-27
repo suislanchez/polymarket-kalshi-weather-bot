@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Any, Callable
 import httpx
@@ -43,14 +43,46 @@ def _set_cached(key: str, data: Any) -> None:
     except Exception as e:
         logger.warning(f"Failed to write cache for {key}: {e}")
 
-async def _fetch_with_cache(key: str, fetch_func: Callable, *args, **kwargs):
+def _dataclass_to_dict(obj: Any) -> Any:
+    """Recursively convert dataclass objects to dicts for JSON serialization."""
+    if hasattr(obj, '__dataclass_fields__'):
+        return asdict(obj)
+    elif isinstance(obj, list):
+        return [_dataclass_to_dict(item) for item in obj]
+    elif isinstance(obj, dict):
+        return {k: _dataclass_to_dict(v) for k, v in obj.items()}
+    elif isinstance(obj, datetime):
+        return obj.isoformat()
+    return obj
+
+def _dict_to_dataclass(data: Any, cls: type) -> Any:
+    """Recursively convert dicts back to dataclass objects."""
+    if isinstance(data, list):
+        return [_dict_to_dataclass(item, cls) for item in data]
+    elif isinstance(data, dict):
+        if hasattr(cls, '__dataclass_fields__'):
+            # Convert datetime strings back to datetime objects
+            field_types = cls.__annotations__
+            kwargs = {}
+            for k, v in data.items():
+                if k in field_types and field_types[k] == datetime and isinstance(v, str):
+                    kwargs[k] = datetime.fromisoformat(v)
+                else:
+                    kwargs[k] = _dict_to_dataclass(v, field_types.get(k, type(v)))
+            return cls(**kwargs)
+        return {k: _dict_to_dataclass(v, type(v)) for k, v in data.items()}
+    return data
+
+async def _fetch_with_cache(key: str, fetch_func: Callable, item_cls: type = None, *args, **kwargs):
     """Try cache first, then call fetch_func and cache result."""
     cached = _get_cached(key)
     if cached is not None:
+        if item_cls and isinstance(cached, list):
+            return [_dict_to_dataclass(item, item_cls) for item in cached]
         return cached
     result = await fetch_func(*args, **kwargs)
     if result is not None:
-        _set_cached(key, result)
+        _set_cached(key, _dataclass_to_dict(result))
     return result
 
 @dataclass
@@ -156,7 +188,7 @@ async def fetch_epl_fixtures() -> List[FootballFixtureData]:
             logger.info("Datahub.io API key present but Datahub fallback stubbed for v1; returning empty")
         return []
 
-    return await _fetch_with_cache(cache_key, _fetch_all)
+    return await _fetch_with_cache(cache_key, _fetch_all, item_cls=FootballFixtureData)
 
 async def fetch_team_stats(team_id: int) -> Optional[TeamStatsData]:
     """Fetch team statistics from api-football.com."""
