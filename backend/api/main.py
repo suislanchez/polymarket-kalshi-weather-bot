@@ -7,6 +7,9 @@ from typing import List, Optional
 import asyncio
 import json
 import os
+import logging
+
+logger = logging.getLogger("football_bot")
 
 from backend.config import settings
 from backend.models.database import (
@@ -14,6 +17,7 @@ from backend.models.database import (
     Signal, Trade, BotState, AILog, ScanLog
 )
 from backend.core.signals import scan_for_signals, TradingSignal
+from backend.core.football_signals import assemble_fixtures, FootballFixtureResponse
 from backend.data.btc_markets import fetch_active_btc_markets, BtcMarket
 from backend.data.crypto import fetch_crypto_price, compute_btc_microstructure
 
@@ -202,6 +206,50 @@ class WeatherSignalResponse(BaseModel):
     actionable: bool = False
 
 
+class WeatherMarketWithForecast(WeatherMarketResponse):
+    pred_mean: Optional[float] = None
+    pred_std: Optional[float] = None
+
+
+class H2HMeetingResponse(BaseModel):
+    date: str
+    home: str
+    away: str
+    score: str
+
+
+class FormMatchResponse(BaseModel):
+    date: str
+    opponent: str
+    score: str
+    both_scored: bool
+
+
+class KalshiMarketInfoResponse(BaseModel):
+    ticker: str
+    over_price: float
+    under_price: float
+    title: str
+
+
+class FootballFixtureResponse(BaseModel):
+    id: str
+    date: str
+    home_team: str
+    away_team: str
+    home_avg_gf: float
+    away_avg_gf: float
+    h2h_count: int
+    h2h_total_avg: float
+    h2h_meetings: List[H2HMeetingResponse]
+    home_form: List[FormMatchResponse]
+    away_form: List[FormMatchResponse]
+    home_form_status: str
+    away_form_status: str
+    kalshi: Optional[KalshiMarketInfoResponse] = None
+    bet_signal: bool
+
+
 class DashboardData(BaseModel):
     stats: BotStats
     btc_price: Optional[BtcPriceResponse]
@@ -213,6 +261,8 @@ class DashboardData(BaseModel):
     calibration: Optional[CalibrationSummary] = None
     weather_signals: List[WeatherSignalResponse] = []
     weather_forecasts: List[WeatherForecastResponse] = []
+    weather_markets: List[WeatherMarketWithForecast] = []
+    football_fixtures: List[FootballFixtureResponse] = []
 
 
 class EventResponse(BaseModel):
@@ -689,7 +739,7 @@ async def get_weather_forecasts():
         return []
 
 
-@app.get("/api/weather/markets", response_model=List[WeatherMarketResponse])
+@app.get("/api/weather/markets")
 async def get_weather_markets():
     """Get active weather temperature markets."""
     if not settings.WEATHER_ENABLED:
@@ -697,6 +747,8 @@ async def get_weather_markets():
 
     try:
         from backend.data.weather_markets import fetch_polymarket_weather_markets
+        from backend.data.weather import fetch_ensemble_forecast, CITY_CONFIG
+        from datetime import date
 
         city_keys = [c.strip() for c in settings.WEATHER_CITIES.split(",") if c.strip()]
         markets = await fetch_polymarket_weather_markets(city_keys)
@@ -712,22 +764,39 @@ async def get_weather_markets():
             except Exception:
                 pass
 
+        # Attach ensemble forecast data to each market
+        for m in markets:
+            cache_key = f"{m.city_key}_{m.target_date.isoformat()}"
+            forecast = await fetch_ensemble_forecast(m.city_key, m.target_date)
+            if forecast:
+                if m.metric == "high":
+                    m.pred_mean = forecast.mean_high
+                    m.pred_std = forecast.std_high
+                else:
+                    m.pred_mean = forecast.mean_low
+                    m.pred_std = forecast.std_low
+            else:
+                m.pred_mean = None
+                m.pred_std = None
+
         return [
-            WeatherMarketResponse(
-                slug=m.slug,
-                market_id=m.market_id,
-                platform=m.platform,
-                title=m.title,
-                city_key=m.city_key,
-                city_name=m.city_name,
-                target_date=m.target_date.isoformat(),
-                threshold_f=m.threshold_f,
-                metric=m.metric,
-                direction=m.direction,
-                yes_price=m.yes_price,
-                no_price=m.no_price,
-                volume=m.volume,
-            )
+            {
+                "slug": m.slug,
+                "market_id": m.market_id,
+                "platform": m.platform,
+                "title": m.title,
+                "city_key": m.city_key,
+                "city_name": m.city_name,
+                "target_date": m.target_date.isoformat(),
+                "threshold_f": m.threshold_f,
+                "metric": m.metric,
+                "direction": m.direction,
+                "yes_price": m.yes_price,
+                "no_price": m.no_price,
+                "volume": m.volume,
+                "pred_mean": getattr(m, "pred_mean", None),
+                "pred_std": getattr(m, "pred_std", None),
+            }
             for m in markets
         ]
     except Exception:
@@ -769,6 +838,18 @@ def _weather_signal_to_response(s) -> WeatherSignalResponse:
         ensemble_members=s.ensemble_members,
         actionable=s.passes_threshold,
     )
+
+
+# Football endpoints
+@app.get("/api/football/fixtures", response_model=List[FootballFixtureResponse])
+async def get_football_fixtures():
+    """Get EPL fixtures with team stats, H2H, form, and Kalshi over/under prices."""
+    try:
+        fixtures = await assemble_fixtures()
+        return fixtures
+    except Exception as e:
+        logger.warning(f"Error fetching football fixtures: {e}")
+        return []
 
 
 @app.get("/api/events", response_model=List[EventResponse])
@@ -991,6 +1072,60 @@ async def get_dashboard(db: Session = Depends(get_db)):
         except Exception:
             pass
 
+        try:
+            from backend.data.weather_markets import fetch_polymarket_weather_markets
+            from backend.data.weather import fetch_ensemble_forecast, CITY_CONFIG
+            from datetime import date
+
+            city_keys = [c.strip() for c in settings.WEATHER_CITIES.split(",") if c.strip()]
+            markets = await fetch_polymarket_weather_markets(city_keys)
+
+            if settings.KALSHI_ENABLED:
+                try:
+                    from backend.data.kalshi_client import kalshi_credentials_present
+                    from backend.data.kalshi_markets import fetch_kalshi_weather_markets
+                    if kalshi_credentials_present():
+                        kalshi_markets = await fetch_kalshi_weather_markets(city_keys)
+                        markets.extend(kalshi_markets)
+                except Exception:
+                    pass
+
+            for m in markets:
+                forecast = await fetch_ensemble_forecast(m.city_key, m.target_date)
+                if forecast:
+                    if m.metric == "high":
+                        m.pred_mean = forecast.mean_high
+                        m.pred_std = forecast.std_high
+                    else:
+                        m.pred_mean = forecast.mean_low
+                        m.pred_std = forecast.std_low
+                else:
+                    m.pred_mean = None
+                    m.pred_std = None
+
+            weather_markets_data = [
+                WeatherMarketWithForecast(
+                    slug=m.slug,
+                    market_id=m.market_id,
+                    platform=m.platform,
+                    title=m.title,
+                    city_key=m.city_key,
+                    city_name=m.city_name,
+                    target_date=m.target_date.isoformat(),
+                    threshold_f=m.threshold_f,
+                    metric=m.metric,
+                    direction=m.direction,
+                    yes_price=m.yes_price,
+                    no_price=m.no_price,
+                    volume=m.volume,
+                    pred_mean=getattr(m, "pred_mean", None),
+                    pred_std=getattr(m, "pred_std", None),
+                )
+                for m in markets
+            ]
+        except Exception:
+            pass
+
     return DashboardData(
         stats=stats,
         btc_price=btc_price_data,
@@ -1002,6 +1137,8 @@ async def get_dashboard(db: Session = Depends(get_db)):
         calibration=calibration,
         weather_signals=weather_signals_data,
         weather_forecasts=weather_forecasts_data,
+        weather_markets=weather_markets_data,
+        football_fixtures=[],
     )
 
 

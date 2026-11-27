@@ -1,4 +1,4 @@
-import { useState, useEffect, Suspense, lazy } from 'react'
+import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import { fetchDashboard, runScan, simulateTrade, startBot, stopBot } from './api'
@@ -11,10 +11,10 @@ import { MicrostructurePanel } from './components/MicrostructurePanel'
 import { CalibrationPanel } from './components/CalibrationPanel'
 import { WeatherPanel } from './components/WeatherPanel'
 import { EdgeDistribution } from './components/EdgeDistribution'
+import { FootballPanel } from './components/FootballPanel'
 import { formatCountdown } from './utils'
 import type { BtcWindow } from './types'
-
-const GlobeView = lazy(() => import('./components/GlobeView').then(m => ({ default: m.GlobeView })))
+import { fetchFootballFixtures } from './api'
 
 function LiveClock() {
   const [time, setTime] = useState(new Date())
@@ -72,11 +72,19 @@ function RefreshBar({ interval }: { interval: number }) {
 
 function App() {
   const queryClient = useQueryClient()
+  const [rightTab, setRightTab] = useState<'signals' | 'soccer' | 'trades'>('signals')
 
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['dashboard'],
     queryFn: fetchDashboard,
     refetchInterval: 10000,
+  })
+
+  const { data: footballFixtures, isLoading: footballLoading } = useQuery({
+    queryKey: ['football-fixtures'],
+    queryFn: fetchFootballFixtures,
+    enabled: rightTab === 'soccer',
+    staleTime: 30 * 60 * 1000,
   })
 
   const scanMutation = useMutation({
@@ -106,6 +114,7 @@ function App() {
   const windows = data?.windows ?? []
   const weatherSignals = data?.weather_signals ?? []
   const weatherForecasts = data?.weather_forecasts ?? []
+  const weatherMarkets = data?.weather_markets ?? []
 
   const stats = data?.stats ?? {
     is_running: false,
@@ -267,28 +276,28 @@ function App() {
 
         {/* ===== CENTER COLUMN ===== */}
         <div className="flex flex-col min-h-0 border-r border-neutral-800">
-          {/* Globe - top 60% */}
-          <div className="relative" style={{ height: '58%' }}>
-            <div className="absolute inset-0">
-              <Suspense fallback={
-                <div className="w-full h-full flex items-center justify-center bg-black">
-                  <span className="text-[10px] text-neutral-600 uppercase tracking-wider">Loading Globe...</span>
+          {/* Weather Markets - top ~62% */}
+          <div className="relative flex-1 min-h-0">
+            <div className="absolute inset-0 flex flex-col">
+              <div className="px-2 py-1 border-b border-neutral-800 flex items-center justify-between shrink-0">
+                <span className="text-[10px] text-neutral-500 uppercase tracking-wider">Weather Markets</span>
+                <div className="flex items-center gap-3">
+                  <span className="text-neutral-600 text-[9px] uppercase tracking-wider">
+                    {weatherMarkets.length} live{weatherForecasts.length > 0 ? ` · ${weatherForecasts.length} cities` : ''}
+                  </span>
+                  <span className="px-1.5 py-0.5 text-[8px] font-bold uppercase bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                    {actionableCount} actionable
+                  </span>
                 </div>
-              }>
-                <GlobeView forecasts={weatherForecasts} signals={weatherSignals} />
-              </Suspense>
-            </div>
-            {/* Globe overlay: actionable count */}
-            <div className="absolute top-2 left-2 z-10">
-              <div className="px-2 py-1 bg-black/80 border border-neutral-800 text-[10px]">
-                <span className="text-neutral-500 uppercase tracking-wider mr-2">Markets</span>
-                <span className="text-amber-500 tabular-nums">{actionableCount} actionable</span>
+              </div>
+              <div className="flex-1 min-h-0 overflow-y-auto">
+                <WeatherPanel forecasts={weatherForecasts} signals={weatherSignals} markets={weatherMarkets} />
               </div>
             </div>
           </div>
 
-          {/* Bottom panels - 3 side by side */}
-          <div className="flex-1 min-h-0 grid grid-cols-3 border-t border-neutral-800">
+          {/* Bottom panels - 2 side by side */}
+          <div className="flex-1 min-h-0 grid grid-cols-2 border-t border-neutral-800">
             {/* Edge Distribution */}
             <div className="border-r border-neutral-800 flex flex-col min-h-0">
               <div className="px-2 py-1 border-b border-neutral-800 shrink-0">
@@ -300,7 +309,7 @@ function App() {
             </div>
 
             {/* BTC Windows */}
-            <div className="border-r border-neutral-800 flex flex-col min-h-0">
+            <div className="flex flex-col min-h-0">
               <div className="px-2 py-1 border-b border-neutral-800 shrink-0">
                 <span className="text-[10px] text-neutral-500 uppercase tracking-wider">BTC Windows</span>
               </div>
@@ -314,52 +323,85 @@ function App() {
                 )}
               </div>
             </div>
-
-            {/* Weather Forecasts */}
-            <div className="flex flex-col min-h-0">
-              <div className="px-2 py-1 border-b border-neutral-800 flex items-center justify-between shrink-0">
-                <span className="text-[10px] text-neutral-500 uppercase tracking-wider">Weather</span>
-                <span className="px-1 py-0.5 text-[8px] font-bold uppercase bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">WX</span>
-              </div>
-              <div className="flex-1 min-h-0 overflow-y-auto">
-                <WeatherPanel forecasts={weatherForecasts} signals={weatherSignals} />
-              </div>
-            </div>
           </div>
         </div>
 
         {/* ===== RIGHT COLUMN ===== */}
         <div className="flex flex-col min-h-0 overflow-hidden">
-          {/* Signals - top portion */}
-          <div className="flex flex-col min-h-0" style={{ height: '50%' }}>
-            <div className="px-2 py-1 border-b border-neutral-800 flex items-center justify-between shrink-0">
-              <span className="text-[10px] text-neutral-500 uppercase tracking-wider">Signals</span>
-              <div className="flex items-center gap-2">
-                <span className="text-[10px] text-amber-400 tabular-nums">{activeSignals.length} BTC</span>
-                {weatherSignals.length > 0 && (
-                  <span className="text-[10px] text-cyan-400 tabular-nums">{weatherSignals.length} WX</span>
-                )}
-              </div>
-            </div>
-            <div className="flex-1 overflow-y-auto min-h-0">
-              <SignalsTable
-                signals={activeSignals}
-                weatherSignals={weatherSignals}
-                onSimulateTrade={(ticker) => tradeMutation.mutate(ticker)}
-                isSimulating={tradeMutation.isPending}
-              />
-            </div>
+          {/* Tab Selector */}
+          <div className="shrink-0 border-b border-neutral-800 px-2 py-1 flex gap-1">
+            <button
+              onClick={() => setRightTab('signals')}
+              className={`px-2 py-1 text-[10px] uppercase tracking-wider transition-colors ${
+                rightTab === 'signals'
+                  ? 'text-green-400 border-b-2 border-green-400'
+                  : 'text-neutral-500 hover:text-neutral-300'
+              }`}
+            >
+              Signals
+            </button>
+            <button
+              onClick={() => setRightTab('soccer')}
+              className={`px-2 py-1 text-[10px] uppercase tracking-wider transition-colors ${
+                rightTab === 'soccer'
+                  ? 'text-cyan-400 border-b-2 border-cyan-400'
+                  : 'text-neutral-500 hover:text-neutral-300'
+              }`}
+            >
+              ⚽ Soccer Scout
+            </button>
+            <button
+              onClick={() => setRightTab('trades')}
+              className={`px-2 py-1 text-[10px] uppercase tracking-wider transition-colors ${
+                rightTab === 'trades'
+                  ? 'text-amber-400 border-b-2 border-amber-400'
+                  : 'text-neutral-500 hover:text-neutral-300'
+              }`}
+            >
+              Trades
+            </button>
           </div>
 
-          {/* Trades */}
-          <div className="flex flex-col min-h-0 border-t border-neutral-800" style={{ height: '50%' }}>
-            <div className="px-2 py-1 border-b border-neutral-800 flex items-center justify-between shrink-0">
-              <span className="text-[10px] text-neutral-500 uppercase tracking-wider">Trades</span>
-              <span className="text-[10px] text-neutral-600 tabular-nums">{recentTrades.length}</span>
-            </div>
-            <div className="flex-1 overflow-y-auto min-h-0">
-              <TradesTable trades={recentTrades} />
-            </div>
+          {/* Tab Content */}
+          <div className="flex-1 min-h-0 overflow-y-auto">
+            {rightTab === 'signals' && (
+              <div className="p-2">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-[10px] text-neutral-500 uppercase tracking-wider">Signals</span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] text-amber-400 tabular-nums">{activeSignals.length} BTC</span>
+                    {weatherSignals.length > 0 && (
+                      <span className="text-[10px] text-cyan-400 tabular-nums">{weatherSignals.length} WX</span>
+                    )}
+                  </div>
+                </div>
+                <SignalsTable
+                  signals={activeSignals}
+                  weatherSignals={weatherSignals}
+                  onSimulateTrade={(ticker) => tradeMutation.mutate(ticker)}
+                  isSimulating={tradeMutation.isPending}
+                />
+              </div>
+            )}
+
+            {rightTab === 'soccer' && (
+              <div className="p-2">
+                <FootballPanel
+                  fixtures={footballFixtures ?? []}
+                  loading={footballLoading}
+                />
+              </div>
+            )}
+
+            {rightTab === 'trades' && (
+              <div className="p-2">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-[10px] text-neutral-500 uppercase tracking-wider">Trades</span>
+                  <span className="text-[10px] text-neutral-600 tabular-nums">{recentTrades.length}</span>
+                </div>
+                <TradesTable trades={recentTrades} />
+              </div>
+            )}
           </div>
         </div>
       </div>

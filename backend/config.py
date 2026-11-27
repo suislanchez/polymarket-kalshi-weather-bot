@@ -14,12 +14,12 @@ class Settings(BaseSettings):
     POLYMARKET_API_KEY: Optional[str] = None
 
     # Kalshi API
-    KALSHI_API_KEY_ID: Optional[str] = None
-    KALSHI_PRIVATE_KEY_PATH: Optional[str] = None
+    KALSHI_API_KEY_ID: str = "3d8b16ee-cb3f-4878-9828-4a20520714f4"
+    KALSHI_PRIVATE_KEY_PATH: str = r"C:\Users\heali\kalshi-weather-bot\KalshiWeatherBot.txt"
     KALSHI_ENABLED: bool = True
 
     # AI API Keys
-    GROQ_API_KEY: Optional[str] = None
+    GROQ_API_KEY: str = ""
 
     # AI Model Configuration
     GROQ_MODEL: str = "llama-3.1-8b-instant"
@@ -62,10 +62,18 @@ class Settings(BaseSettings):
     WEATHER_ENABLED: bool = True
     WEATHER_SCAN_INTERVAL_SECONDS: int = 300  # 5 min
     WEATHER_SETTLEMENT_INTERVAL_SECONDS: int = 1800  # 30 min
-    WEATHER_MIN_EDGE_THRESHOLD: float = 0.08  # 8% — weather has more signal than 5-min BTC
-    WEATHER_MAX_ENTRY_PRICE: float = 0.70
+    WEATHER_MIN_EDGE_THRESHOLD: float = 0.70  # 70% edge required
+    WEATHER_MAX_ENTRY_PRICE: float = 0.90
     WEATHER_MAX_TRADE_SIZE: float = 100.0
+    WEATHER_MAX_ALLOCATION: float = 1000000.0  # Max total pending weather exposure (no practical limit)
     WEATHER_CITIES: str = "nyc,chicago,miami,los_angeles,denver"
+
+    # Football (optional)
+    FOOTBALL_DATA_API_KEY: Optional[str] = None
+    API_FOOTBALL_KEY: Optional[str] = None
+    DATAHUB_API_KEY: Optional[str] = None
+    EPL_LEAGUE_ID: int = 39
+    LIGA_LEAGUE_ID: int = 140
 
     class Config:
         env_file = ".env"

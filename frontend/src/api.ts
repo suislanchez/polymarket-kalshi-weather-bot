@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { DashboardData, Signal, Trade, BotStats, BtcPrice, BtcWindow, WeatherForecast, WeatherSignal } from './types'
+import type { DashboardData, Signal, Trade, BotStats, BtcPrice, BtcWindow, WeatherForecast, WeatherSignal, WeatherMarket, FootballFixture } from './types'
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
@@ -76,5 +76,15 @@ export async function fetchWeatherForecasts(): Promise<WeatherForecast[]> {
 
 export async function fetchWeatherSignals(): Promise<WeatherSignal[]> {
   const { data } = await api.get<WeatherSignal[]>('/weather/signals')
+  return data
+}
+
+export async function fetchWeatherMarkets(): Promise<WeatherMarket[]> {
+  const { data } = await api.get<WeatherMarket[]>('/weather/markets')
+  return data
+}
+
+export async function fetchFootballFixtures(): Promise<FootballFixture[]> {
+  const { data } = await api.get<FootballFixture[]>('/football/fixtures')
   return data
 }
