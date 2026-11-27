@@ -11,8 +11,10 @@ import { MicrostructurePanel } from './components/MicrostructurePanel'
 import { CalibrationPanel } from './components/CalibrationPanel'
 import { WeatherPanel } from './components/WeatherPanel'
 import { EdgeDistribution } from './components/EdgeDistribution'
+import { FootballPanel } from './components/FootballPanel'
 import { formatCountdown } from './utils'
 import type { BtcWindow } from './types'
+import { fetchFootballFixtures } from './api'
 
 function LiveClock() {
   const [time, setTime] = useState(new Date())
@@ -70,11 +72,19 @@ function RefreshBar({ interval }: { interval: number }) {
 
 function App() {
   const queryClient = useQueryClient()
+  const [rightTab, setRightTab] = useState<'signals' | 'soccer' | 'trades'>('signals')
 
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['dashboard'],
     queryFn: fetchDashboard,
     refetchInterval: 10000,
+  })
+
+  const { data: footballFixtures, isLoading: footballLoading } = useQuery({
+    queryKey: ['football-fixtures'],
+    queryFn: fetchFootballFixtures,
+    enabled: rightTab === 'soccer',
+    staleTime: 30 * 60 * 1000,
   })
 
   const scanMutation = useMutation({
@@ -318,36 +328,80 @@ function App() {
 
         {/* ===== RIGHT COLUMN ===== */}
         <div className="flex flex-col min-h-0 overflow-hidden">
-          {/* Signals - top portion */}
-          <div className="flex flex-col min-h-0" style={{ height: '50%' }}>
-            <div className="px-2 py-1 border-b border-neutral-800 flex items-center justify-between shrink-0">
-              <span className="text-[10px] text-neutral-500 uppercase tracking-wider">Signals</span>
-              <div className="flex items-center gap-2">
-                <span className="text-[10px] text-amber-400 tabular-nums">{activeSignals.length} BTC</span>
-                {weatherSignals.length > 0 && (
-                  <span className="text-[10px] text-cyan-400 tabular-nums">{weatherSignals.length} WX</span>
-                )}
-              </div>
-            </div>
-            <div className="flex-1 overflow-y-auto min-h-0">
-              <SignalsTable
-                signals={activeSignals}
-                weatherSignals={weatherSignals}
-                onSimulateTrade={(ticker) => tradeMutation.mutate(ticker)}
-                isSimulating={tradeMutation.isPending}
-              />
-            </div>
+          {/* Tab Selector */}
+          <div className="shrink-0 border-b border-neutral-800 px-2 py-1 flex gap-1">
+            <button
+              onClick={() => setRightTab('signals')}
+              className={`px-2 py-1 text-[10px] uppercase tracking-wider transition-colors ${
+                rightTab === 'signals'
+                  ? 'text-green-400 border-b-2 border-green-400'
+                  : 'text-neutral-500 hover:text-neutral-300'
+              }`}
+            >
+              Signals
+            </button>
+            <button
+              onClick={() => setRightTab('soccer')}
+              className={`px-2 py-1 text-[10px] uppercase tracking-wider transition-colors ${
+                rightTab === 'soccer'
+                  ? 'text-cyan-400 border-b-2 border-cyan-400'
+                  : 'text-neutral-500 hover:text-neutral-300'
+              }`}
+            >
+              ⚽ Soccer Scout
+            </button>
+            <button
+              onClick={() => setRightTab('trades')}
+              className={`px-2 py-1 text-[10px] uppercase tracking-wider transition-colors ${
+                rightTab === 'trades'
+                  ? 'text-amber-400 border-b-2 border-amber-400'
+                  : 'text-neutral-500 hover:text-neutral-300'
+              }`}
+            >
+              Trades
+            </button>
           </div>
 
-          {/* Trades */}
-          <div className="flex flex-col min-h-0 border-t border-neutral-800" style={{ height: '50%' }}>
-            <div className="px-2 py-1 border-b border-neutral-800 flex items-center justify-between shrink-0">
-              <span className="text-[10px] text-neutral-500 uppercase tracking-wider">Trades</span>
-              <span className="text-[10px] text-neutral-600 tabular-nums">{recentTrades.length}</span>
-            </div>
-            <div className="flex-1 overflow-y-auto min-h-0">
-              <TradesTable trades={recentTrades} />
-            </div>
+          {/* Tab Content */}
+          <div className="flex-1 min-h-0 overflow-y-auto">
+            {rightTab === 'signals' && (
+              <div className="p-2">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-[10px] text-neutral-500 uppercase tracking-wider">Signals</span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] text-amber-400 tabular-nums">{activeSignals.length} BTC</span>
+                    {weatherSignals.length > 0 && (
+                      <span className="text-[10px] text-cyan-400 tabular-nums">{weatherSignals.length} WX</span>
+                    )}
+                  </div>
+                </div>
+                <SignalsTable
+                  signals={activeSignals}
+                  weatherSignals={weatherSignals}
+                  onSimulateTrade={(ticker) => tradeMutation.mutate(ticker)}
+                  isSimulating={tradeMutation.isPending}
+                />
+              </div>
+            )}
+
+            {rightTab === 'soccer' && (
+              <div className="p-2">
+                <FootballPanel
+                  fixtures={footballFixtures ?? []}
+                  loading={footballLoading}
+                />
+              </div>
+            )}
+
+            {rightTab === 'trades' && (
+              <div className="p-2">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-[10px] text-neutral-500 uppercase tracking-wider">Trades</span>
+                  <span className="text-[10px] text-neutral-600 tabular-nums">{recentTrades.length}</span>
+                </div>
+                <TradesTable trades={recentTrades} />
+              </div>
+            )}
           </div>
         </div>
       </div>

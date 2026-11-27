@@ -1,11 +1,57 @@
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional
+from typing import List, Optional, Any, Callable
 import httpx
 import logging
+import json
+import os
+from pathlib import Path
 from backend.config import settings
 
 logger = logging.getLogger("football_bot")
+
+# 30-minute file cache directory
+CACHE_DIR = Path(".cache/football")
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+CACHE_TTL_SECONDS = 30 * 60  # 30 minutes
+
+def _cache_key(key: str) -> Path:
+    """Generate a cache file path for a given key."""
+    safe_key = key.replace("/", "_").replace(":", "_")
+    return CACHE_DIR / f"{safe_key}.json"
+
+def _get_cached(key: str) -> Optional[Any]:
+    """Get cached data if it exists and is within TTL."""
+    cache_file = _cache_key(key)
+    if not cache_file.exists():
+        return None
+    try:
+        mtime = datetime.fromtimestamp(cache_file.stat().st_mtime, tz=timezone.utc)
+        if (datetime.now(timezone.utc) - mtime).total_seconds() > CACHE_TTL_SECONDS:
+            return None
+        with open(cache_file, "r") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+def _set_cached(key: str, data: Any) -> None:
+    """Write data to cache file."""
+    cache_file = _cache_key(key)
+    try:
+        with open(cache_file, "w") as f:
+            json.dump(data, f, default=str)
+    except Exception as e:
+        logger.warning(f"Failed to write cache for {key}: {e}")
+
+async def _fetch_with_cache(key: str, fetch_func: Callable, *args, **kwargs):
+    """Try cache first, then call fetch_func and cache result."""
+    cached = _get_cached(key)
+    if cached is not None:
+        return cached
+    result = await fetch_func(*args, **kwargs)
+    if result is not None:
+        _set_cached(key, result)
+    return result
 
 @dataclass
 class MatchResultData:
@@ -47,62 +93,70 @@ class FootballFixtureData:
 # API base URLs
 FOOTBALL_DATA_BASE = "https://api.football-data.org/v4"
 API_FOOTBALL_BASE = "https://v3.football.api-sports.io"
-DATAHUB_BASE = "https://api.datahub.com"  # placeholder
+# DATAHUB_BASE removed - stub returns empty list (v1 intentionally no-op per Builder Decision #9)
 
 # Headers
 FOOTBALL_DATA_HEADERS = {"X-Auth-Token": settings.FOOTBALL_DATA_API_KEY} if settings.FOOTBALL_DATA_API_KEY else {}
 API_FOOTBALL_HEADERS = {"x-apisports-key": settings.API_FOOTBALL_KEY} if settings.API_FOOTBALL_KEY else {}
-DATAHUB_HEADERS = {"Authorization": f"Bearer {settings.DATAHUB_API_KEY}"} if settings.DATAHUB_API_KEY else {}
+# DATAHUB_HEADERS removed - Datahub stubbed for v1 (Builder Decision #9)
 
 async def _get_async_client() -> httpx.AsyncClient:
     return httpx.AsyncClient(timeout=15.0)
 
 async def fetch_epl_fixtures() -> List[FootballFixtureData]:
-    """Fetch EPL fixtures for the next 7 days from football-data.org, fallback to api-football.com."""
+    """Fetch EPL fixtures for the next 7 days with triple-API fallback and 30-min cache."""
+    # Cache key includes API key presence to invalidate when keys change
+    cache_key = f"epl_fixtures_7d_fd{bool(settings.FOOTBALL_DATA_API_KEY)}_af{bool(settings.API_FOOTBALL_KEY)}_dh{bool(settings.DATAHUB_API_KEY)}"
 
-    # Try football-data.org first
-    if settings.FOOTBALL_DATA_API_KEY:
-        try:
-            today = datetime.now(timezone.utc).date()
-            date_from = today.isoformat()
-            date_to = (today + timedelta(days=7)).isoformat()
+    async def _fetch_all():
+        # Try football-data.org first
+        if settings.FOOTBALL_DATA_API_KEY:
+            try:
+                today = datetime.now(timezone.utc).date()
+                date_from = today.isoformat()
+                date_to = (today + timedelta(days=7)).isoformat()
 
-            async with await _get_async_client() as client:
-                response = await client.get(
-                    f"{FOOTBALL_DATA_BASE}/competitions/PL/matches",
-                    params={"dateFrom": date_from, "dateTo": date_to},
-                    headers=FOOTBALL_DATA_HEADERS
-                )
-                response.raise_for_status()
-                data = response.json()
+                async with await _get_async_client() as client:
+                    response = await client.get(
+                        f"{FOOTBALL_DATA_BASE}/competitions/PL/matches",
+                        params={"dateFrom": date_from, "dateTo": date_to},
+                        headers=FOOTBALL_DATA_HEADERS
+                    )
+                    response.raise_for_status()
+                    data = response.json()
 
-                return _parse_football_data_fixtures(data)
-        except Exception as e:
-            logger.warning(f"football-data.org fetch failed, falling back: {e}")
+                    return _parse_football_data_fixtures(data)
+            except Exception as e:
+                logger.warning(f"football-data.org fetch failed, falling back: {e}")
 
-    # Fallback to api-football.com
-    if settings.API_FOOTBALL_KEY:
-        try:
-            async with await _get_async_client() as client:
-                response = await client.get(
-                    f"{API_FOOTBALL_BASE}/fixtures",
-                    params={
-                        "league": settings.EPL_LEAGUE_ID,
-                        "season": 2025,
-                        "from": datetime.now(timezone.utc).date().isoformat(),
-                        "to": (datetime.now(timezone.utc).date() + timedelta(days=7)).isoformat(),
-                        "timezone": "UTC"
-                    },
-                    headers=API_FOOTBALL_HEADERS
-                )
-                response.raise_for_status()
-                data = response.json()
+        # Fallback to api-football.com
+        if settings.API_FOOTBALL_KEY:
+            try:
+                async with await _get_async_client() as client:
+                    response = await client.get(
+                        f"{API_FOOTBALL_BASE}/fixtures",
+                        params={
+                            "league": settings.EPL_LEAGUE_ID,
+                            "season": 2025,
+                            "from": datetime.now(timezone.utc).date().isoformat(),
+                            "to": (datetime.now(timezone.utc).date() + timedelta(days=7)).isoformat(),
+                            "timezone": "UTC"
+                        },
+                        headers=API_FOOTBALL_HEADERS
+                    )
+                    response.raise_for_status()
+                    data = response.json()
 
-                return _parse_api_football_fixtures(data)
-        except Exception as e:
-            logger.warning(f"api-football.com fetch failed: {e}")
+                    return _parse_api_football_fixtures(data)
+            except Exception as e:
+                logger.warning(f"api-football.com fetch failed, falling back to Datahub: {e}")
 
-    return []
+        # Datahub.io fallback stubbed for v1 (Builder Decision #9) - returns empty
+        if settings.DATAHUB_API_KEY:
+            logger.info("Datahub.io API key present but Datahub fallback stubbed for v1; returning empty")
+        return []
+
+    return await _fetch_with_cache(cache_key, _fetch_all)
 
 async def fetch_team_stats(team_id: int) -> Optional[TeamStatsData]:
     """Fetch team statistics from api-football.com."""
@@ -223,6 +277,39 @@ async def fetch_last_5_form(team_id: int) -> List[MatchResultData]:
     except Exception as e:
         logger.warning(f"Error fetching form for team {team_id}: {e}")
         return []
+
+def _parse_datahub_fixtures(data: dict) -> List[FootballFixtureData]:
+    """Parse Datahub.io fixtures response (placeholder implementation)."""
+    fixtures = []
+    for match in data.get("fixtures", []):
+        try:
+            fixture_id = str(match.get("id", ""))
+            date_str = match.get("date", "")
+            date = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+            home_team = match.get("homeTeam", {}).get("name", "")
+            away_team = match.get("awayTeam", {}).get("name", "")
+            home_team_id = match.get("homeTeam", {}).get("id", 0)
+            away_team_id = match.get("awayTeam", {}).get("id", 0)
+
+            fixtures.append(FootballFixtureData(
+                fixture_id=fixture_id,
+                date=date,
+                home_team=home_team,
+                home_team_id=home_team_id,
+                away_team=away_team,
+                away_team_id=away_team_id,
+                home_avg_gf=0.0,
+                away_avg_gf=0.0,
+                h2h_count=0,
+                h2h_total_avg=0.0,
+                h2h_meetings=[],
+                home_form=[],
+                away_form=[]
+            ))
+        except Exception:
+            continue
+    return fixtures
+
 
 def _parse_football_data_fixtures(data: dict) -> List[FootballFixtureData]:
     """Parse football-data.org fixtures response."""

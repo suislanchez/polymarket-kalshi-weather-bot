@@ -138,6 +138,11 @@ async def _fetch_kalshi_market_for_fixture(
         if fixture.home_team.lower() not in title.lower() and fixture.away_team.lower() not in title.lower():
             continue
 
+        # Verify this is an "Over 1.5 Goals" market (not Under, Correct Score, etc.)
+        title_lower = title.lower()
+        if "over 1.5" not in title_lower and "over 1.5" not in ticker.lower():
+            continue
+
         over_price = market.get("yes_bid")
         under_price = market.get("no_bid")
 
@@ -162,43 +167,69 @@ async def assemble_fixtures() -> List[FootballFixtureResponse]:
         return []
 
     kalshi_markets = {"markets": []}
+    kalshi_client = None
     if KalshiClient().kalshi_credentials_present():
         try:
-            client = KalshiClient()
-            kalshi_markets = await client.get_markets(params={"series_ticker": "KXEPLTOTAL"})
+            kalshi_client = KalshiClient()
+            kalshi_markets = await kalshi_client.get_markets(params={"series_ticker": "KXEPLTOTAL"})
         except Exception as e:
             logger.warning(f"Failed to fetch Kalshi markets: {e}")
+
+    # Batch fetch team stats for all unique team IDs
+    all_team_ids = set()
+    for f in fixtures:
+        all_team_ids.add(f.home_team_id)
+        all_team_ids.add(f.away_team_id)
+
+    team_stats_map = {}
+    if all_team_ids and settings.API_FOOTBALL_KEY:
+        stats_results = await asyncio.gather(
+            *[fetch_team_stats(tid) for tid in all_team_ids],
+            return_exceptions=True
+        )
+        for tid, result in zip(all_team_ids, stats_results):
+            if isinstance(result, TeamStatsData):
+                team_stats_map[tid] = result
+            elif isinstance(result, Exception):
+                logger.warning(f"Error fetching team stats for {tid}: {result}")
+
+    # Batch fetch H2H for all fixture pairs
+    h2h_map = {}
+    if settings.API_FOOTBALL_KEY:
+        h2h_results = await asyncio.gather(
+            *[fetch_h2h_meetings(f.home_team_id, f.away_team_id) for f in fixtures],
+            return_exceptions=True
+        )
+        for fixture, result in zip(fixtures, h2h_results):
+            if isinstance(result, list):
+                h2h_map[fixture.fixture_id] = result[:10]
+            elif isinstance(result, Exception):
+                logger.warning(f"Error fetching H2H for {fixture.home_team} vs {fixture.away_team}: {result}")
+
+    # Batch fetch last-5 form for all unique team IDs
+    form_map = {}
+    if all_team_ids and settings.API_FOOTBALL_KEY:
+        form_results = await asyncio.gather(
+            *[fetch_last_5_form(tid) for tid in all_team_ids],
+            return_exceptions=True
+        )
+        for tid, result in zip(all_team_ids, form_results):
+            if isinstance(result, list):
+                form_map[tid] = result
+            elif isinstance(result, Exception):
+                logger.warning(f"Error fetching form for team {tid}: {result}")
 
     results = []
 
     for fixture in fixtures:
         try:
-            home_stats, away_stats = await asyncio.gather(
-                fetch_team_stats(fixture.home_team_id),
-                fetch_team_stats(fixture.away_team_id),
-                return_exceptions=True
-            )
+            home_stats = team_stats_map.get(fixture.home_team_id)
+            away_stats = team_stats_map.get(fixture.away_team_id)
 
-            home_avg_gf = 0.0
-            away_avg_gf = 0.0
+            home_avg_gf = home_stats.avg_goals_for if home_stats else 0.0
+            away_avg_gf = away_stats.avg_goals_for if away_stats else 0.0
 
-            if isinstance(home_stats, TeamStatsData):
-                home_avg_gf = home_stats.avg_goals_for
-            elif isinstance(home_stats, Exception):
-                logger.warning(f"Error fetching home team stats for {fixture.home_team}: {home_stats}")
-
-            if isinstance(away_stats, TeamStatsData):
-                away_avg_gf = away_stats.avg_goals_for
-            elif isinstance(away_stats, Exception):
-                logger.warning(f"Error fetching away team stats for {fixture.away_team}: {away_stats}")
-
-            h2h_meetings = []
-            try:
-                h2h_meetings = await fetch_h2h_meetings(fixture.home_team_id, fixture.away_team_id)
-            except Exception as e:
-                logger.warning(f"Error fetching H2H for {fixture.home_team} vs {fixture.away_team}: {e}")
-
-            h2h_meetings = h2h_meetings[:10]
+            h2h_meetings = h2h_map.get(fixture.fixture_id, [])
 
             h2h_total_avg = 0.0
             if h2h_meetings:
@@ -211,14 +242,8 @@ async def assemble_fixtures() -> List[FootballFixtureResponse]:
                         continue
                 h2h_total_avg = total_goals / len(h2h_meetings)
 
-            home_form_raw, away_form_raw = await asyncio.gather(
-                fetch_last_5_form(fixture.home_team_id),
-                fetch_last_5_form(fixture.away_team_id),
-                return_exceptions=True
-            )
-
-            home_form = home_form_raw if isinstance(home_form_raw, list) else []
-            away_form = away_form_raw if isinstance(away_form_raw, list) else []
+            home_form = form_map.get(fixture.home_team_id, [])
+            away_form = form_map.get(fixture.away_team_id, [])
 
             home_form_status = _compute_form_status(home_form)
             away_form_status = _compute_form_status(away_form)

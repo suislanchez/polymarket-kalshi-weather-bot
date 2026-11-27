@@ -7,6 +7,9 @@ from typing import List, Optional
 import asyncio
 import json
 import os
+import logging
+
+logger = logging.getLogger("football_bot")
 
 from backend.config import settings
 from backend.models.database import (
@@ -14,6 +17,7 @@ from backend.models.database import (
     Signal, Trade, BotState, AILog, ScanLog
 )
 from backend.core.signals import scan_for_signals, TradingSignal
+from backend.core.football_signals import assemble_fixtures, FootballFixtureResponse
 from backend.data.btc_markets import fetch_active_btc_markets, BtcMarket
 from backend.data.crypto import fetch_crypto_price, compute_btc_microstructure
 
@@ -207,6 +211,45 @@ class WeatherMarketWithForecast(WeatherMarketResponse):
     pred_std: Optional[float] = None
 
 
+class H2HMeetingResponse(BaseModel):
+    date: str
+    home: str
+    away: str
+    score: str
+
+
+class FormMatchResponse(BaseModel):
+    date: str
+    opponent: str
+    score: str
+    both_scored: bool
+
+
+class KalshiMarketInfoResponse(BaseModel):
+    ticker: str
+    over_price: float
+    under_price: float
+    title: str
+
+
+class FootballFixtureResponse(BaseModel):
+    id: str
+    date: str
+    home_team: str
+    away_team: str
+    home_avg_gf: float
+    away_avg_gf: float
+    h2h_count: int
+    h2h_total_avg: float
+    h2h_meetings: List[H2HMeetingResponse]
+    home_form: List[FormMatchResponse]
+    away_form: List[FormMatchResponse]
+    home_form_status: str
+    away_form_status: str
+    kalshi: Optional[KalshiMarketInfoResponse] = None
+    bet_signal: bool
+
+
 class DashboardData(BaseModel):
     stats: BotStats
     btc_price: Optional[BtcPriceResponse]
@@ -219,6 +262,7 @@ class DashboardData(BaseModel):
     weather_signals: List[WeatherSignalResponse] = []
     weather_forecasts: List[WeatherForecastResponse] = []
     weather_markets: List[WeatherMarketWithForecast] = []
+    football_fixtures: List[FootballFixtureResponse] = []
 
 
 class EventResponse(BaseModel):
@@ -796,6 +840,18 @@ def _weather_signal_to_response(s) -> WeatherSignalResponse:
     )
 
 
+# Football endpoints
+@app.get("/api/football/fixtures", response_model=List[FootballFixtureResponse])
+async def get_football_fixtures():
+    """Get EPL fixtures with team stats, H2H, form, and Kalshi over/under prices."""
+    try:
+        fixtures = await assemble_fixtures()
+        return fixtures
+    except Exception as e:
+        logger.warning(f"Error fetching football fixtures: {e}")
+        return []
+
+
 @app.get("/api/events", response_model=List[EventResponse])
 async def get_events(limit: int = 50):
     from backend.core.scheduler import get_recent_events
@@ -1082,6 +1138,7 @@ async def get_dashboard(db: Session = Depends(get_db)):
         weather_signals=weather_signals_data,
         weather_forecasts=weather_forecasts_data,
         weather_markets=weather_markets_data,
+        football_fixtures=[],
     )
 
 
